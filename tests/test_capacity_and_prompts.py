@@ -17,6 +17,19 @@ def test_param_counts_match_the_model_card():
     assert 2.9 < m.active_params / 1e9 < 3.4, m.active_params / 1e9
 
 
+def test_235b_spec_matches_its_model_card():
+    """Verified against the published config.json on 2026-08-29.
+
+    The 8xH100 capacity projection depends on this architecture, so a silent
+    drift here would produce confident, wrong sizing for Phase 2.
+    """
+    from autoinf.flops import QWEN3_235B_A22B as m
+    assert (m.hidden_size, m.n_layers, m.n_heads, m.n_kv_heads) == (4096, 94, 64, 4)
+    assert (m.moe_intermediate, m.n_experts, m.n_experts_active) == (1536, 128, 8)
+    assert abs(m.total_params / 1e9 - 235) < 2, m.total_params / 1e9
+    assert abs(m.active_params / 1e9 - 22) < 1.5, m.active_params / 1e9
+
+
 def test_moe_touches_nearly_all_experts_at_batch():
     """The key MoE fact: decode reads total params, not active params."""
     m = QWEN3_30B_A3B
