@@ -47,6 +47,7 @@ image = (
         "hf-transfer>=0.1.6",
         "huggingface-hub>=0.26",
         "anthropic>=0.40",          # drives the virtual-user simulator
+        "uvloop>=0.19",             # 2-4x faster event loop for the client
     )
     .env({
         "HF_HOME": "/cache/huggingface",
@@ -97,7 +98,8 @@ def _provenance() -> dict:
     secrets=[modal.Secret.from_name("huggingface")],
 )
 def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
-          warmup_n: int = 20, canaries: bool = True) -> dict:
+          warmup_n: int = 20, canaries: bool = True,
+          stop_below_slo: float | None = None) -> dict:
     """Launch one server, run many workloads against it.
 
     The server is started once and reused across every workload in the list.
@@ -105,9 +107,18 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
     workload would spend most of the budget on loading rather than measuring.
     Anything that must vary per server launch (a ServingConfig field, an
     overlay) needs a separate call; anything that is just traffic shape does not.
+
+    `stop_below_slo` aborts the remaining workloads once SLO compliance falls
+    below that fraction. For an escalating sequence this matters: past the knee
+    every further level offers more load than the server can drain, so the queue
+    grows without bound and the run spends GPU time producing no information.
+    The first collapsed level is the answer; the rest is just an expensive way
+    to confirm it.
     """
-    from autoinf import overlay
-    from autoinf.bench import complete, run_trace, wait_until_ready, warmup
+    from autoinf import overlay, server_metrics
+    from autoinf.bench import complete, wait_until_ready, warmup
+    from autoinf.loadgen import (client_health, install_fast_loop, plan,
+                                 run_trace_sp)
     from autoinf.canary import CANARIES, digest as cdigest
     from autoinf.config import SLO, ServingConfig, WorkloadConfig
     from autoinf.metrics import summarize
@@ -178,27 +189,61 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
                     "digests": {k: cdigest(v) for k, v in outs.items()},
                 }
 
+            record["event_loop"] = install_fast_loop()
+
             for wc in wcs:
                 trace = build_trace(wc)
+                pl = plan(trace)
                 print(f"-- workload {wc.name}: {len(trace.requests)} reqs, "
-                      f"{trace.duration_s:.0f}s", flush=True)
+                      f"{trace.duration_s:.0f}s, est peak concurrency "
+                      f"{pl['estimated_peak_concurrency']}", flush=True)
+
+                # Server-side histograms are cumulative counters, so bracket
+                # each workload to get its own slice.
+                before = asyncio.run(server_metrics.scrape(SERVER_URL))
                 t0 = time.perf_counter()
-                results = asyncio.run(run_trace(trace, SERVER_URL, sc.model))
+                results = asyncio.run(run_trace_sp(trace, SERVER_URL, sc.model))
+                wall = round(time.perf_counter() - t0, 1)
+                after = asyncio.run(server_metrics.scrape(SERVER_URL))
+
                 m = summarize(results, sl)
+                srv = server_metrics.diff(before, after) if (before and after) else {}
+                health = client_health(results, pl)
                 record["runs"].append({
                     "workload": asdict(wc),
                     "workload_digest": wc.digest(),
                     "trace_digest": trace.digest(),
                     "trace_describe": trace.describe(),
-                    "bench_wall_s": round(time.perf_counter() - t0, 1),
+                    "bench_wall_s": wall,
                     "metrics": m,
+                    "server_metrics": srv,
+                    "client_health": health,
+                    "client_vs_server": server_metrics.compare_client_server(
+                        m.get("ttft_ms") or {}, srv),
                     "per_request": [asdict(r) for r in results],
                 })
+                if stop_below_slo is not None and m["good_frac"] < stop_below_slo:
+                    record["stopped_early"] = {
+                        "after_workload": wc.name,
+                        "good_frac": round(m["good_frac"], 3),
+                        "threshold": stop_below_slo,
+                        "reason": ("SLO compliance collapsed; further levels only "
+                                   "grow the queue and cost GPU time without "
+                                   "adding information"),
+                    }
+                    print(f"   STOP: good_frac {m['good_frac']:.2f} < "
+                          f"{stop_below_slo}", flush=True)
+
+                sv = (srv.get("sglang:time_to_first_token_seconds") or {}).get("p99")
+                qt = (srv.get("sglang:queue_time_seconds") or {}).get("p99")
                 print(f"   goodput {m['goodput_rps']:.2f} rps | "
-                      f"p99 TTFT {(m['ttft_ms'] or {}).get('p99')} | "
-                      f"failed {m['n_failed']} | "
-                      f"client lag p99 {(m['client_dispatch_lag_ms'] or {}).get('p99')}",
+                      f"TTFT p99 client {(m['ttft_ms'] or {}).get('p99', 0):.0f}ms"
+                      + (f" server {sv*1000:.0f}ms" if sv else "")
+                      + (f" | queue p99 {qt*1000:.0f}ms" if qt else "")
+                      + f" | failed {m['n_failed']} | client {health['verdict'].split(' ')[0]}",
                       flush=True)
+                if record.get("stopped_early"):
+                    break
 
             record["status"] = "ok"
 
@@ -466,70 +511,63 @@ def saturate(lo: float = 5.0, hi: float = 160.0, duration: float = 300.0):
 
 @app.local_entrypoint()
 def staircase(peak_fraction: float = 1.0, step_pct: float = 5.0,
-              step_s: float = 60.0, seed: int = 0):
-    """Step to a fraction of theoretical capacity in 5% increments.
+              step_s: float = 60.0, seed: int = 0, stop_below: float = 0.5):
+    """Step to a fraction of theoretical capacity in `step_pct` increments.
 
-    Each level is held 60s -- long enough to reach steady state -- so the level
-    at which the system breaks is read off a plateau rather than inferred from
-    a moving ramp. The peak is `peak_fraction` of the roofline from
-    docs/capacity.md, so levels are fractions of theoretical capacity and mean
-    the same thing on different hardware.
+    Each level is an independent 60s workload -- long enough to reach steady
+    state -- so the break point is read off a plateau rather than inferred from
+    a moving ramp, and each level carries its own server metrics and client
+    health verdict.
+
+    The sequence stops once SLO compliance falls below `stop_below`. Past the
+    knee every further level offers more than the server can drain, so the
+    queue grows without bound and the run burns GPU time confirming what the
+    first collapsed level already said.
     """
     from autoinf.config import SLO, ServingConfig
-    from autoinf.workload import roofline_rps, staircase as mk
+    from autoinf.workload import roofline_rps, staircase_levels
 
-    wc = mk(seed=seed, peak_fraction=peak_fraction, step_pct=step_pct, step_s=step_s)
+    levels = staircase_levels(seed=seed, peak_fraction=peak_fraction,
+                              step_pct=step_pct, step_s=step_s)
     roof = roofline_rps()
-    print(f"roofline {roof:.1f} rps | peak {wc.request_rate:.1f} rps "
-          f"({peak_fraction:.0%}) | {len(wc.stair_levels())} levels x {step_s:.0f}s "
-          f"= {wc.stair_duration()/60:.0f} min")
+    print(f"roofline {roof:.1f} rps | peak {roof * peak_fraction:.1f} rps "
+          f"({peak_fraction:.0%}) | {len(levels)} levels x {step_s:.0f}s | "
+          f"stop below {stop_below:.0%} SLO")
 
-    rec = bench.remote(asdict(ServingConfig()), [asdict(wc)], asdict(SLO()),
-                       note=f"staircase-{peak_fraction:.2f}", canaries=False)
+    rec = bench.remote(asdict(ServingConfig()), [asdict(w) for w in levels],
+                       asdict(SLO()), note=f"staircase-{peak_fraction:.2f}",
+                       canaries=False, stop_below_slo=stop_below)
     print(json.dumps({k: rec.get(k) for k in
                       ("status", "model_load_s", "total_wall_s", "result_path",
-                       "failure")}, indent=2, default=str))
+                       "failure", "stopped_early")}, indent=2, default=str))
     if not rec.get("runs"):
         return
 
-    run = rec["runs"][0]
-    slo = rec["slo"]
-    per = run["per_request"]
-
-    print(f"\n{'level':>7}{'target':>9}{'offered':>9}{'done':>7}{'met SLO':>9}"
-          f"{'p50 TTFT':>10}{'p99 TTFT':>10}{'p99 TPOT':>10}")
+    print(f"\n{'level':>7}{'rps':>8}{'done':>7}{'met SLO':>9}{'TTFT p99':>10}"
+          f"{'srv TTFT':>10}{'queue p99':>11}{'client':>9}")
     print("-" * 71)
-    knee = None
-    for i, pct in enumerate(wc.stair_levels()):
-        lo, hi = i * step_s, (i + 1) * step_s
-        rs = [r for r in per if lo <= r["scheduled_s"] < hi]
-        if not rs:
-            continue
-        ttfts, tpots, met = [], [], 0
-        for r in rs:
-            if not r["ok"] or r["first_token_s"] is None:
-                continue
-            t = (r["first_token_s"] - r["dispatched_s"]) * 1000
-            ttfts.append(t)
-            pt = None
-            if r["end_s"] is not None and r["output_tokens"] > 1:
-                pt = (r["end_s"] - r["first_token_s"]) * 1000 / (r["output_tokens"] - 1)
-                tpots.append(pt)
-            if t <= slo["ttft_ms"] and (pt is None or pt <= slo["tpot_ms"]):
-                met += 1
-        q = lambda xs, p: sorted(xs)[min(len(xs) - 1, int(len(xs) * p))] if xs else 0
-        frac = met / len(rs)
-        if knee is None and frac < 0.99:
-            knee = pct
-        print(f"{pct:>6.0f}%{wc.request_rate * pct / 100:>9.1f}{len(rs) / step_s:>9.1f}"
-              f"{len(ttfts):>7}{frac * 100:>8.0f}%"
-              f"{q(ttfts, 0.5):>10.0f}{q(ttfts, 0.99):>10.0f}{q(tpots, 0.99):>10.1f}")
+    for r in rec["runs"]:
+        m, srv = r["metrics"], r.get("server_metrics", {})
+        sv = (srv.get("sglang:time_to_first_token_seconds") or {}).get("p99")
+        qt = (srv.get("sglang:queue_time_seconds") or {}).get("p99")
+        print(f"{r['workload']['name']:>7}{r['workload']['request_rate']:>8.1f}"
+              f"{m['n_ok']:>7}{m['good_frac'] * 100:>8.0f}%"
+              f"{(m['ttft_ms'] or {}).get('p99', 0):>10.0f}"
+              f"{(sv * 1000 if sv else 0):>10.0f}{(qt * 1000 if qt else 0):>11.0f}"
+              f"{r['client_health']['verdict'].split(' ')[0]:>9}")
 
-    if knee is not None:
-        print(f"\nBreaks at {knee:.0f}% of roofline "
-              f"({wc.request_rate * knee / 100:.1f} rps).")
+    broke = [r for r in rec["runs"] if r["metrics"]["good_frac"] < 0.99]
+    if broke:
+        b = broke[0]
+        pct = int(b["workload"]["name"][1:4])
+        print(f"\nBreaks at {pct}% of roofline "
+              f"({b['workload']['request_rate']:.1f} rps). "
+              f"Measured max throughput was 34.3 rps = {34.3 / roof:.0%} of roofline.")
     else:
-        print("\nNever broke — raise peak_fraction above 1.0.")
+        print("\nNever broke — raise --peak-fraction above 1.0.")
+    print("\n'srv TTFT' is SGLang's own histogram, measured from request arrival\n"
+          "inside the inference system: no network, no client overhead, no prompt\n"
+          "generation. 'queue p99' separates waiting from computing.")
 
 
 @app.function(

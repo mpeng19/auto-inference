@@ -445,3 +445,27 @@ def mixed_trace(seed: int = 0, scale: float = 1.0) -> Trace:
     parts = [build_trace(s[k]) for k in
              ("sustained", "prefill_heavy", "decode_heavy", "prefix_heavy")]
     return merge_traces(parts, name="mixed")
+
+
+def staircase_levels(seed: int = 0, peak_fraction: float = 1.0,
+                     step_pct: float = 5.0, step_s: float = 60.0,
+                     start_pct: float = 5.0) -> list[WorkloadConfig]:
+    """The staircase as one workload per plateau.
+
+    Each level is an independent Poisson workload at a fixed rate. Splitting it
+    this way means every plateau gets its own server-metrics slice and its own
+    client-health verdict, and the sequence can be cut short the moment the
+    system breaks -- which a single pre-built trace cannot do.
+    """
+    peak = roofline_rps() * peak_fraction
+    out, pct = [], start_pct
+    while pct <= 100.0 + 1e-9:
+        rate = peak * min(100.0, pct) / 100.0
+        out.append(WorkloadConfig(
+            name=f"L{int(pct):03d}pct", arrival="poisson", request_rate=rate,
+            duration_s=step_s, n_requests=None,
+            category_mix=_prompts.ALL_CATEGORIES,
+            prefix_share_frac=0.4, n_shared_prefixes=3, shared_prefix_len=180,
+            seed=seed + int(pct)))
+        pct += step_pct
+    return out

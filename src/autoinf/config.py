@@ -47,6 +47,13 @@ class ServingConfig:
     # ── caching ──────────────────────────────────────────────────
     enable_prefix_caching: bool = True
 
+    # ── observability ────────────────────────────────────────────
+    # Server-side histograms (TTFT, ITL, queue time, cache hit rate). These are
+    # measured from request arrival inside the inference system, so they are
+    # independent of where load is generated -- which is what makes an
+    # agent-driven client on another machine comparable to the in-container one.
+    enable_metrics: bool = True
+
     # ── misc ─────────────────────────────────────────────────────
     context_length: int | None = None
     extra_args: tuple[str, ...] = ()
@@ -71,6 +78,8 @@ class ServingConfig:
             a += ["--context-length", str(self.context_length)]
         if not self.enable_prefix_caching:
             a += ["--disable-radix-cache"]
+        if self.enable_metrics:
+            a += ["--enable-metrics"]
         a += list(self.extra_args)
         return a
 
