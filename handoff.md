@@ -187,6 +187,40 @@ through Resend.
 
 ## Session log
 
+### 2026-08-29 — full suite green, and calibrated far too low
+
+All 9 workloads ran against one server launch in 13 minutes (209s load, then
+every workload). Zero failures anywhere, client dispatch lag p99 ~2ms
+throughout, so the load generator was never the constraint.
+
+    workload         goodput   thruput   p99 TTFT  p99 TPOT  failed
+    sustained           3.87      3.87         64       9.1       0
+    constant            3.72      3.72         37       8.4       0
+    bursty              3.63      3.63         49      11.8       0
+    ramp               16.40     16.40         84      20.0       0
+    spike               7.71      7.71         63      23.4       0
+    prefill_heavy       1.34      1.34         87       7.7       0
+    decode_heavy        1.43      1.43         30       9.4       0
+    prefix_heavy        5.64      5.64         87       9.6       0
+    short_chat         23.15     23.15         28      11.1       0
+
+**Goodput equals throughput in every row.** 100% of requests met both SLOs
+everywhere, including the ramp to 32 rps and short_chat at 23 rps, with p99
+TTFT peaking at 87ms against a 500ms target. The suite is measuring an idle
+server.
+
+A 30B MoE with 3.3B active params on an H100 is far more capable than the rates
+I picked assumed. **No scheduler or cache change can show up in a system that
+is not stressed**, so the suite rates have to be recalibrated against the real
+saturation point before any optimisation work means anything. `saturate` ramps
+5 -> 160 rps and buckets per-request results by arrival time to locate the knee;
+success there looks like *failure*, a region where goodput falls below
+throughput.
+
+Note also that `bursty` (3.63) came out slightly below `sustained` (3.87) at
+identical mean rate — the expected direction for burstiness, but far too small
+a gap to claim as a result at this load level.
+
 ### 2026-08-29 — prefix cache anomaly resolved
 
 `probe_prefix` separated the confounds. Three findings.

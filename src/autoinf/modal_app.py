@@ -393,3 +393,67 @@ def prefetch_big(model: str = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8") -> str:
     p = snapshot_download(model)
     hf_cache.commit()
     return p
+
+
+@app.local_entrypoint()
+def saturate(lo: float = 5.0, hi: float = 160.0, duration: float = 300.0):
+    """Find the saturation knee: ramp hard until the SLOs actually break.
+
+    The first suite run met both SLOs on 100% of requests in every workload,
+    including a ramp to 32 rps -- i.e. it measured an idle server. Optimisation
+    work is meaningless until we know where the system actually bends, because
+    a scheduler change cannot show up in a server that is not stressed.
+
+    This ramps well past the expected knee. Success looks like *failure*: a
+    region where goodput falls below throughput.
+    """
+    from autoinf.config import SLO, ServingConfig, WorkloadConfig
+    wc = WorkloadConfig(name="saturate", arrival="ramp", request_rate=lo,
+                        ramp_end_rate=hi, duration_s=duration, n_requests=None)
+    rec = bench.remote(asdict(ServingConfig()), [asdict(wc)], asdict(SLO()),
+                       note="saturate", canaries=False)
+    print(json.dumps({k: rec.get(k) for k in
+                      ("status", "model_load_s", "total_wall_s", "result_path",
+                       "failure")}, indent=2, default=str))
+    if not rec.get("runs"):
+        return
+    run = rec["runs"][0]
+    _print_table([run])
+
+    # Bucket per-request results by arrival time to locate where it bends.
+    # Aggregate numbers hide the knee; the whole point is the shape.
+    import collections
+    per = run["per_request"]
+    dur = run["trace_describe"]["duration_s"]
+    nb = 12
+    buckets = collections.defaultdict(list)
+    for r in per:
+        b = min(nb - 1, int(r["scheduled_s"] / dur * nb))
+        buckets[b].append(r)
+
+    slo = rec["slo"]
+    print(f"\n{'window':<14}{'offered':>9}{'ok':>7}{'met SLO':>9}"
+          f"{'p99 TTFT':>10}{'p99 TPOT':>10}")
+    print("-" * 59)
+    for b in range(nb):
+        rs = buckets.get(b, [])
+        if not rs:
+            continue
+        w = dur / nb
+        ttfts, tpots, met = [], [], 0
+        for r in rs:
+            if not r["ok"] or r["first_token_s"] is None:
+                continue
+            t = (r["first_token_s"] - r["dispatched_s"]) * 1000
+            ttfts.append(t)
+            p = None
+            if r["end_s"] is not None and r["output_tokens"] > 1:
+                p = (r["end_s"] - r["first_token_s"]) * 1000 / (r["output_tokens"] - 1)
+                tpots.append(p)
+            if t <= slo["ttft_ms"] and (p is None or p <= slo["tpot_ms"]):
+                met += 1
+        f = lambda xs: sorted(xs)[int(len(xs) * 0.99)] if xs else 0
+        print(f"{b * w:>5.0f}-{(b + 1) * w:<8.0f}{len(rs) / w:>9.1f}"
+              f"{len(ttfts):>7}{met / len(rs) * 100:>8.0f}%"
+              f"{f(ttfts):>10.0f}{f(tpots):>10.1f}")
+    print("\nThe knee is the first window where 'met SLO' drops below 100%.")
