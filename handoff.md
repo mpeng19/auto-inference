@@ -5,52 +5,83 @@ and **Open questions** rewritten to reflect current reality rather than history.
 
 ---
 
-## Status — 2026-08-29
+## Status — 2026-08-29 (overnight)
 
-**Phase 0 (substrate) complete. Secrets, spend alerting and the eval suite are
-done and verified. First H100 probe in flight.**
+**Phase 0 complete. The 1-GPU test case works, the measurement platform is
+validated, and the suite discriminates. Ready for the first optimisation
+experiment.**
 
-The harness runs end-to-end against a fake server and has a 10-pattern eval
-suite. It has not yet met SGLang.
+Total spend $6.52, entirely credit-covered ($0.00 billed).
+
+## The three numbers that matter
+
+| | |
+|---|---|
+| **Saturation knee** | 35.6 rps holds SLO, 49.1 rps drops to 24%. Max throughput 34.3 rps. |
+| **Noise floor** | goodput CV **0.0003**, p99 TTFT CV 0.040, over 5 separate launches |
+| **Canary floor** | 6/6 exact match — outputs bitwise reproducible |
+
+A 0.03% noise floor on goodput means effects below 1% are detectable. That is
+the single most important fact about this platform.
 
 ## Where things stand
 
 | Piece | State |
 |---|---|
-| Local env (`.venv`, 3.12.5, modal 1.5.5) | done, verified |
-| Modal auth (`mpeng19`) | done, `modal run` verified remotely |
-| Config / search space (`config.py`) | done |
-| Trace generator (`workload.py`) | done, tested |
-| Metrics + goodput (`metrics.py`) | done, tested |
-| Load generator (`bench.py`) | done, tested against a fake SSE server |
-| Eval suite (9 patterns + mixed) | done, tested |
-| Modal app (`modal_app.py`) | **first end-to-end run green** |
-| H100 probe (`probe.py`) | both stages **PASS** |
-| Source overlays (`overlay.py`) | built; `schedule_policy.py` vendored |
-| Correctness gating | canaries built, **floor measured: 6/6 exact** |
-| Results tooling | `scripts/results.py` — ls / show / compare / pull |
-| 1-GPU workflow | `smoke`, `suite`, `noise` entrypoints |
-| 8xH100 path | `suite_8x`, `prefetch_big` — written, never run |
-| Spend monitor (`spend_monitor.py`) | done, **email delivery verified**; not deployed |
-| Secrets (HF, Resend, Modal token) | done, both keys verified live |
-| Weights in a Volume | not started |
-| Baseline / noise floor | **done — goodput CV 0.0003** |
+| Local env, secrets, spend monitor | done; monitor deployed on daily cron |
+| Eval suite (9 patterns + mixed) | done, **calibrated against the measured knee** |
+| Load generator | open-loop, client lag ~2ms at 16 CPUs |
+| `bench()` 1-GPU path | green: `smoke`, `suite`, `noise`, `saturate` |
+| Source overlays | working in production, drift-protected |
+| Correctness canaries | built, floor measured |
+| Results tooling | `ls` / `show` / `compare` / `pull` |
+| 8xH100 path | written, **never run** |
 
-`uv run pytest -q` → **29 passed**.
+`uv run pytest -q` -> **29 passed**.
+
+## Baseline (1xH100, Qwen3-30B-A3B-FP8, stock SGLang 0.5.18)
+
+    workload         goodput   thruput   p99 TTFT  p99 TPOT
+    sustained          26.13     26.13         68      24.0
+    constant           26.57     26.57         74      25.9
+    bursty             25.45     27.11       1233      46.1
+    ramp               13.25     31.43      11847      29.1
+    spike               8.79     30.17      19804      71.0
+    prefill_heavy       1.80      1.80         89       7.8
+    decode_heavy        5.42      5.42         41      14.0
+    prefix_heavy       19.11     19.11        185      22.9
+    short_chat         76.17     76.17         45      25.2
 
 ## Next
 
-1. **Set the Modal workspace budget** ($100) — still not done, still the only
-   hard stop that exists. `SETUP.md` §2.
-2. Deploy the spend monitor: `uv run modal deploy scripts/spend_monitor.py`.
-3. Read `probe_env` output; fix any SGLang flags reported MISSING.
-4. Run `probe_serve` — settles ignore_eos, streamed usage, prefix-cache benefit.
-5. `prefetch` weights, then one smoke run.
-6. **Noise floor**: identical baseline 5x, report σ of p99 TTFT and goodput.
-   Go/no-go gate — if σ exceeds the effect size we care about, no amount of
-   searching produces a trustworthy result. Also the direct test of whether
-   Modal hands us consistent hardware.
-7. Only then start turning knobs.
+1. **First optimisation experiment: `spike` recovery.** Ten seconds of 4x
+   overload costs 71% of all requests their SLO across a 90s trace, and the
+   server never recovers. Mechanism is plausible and specific — unbounded
+   prefill queueing with no admission control. Both relevant files
+   (`schedule_policy.py`, `radix_cache.py`) are already vendored. Largest
+   effect on the board with the clearest hypothesis.
+2. **Make launch-time knobs runtime-tunable via an overlay.** `schedule_policy`,
+   `max_running_requests` and `chunked_prefill_size` are launch-time only in
+   stock SGLang, so every config costs a fresh model load (90-505s, wildly
+   variable). Exposing them at runtime collapses a whole sweep into one load.
+   Highest-leverage infrastructure work before any large sweep.
+3. **The full-cache-hit penalty**, ~40ms of avoidable fixed cost on every
+   fully-cached request. Smaller than (1) but very well characterised.
+4. 8xH100 + 235B: `prefetch_big` then `suite_8x`. **Re-derive the rates first**
+   — the current ones are calibrated for 1xH100 and mean nothing at that scale.
+
+## Open, non-blocking
+
+- Legacy `2023.12` image builder. Upgrading forces rebuilds and would
+  invalidate comparisons across the change, so decide before, not after, a
+  baseline anyone depends on. The current baseline is on the legacy builder.
+- Starter caps GPU concurrency at 10; an 8xH100 run consumes 8, so no parallel
+  sweeps at that size.
+- Canary floor was measured on an idle server before each workload, where batch
+  composition is trivially identical. Re-validate once an overlay actually
+  changes scheduling.
+- Model load varies 90-505s for identical weights (Volume read throughput).
+  Harmless to measurements, but makes sweep duration unpredictable.
 
 ## Decisions
 
