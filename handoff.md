@@ -167,15 +167,10 @@ through Resend.
 6. ~~Is `stream_options.include_usage` supported?~~ **Answered: yes**, and
    deltas != tokens (62 vs 64), so counting deltas would have biased TPOT ~3%
    on every request. `bench.py` uses `usage`, which was the right call.
-9. **Why is a warm prefix cache SLOWER?** Reproducible at CV ~1%: cold TTFT
-   36.2ms, warm 105.9ms over 6 flush-separated trials. And an 11-token prompt
-   takes 100ms to first token while a 1213-token prompt cold-prefills in 36ms
-   — 110x more prefill work, faster. TTFT at low load is evidently dominated
-   by fixed scheduling overhead, not compute; the likely story is that a
-   request with no prefill work waits for a scheduler tick while one with real
-   work is picked up immediately. **`prefix_heavy` results mean nothing until
-   this is understood.** First diagnostic now that overlays exist: instrument
-   `schedule_policy.py` directly.
+9. ~~Why is a warm prefix cache SLOWER?~~ **Answered — and the cache is fine.**
+   See the session log below. Short version: a *full* cache hit is slower than
+   a cold prefill, but a *partial* prefix match is much faster, and
+   `prefix_heavy` generates partial matches. It is trustworthy.
 10. **Correctness gating does not exist yet.** Overlays make the serving code
     editable, which means it is now possible to "win" by breaking correctness —
     truncating outputs, dropping requests, altering sampling. Output-equivalence
@@ -191,6 +186,49 @@ through Resend.
    `client_dispatch_lag_ms` on the first real run.
 
 ## Session log
+
+### 2026-08-29 — prefix cache anomaly resolved
+
+`probe_prefix` separated the confounds. Three findings.
+
+**1. TTFT scales with prefill work.** Distinct prompts, nothing cached:
+
+    tokens    10    100    500   1000   2000   4000
+    TTFT ms 18.0   21.1   44.0   73.2  181.6  479.1
+
+So TTFT is ~18ms of fixed overhead plus real compute. My earlier guess that it
+was overhead-dominated was wrong.
+
+**2. A FULL cache hit is ~1.57x SLOWER than a cold prefill.** Reproduced three
+ways on a 1000-token prompt, all at CV ~1-2%:
+
+    cold prefill (first request)        73-74 ms
+    same prompt repeated, no flush     114.7 ms
+    first request after /flush_cache    73.6 ms
+    second request after flush         116.9 ms
+
+The flush is irrelevant — the effect reproduces with no flush anywhere. What
+matters is whether the request has prefill work to do. The likely mechanism:
+with a 100% prefix match there is nothing to prefill, so the request takes a
+different scheduling path and waits for a batch tick, costing ~40ms.
+
+**3. A PARTIAL prefix match works exactly as advertised**, 1.76x faster:
+
+    700 tokens sharing a 500-token head    29.8 ms
+    700 tokens fully unique                52.5 ms
+
+**Why the earlier measurement looked backwards.** `probe_serve`'s idle test
+sent `"Say hi."` twenty times — the *same* prompt — so every request after the
+first was a full cache hit, landing on the slow path at 100.3ms. The "cold"
+prefix measurement used a distinct 1213-token prompt and got 36.2ms. Not a
+contradiction once full-hits are known to be slow; the two tests were measuring
+different regimes and I had read them as one.
+
+**Consequences.** `prefix_heavy` generates a 1024-token shared prefix plus a
+~315-token unique body — a partial match, the regime where the cache helps. It
+is trustworthy as written. And the full-hit penalty is itself a concrete
+optimisation target: ~40ms of avoidable fixed cost on every fully-cached
+request, which is a strong candidate for the first real overlay experiment.
 
 ### 2026-08-29 — first real bench run
 
