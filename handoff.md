@@ -27,14 +27,14 @@ suite. It has not yet met SGLang.
 | Modal app (`modal_app.py`) | **first end-to-end run green** |
 | H100 probe (`probe.py`) | both stages **PASS** |
 | Source overlays (`overlay.py`) | built; `schedule_policy.py` vendored |
-| Correctness gating | canaries built; **floor not yet measured** |
+| Correctness gating | canaries built, **floor measured: 6/6 exact** |
 | Results tooling | `scripts/results.py` — ls / show / compare / pull |
 | 1-GPU workflow | `smoke`, `suite`, `noise` entrypoints |
 | 8xH100 path | `suite_8x`, `prefetch_big` — written, never run |
 | Spend monitor (`spend_monitor.py`) | done, **email delivery verified**; not deployed |
 | Secrets (HF, Resend, Modal token) | done, both keys verified live |
 | Weights in a Volume | not started |
-| Baseline / noise floor | suite + prefix diagnostic running |
+| Baseline / noise floor | **done — goodput CV 0.0003** |
 
 `uv run pytest -q` → **29 passed**.
 
@@ -159,9 +159,9 @@ through Resend.
    torch 2.13.0+cu130, flash-attn-4, flashinfer 0.6.17.
 2. ~~Are the SGLang flag names right?~~ **Answered: all 12 present.**
 3. ~~Is `ignore_eos` honoured?~~ **Answered: yes.** Asked 64, got 64.
-4. ~~Does Modal give consistent hardware?~~ **Answered: yes, tightly.**
-   Idle TTFT CV 0.022, total CV 0.009 over n=20. A 10% effect is detectable.
-   This is the idle floor; under load it will be worse.
+4. ~~Does Modal give consistent hardware?~~ **Answered: yes, remarkably.**
+   Under real load across 5 separate server launches, goodput CV is **0.0003**
+   and p99 TTFT CV is 0.0399. Effects below 1% are detectable.
 5. **Starter's GPU concurrency limit of 10** means one 8×H100 run at a time and
    no parallel sweeps. Fine for Phase 0/1; a Phase-2 blocker.
 6. ~~Is `stream_options.include_usage` supported?~~ **Answered: yes**, and
@@ -171,7 +171,9 @@ through Resend.
    See the session log below. Short version: a *full* cache hit is slower than
    a cold prefill, but a *partial* prefix match is much faster, and
    `prefix_heavy` generates partial matches. It is trustworthy.
-10. **Correctness gating does not exist yet.** Overlays make the serving code
+10. ~~Correctness gating does not exist.~~ **Built, and the floor is 6/6
+    exact.** See below — outputs are bitwise reproducible, so the gate is
+    sharper than expected. Original concern retained for context: Overlays make the serving code
     editable, which means it is now possible to "win" by breaking correctness —
     truncating outputs, dropping requests, altering sampling. Output-equivalence
     checks at temp=0 against a stock baseline must land before any overlay is
@@ -186,6 +188,36 @@ through Resend.
    `client_dispatch_lag_ms` on the first real run.
 
 ## Session log
+
+### 2026-08-29 — noise floor: 0.03% on goodput
+
+Five separate server launches, same config, same trace — fresh container and
+allocator each time, possibly different physical hosts:
+
+    goodput_rps   median 26.073  min 26.068  max 26.085  CV 0.0003
+    p99_ttft_ms   median 63.475  min 60.234  max 68.042  CV 0.0399
+
+**Goodput CV is 0.03%.** The whole spread is 0.017 rps out of 26. Effects below
+1% are detectable, which is far better than the 10% I assumed when planning.
+p99 TTFT is looser at 4% CV, so tail-latency claims need roughly a 10% effect.
+
+This retires the biggest existential risk. It also retroactively validates two
+results that looked too small to trust: `bursty` vs `sustained` at -2.6% is
+**~80x the noise floor**, and `sustained` vs `constant` at -1.7% is ~50x. Both
+are real effects, not measurement drift.
+
+**Canary floor: 6/6 exact match.** Outputs are bitwise identical across runs of
+the same config, so the batching non-determinism I expected did not materialise
+here. The correctness gate is therefore sharper than designed for: *any*
+divergence is signal, not noise. One caveat — canaries run on an idle server
+before the workload, so batch composition is trivially identical between runs.
+Divergence may still appear for requests measured under load, and the gate
+should be re-validated once an overlay actually changes scheduling.
+
+Also observed: model load times of 90, 93, 209, 225, 247, 253, 349 and 505
+seconds for the same weights. A 5.6x spread in Volume read throughput. It does
+not affect measurements (the server is warm before anything is recorded) but it
+makes sweep duration hard to predict.
 
 ### 2026-08-29 — recalibrated suite: it finally discriminates
 
