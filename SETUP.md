@@ -67,41 +67,42 @@ Secret `huggingface` holds `HF_TOKEN`; verified valid. Not needed for the
 current ungated models, but available. To use it, uncomment the `secrets=[...]`
 line in `src/autoinf/modal_app.py`.
 
-## 5. The 1-GPU test case
+## 5. Running things
 
-This is the day-to-day loop. One H100 ($3.95/hr), the 30B FP8 model, weights
-already cached in a Volume.
+Everything is a `make` target. All run on one H100 unless stated.
 
 ```bash
-# Smallest end-to-end run: 60 requests, ~10 min, ~$0.70
-uv run modal run src/autoinf/modal_app.py::smoke
-
-# Full eval suite -- all 9 workloads against ONE server launch
-uv run modal run src/autoinf/modal_app.py::suite
-
-# Shorter/longer: scale multiplies request counts
-uv run modal run src/autoinf/modal_app.py::suite --scale 0.3
-
-# Noise floor: same config, N separate server launches
-uv run modal run src/autoinf/modal_app.py::noise --repeats 5
+make test        # 57 local tests, no GPU
+make suite       # eval suite, ~10 min of traces (+4 min model load)
+make suite30     # 30 min of traces -- the consistency run
+make staircase   # step to 100% of roofline, stop when SLO collapses
+make noise       # same config 5x: the noise floor
+make realism     # LLM-driven virtual users (multi-turn, abandonment)
+make results     # list stored runs
+make ledger      # research-loop health
+make spend       # current Modal spend
 ```
 
-The suite runs every workload against a **single** server launch. Model load is
-~350s cold and dominates a short trace, so launching per workload would spend
-most of the budget loading rather than measuring. Anything that varies per
-launch (a `ServingConfig` field, an overlay) needs a separate call; traffic
-shape does not.
+Every `suite` run appends to `runs/ledger.jsonl` and prints a health verdict.
+
+### Consistency
+
+`make noise` measures run-to-run variance: five separate server launches of an
+identical config. Last measured **goodput CV 0.0003, p99 TTFT CV 0.040** — so
+effects below 1% are detectable. Re-run this after any change to hardware,
+model, engine version or the client, because every comparison downstream is
+only as trustworthy as that number.
+
+Each workload also carries a `client_health` verdict. A run marked `SUSPECT`
+means the load generator could not keep up and its server metrics are not
+evidence — discard it rather than interpreting it.
 
 ### Reading results
-
-Every run is written to the `auto-inference-results` Volume as self-describing
-JSON -- config, trace digest, overlay digest, provenance, per-request records.
 
 ```bash
 uv run modal run scripts/results.py::ls
 uv run modal run scripts/results.py::show --name <file>
 uv run modal run scripts/results.py::compare --a <file> --b <file>
-uv run modal run scripts/results.py::pull      # copy them all locally
 ```
 
 `compare` refuses to treat two runs as comparable unless their **trace digests
@@ -136,21 +137,50 @@ deterministic across batch compositions, so some divergence is normal. A config
 that diverges materially more than that floor is suspect, and its goodput gain
 should not be believed.
 
-## 7. Scaling to 8xH100 (Phase 2)
+## 7. Scaling to 8xH100 (Phase 2, not yet run)
 
 ```bash
-# One-time: pull the 235B weights (~235GB, ~$21/mo to keep parked)
+# One-time: pull the 235B weights. CPU-only -- this needs no GPU, and running
+# it on 8xH100 would cost $31.60/hr for a network transfer.
 uv run modal run src/autoinf/modal_app.py::prefetch_big
 
 # Full suite, 8xH100, TP=8 EP=8 -- ~$31.60/hr
 uv run modal run src/autoinf/modal_app.py::suite_8x
 ```
 
-Consumes 8 of the Starter plan's 10 GPU concurrency, so nothing else can run
-alongside it. Pin `--region` once a baseline exists so later comparisons are
-like-for-like.
+`Qwen3-235B-A22B-Instruct-2507-FP8` is **236.4 GB across 24 shards**, about
+**$20/month** to keep on a Modal Volume. Delete it when not in active use.
 
-## 8. GPU probes -- already run, re-run after any SGLang upgrade
+Consumes 8 of the Starter plan's 10 GPU concurrency, so nothing runs alongside
+it. Pin `--region` once a baseline exists so later comparisons are like-for-like.
+
+**Re-derive the suite rates before trusting any 8-GPU number.** The current
+ones are calibrated to the 1xH100 knee and mean nothing at that scale; run
+`staircase` first.
+
+## 8. Research-loop monitoring
+
+```bash
+make ledger
+```
+
+`runs/ledger.jsonl` is append-only: one line per experiment, with the config,
+overlay digest, result, and attributed cost. The report scores the **search**
+rather than the result, and flags:
+
+| flag | meaning |
+|---|---|
+| `CIRCLING` | recent experiments are near-repeats of earlier ones |
+| `NARROW` | attention concentrated on one knob; the rest of the space untouched |
+| `PLATEAU` | no new best for N experiments |
+| `INTEGRITY` | goodput gained while canaries diverged or requests were dropped |
+| `EXPENSIVE` | dollars per 1% of improvement has gone up |
+
+`INTEGRITY` is the one that matters most. A search maximising goodput can "win"
+by dropping slow requests, and that looks identical to a real improvement from
+the outside.
+
+## 9. GPU probes -- already run, re-run after any SGLang upgrade
 
 ```bash
 uv run modal run src/autoinf/probe.py::probe_env     # image, hardware, flags
