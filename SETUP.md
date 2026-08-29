@@ -75,11 +75,11 @@ experiment. Cheap stage first:
 ```bash
 # ~2 min once the image is built, no weights downloaded. Checks the image
 # builds, what hardware we get, and whether all 12 SGLang flags we emit are real.
-PYTHONPATH=src uv run modal run src/autoinf/probe.py::probe_env
+uv run modal run src/autoinf/probe.py::probe_env
 
 # ~15 min including a 31GB download. Checks ignore_eos, streamed usage
 # accounting, and whether the prefix cache actually helps.
-PYTHONPATH=src uv run modal run src/autoinf/probe.py::probe_serve
+uv run modal run src/autoinf/probe.py::probe_serve
 ```
 
 Then the benchmark itself:

@@ -3,10 +3,10 @@
 Two stages, cheapest first.
 
     # ~2 min, no weights downloaded, ~$0.15
-    PYTHONPATH=src uv run modal run src/autoinf/probe.py::probe_env
+    uv run modal run src/autoinf/probe.py::probe_env
 
     # ~10-15 min including a 31GB download, ~$1
-    PYTHONPATH=src uv run modal run src/autoinf/probe.py::probe_serve
+    uv run modal run src/autoinf/probe.py::probe_serve
 
 `probe_env` settles the two questions that would invalidate every later
 experiment — does the image build, and are the SGLang flag names real. A flag

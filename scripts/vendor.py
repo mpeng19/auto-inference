@@ -1,7 +1,7 @@
 """Pull a stock SGLang module into overlays/ so it can be modified.
 
-    PYTHONPATH=src uv run modal run scripts/vendor.py --path srt/managers/schedule_policy.py
-    PYTHONPATH=src uv run modal run scripts/vendor.py::ls --pattern managers
+    uv run modal run scripts/vendor.py --path srt/managers/schedule_policy.py
+    uv run modal run scripts/vendor.py::ls --pattern managers
 
 Reads the file out of the built image (so it is exactly the code that will run,
 not whatever GitHub's main branch says today), writes it to
