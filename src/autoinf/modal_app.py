@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import subprocess
 import time
 from dataclasses import asdict
@@ -344,11 +345,14 @@ def smoke():
 
 
 @app.local_entrypoint()
-def suite(scale: float = 1.0, seed: int = 0):
-    """Full eval suite against one server launch -- the 1-GPU test case."""
+def suite(minutes: float = 10.0, scale: float = 1.0, seed: int = 0):
+    """Full eval suite against one server launch -- the 1-GPU test case.
+
+    `minutes` is trace wall time, not total runtime; add ~4 min for model load.
+    """
     from autoinf.config import SLO, ServingConfig
     from autoinf.workload import suite as wsuite
-    wl = [asdict(c) for c in wsuite(seed=seed, scale=scale).values()]
+    wl = [asdict(c) for c in wsuite(seed=seed, scale=scale, minutes=minutes).values()]
     rec = bench.remote(asdict(ServingConfig()), wl, asdict(SLO()), note="suite")
     print(json.dumps({k: rec.get(k) for k in
                       ("status", "model_load_s", "total_wall_s", "result_path",
@@ -433,16 +437,38 @@ def suite_8x(model: str = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
         _print_table(rec["runs"])
 
 
-@app.function(image=image, gpu="H100:8", cpu=16.0,
+# CPU only. Downloading weights needs no GPU, and this previously declared
+# gpu="H100:8" -- $31.60/hr to run a network transfer. At 16 CPUs it is
+# $0.76/hr, roughly 40x cheaper for identical work.
+@app.function(image=image, cpu=16.0, memory=32768,
               volumes={"/cache": hf_cache},
-              secrets=[modal.Secret.from_name("huggingface")], timeout=3 * 60 * 60)
-def prefetch_big(model: str = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8") -> str:
-    """Pull the 235B weights (~235GB) into the Volume. Storage is $0.09/GiB/mo,
-    so this costs ~$21/month to keep parked -- delete it when not in use."""
+              secrets=[modal.Secret.from_name("huggingface")], timeout=4 * 60 * 60)
+def prefetch_big(model: str = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8") -> dict:
+    """Pull weights into the Volume. 236.4 GB across 24 shards for the 235B.
+
+    Storage is $0.09/GiB/month, so parking this costs ~$20/month. Delete the
+    Volume when the model is not in active use.
+    """
+    import time
     from huggingface_hub import snapshot_download
-    p = snapshot_download(model)
+
+    t0 = time.time()
+    path = snapshot_download(model, max_workers=16)
+    dl_s = time.time() - t0
+
+    total = 0
+    for f in pathlib.Path(path).rglob("*"):
+        if f.is_file():
+            total += f.stat().st_size
+
     hf_cache.commit()
-    return p
+    return {
+        "model": model, "path": path,
+        "bytes": total, "gb": round(total / 1e9, 1),
+        "download_s": round(dl_s, 1),
+        "throughput_mb_s": round(total / 1e6 / max(dl_s, 1e-9), 1),
+        "monthly_storage_usd": round(total / 1e9 * 0.9309 * 0.09, 2),
+    }
 
 
 @app.local_entrypoint()

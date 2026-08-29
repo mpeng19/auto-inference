@@ -307,7 +307,8 @@ def roofline_rps(model=None, hw=None, in_tok: int | None = None,
     return capacity(model, hw, in_tok, out_tok, batch=batch)["max_rps_roofline"]
 
 
-def suite(seed: int = 0, scale: float = 1.0) -> dict[str, WorkloadConfig]:
+def suite(seed: int = 0, scale: float = 1.0,
+          minutes: float | None = None) -> dict[str, WorkloadConfig]:
     """Named workloads. `scale` multiplies request counts for longer runs.
 
     Rates are calibrated against the **measured** saturation knee for
@@ -329,7 +330,15 @@ def suite(seed: int = 0, scale: float = 1.0) -> dict[str, WorkloadConfig]:
 
     **Re-derive these after any change to model, hardware or GPU count.** A
     rate calibrated for 1xH100 means nothing on 8xH100.
+
+    `minutes` sets the total wall time of the traces, divided across workloads
+    in proportion to their default sizes. Longer runs are not just more data:
+    they expose drift a short run cannot -- KV fragmentation, cache growth,
+    thermal effects -- which is exactly what a consistency check needs to see.
     """
+    if minutes is not None:
+        # Default traces total ~591s. Scale request counts to hit the target.
+        scale = scale * (minutes * 60.0) / 591.0
     n = lambda k: max(20, int(k * scale))
 
     return {
@@ -449,7 +458,8 @@ def mixed_trace(seed: int = 0, scale: float = 1.0) -> Trace:
 
 def staircase_levels(seed: int = 0, peak_fraction: float = 1.0,
                      step_pct: float = 5.0, step_s: float = 60.0,
-                     start_pct: float = 5.0) -> list[WorkloadConfig]:
+                     start_pct: float = 5.0,
+                     minutes: float | None = None) -> list[WorkloadConfig]:
     """The staircase as one workload per plateau.
 
     Each level is an independent Poisson workload at a fixed rate. Splitting it
@@ -457,6 +467,9 @@ def staircase_levels(seed: int = 0, peak_fraction: float = 1.0,
     client-health verdict, and the sequence can be cut short the moment the
     system breaks -- which a single pre-built trace cannot do.
     """
+    if minutes is not None:
+        n_levels = max(1, int((100.0 - start_pct) / step_pct) + 1)
+        step_s = minutes * 60.0 / n_levels
     peak = roofline_rps() * peak_fraction
     out, pct = [], start_pct
     while pct <= 100.0 + 1e-9:
