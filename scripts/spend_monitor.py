@@ -29,9 +29,20 @@ import modal
 # ── thresholds ───────────────────────────────────────────────────
 # Deliberately low. 8xH100 is ~$31.60/hr, so a forgotten container burns
 # through these fast; that is exactly what you want to hear about.
-MTD_WARN_USD = 50.0
-MTD_ALERT_USD = 150.0
-DAILY_WARN_USD = 25.0
+#
+# These watch **metered** cost, not billed. Billed stays at $0.00 for as long
+# as credits absorb usage and then jumps straight to full rate -- so alerting on
+# it means silence right up to the moment money starts leaving, which is the
+# opposite of early warning. Metered cost tracks real consumption from the
+# first dollar.
+MTD_WARN_USD = 20.0
+MTD_ALERT_USD = 60.0
+DAILY_WARN_USD = 15.0
+
+# Modal Starter grants $30/month of credits. Running out is the event that
+# converts usage into charges, so it gets its own alert.
+MONTHLY_CREDIT_USD = 30.0
+CREDIT_LOW_FRAC = 0.25          # warn with under 25% of credits left
 
 APP_NAME = "auto-inference-spend-monitor"
 image = modal.Image.debian_slim(python_version="3.12").pip_install("modal>=1.5.5", "requests")
@@ -42,22 +53,49 @@ def _f(x) -> float:
     return float(x) if isinstance(x, Decimal) else float(x or 0)
 
 
+# Small persistent state so each run can diff against the previous one.
+_STATE = "auto-inference-spend-state"
+
+
 def collect() -> dict:
-    """Pull month-to-date spend plus a per-object breakdown for the last day."""
+    """Month-to-date spend, credit headroom, and burn since the last check.
+
+    Deliberately does **not** rely on `billing.report()` for the alert. That
+    endpoint lags (it returned zero items for a day in which ~$20 was spent)
+    and is rate limited (`ResourceExhaustedError` after a couple of calls), so
+    a daily threshold built on it can never fire. `billing.summary()` is
+    cumulative and cheap, so the spend since the last check is just the
+    difference between two readings -- which is both accurate and free.
+    """
+    import modal
     from modal import Workspace
 
     ws = Workspace.from_context()
     s = ws.billing.summary()
-
     now = datetime.now(timezone.utc)
-    day_start = now - timedelta(days=1)
+    metered_now = _f(s.metered_cost)
 
-    by_object: list[dict] = []
-    daily_total = 0.0
+    # Diff against the previous reading to get real burn.
+    prev, burn_usd, burn_hours, burn_rate = None, None, None, None
     try:
-        for item in ws.billing.report(start=day_start, end=now):
+        st = modal.Dict.from_name(_STATE, create_if_missing=True)
+        prev = st.get("last")
+        if prev and prev.get("cycle_start") == s.start.isoformat():
+            dt_h = (now.timestamp() - float(prev["ts"])) / 3600.0
+            burn_usd = round(metered_now - float(prev["metered"]), 4)
+            burn_hours = round(dt_h, 2)
+            burn_rate = round(burn_usd / dt_h, 3) if dt_h > 0.01 else None
+        st["last"] = {"ts": now.timestamp(), "metered": metered_now,
+                      "cycle_start": s.start.isoformat()}
+    except Exception as e:
+        prev = {"error": f"{type(e).__name__}: {e}"}
+
+    # Per-object breakdown is best-effort only: informative when it works,
+    # never load-bearing for an alert.
+    by_object: list[dict] = []
+    try:
+        for item in ws.billing.report(start=now - timedelta(days=1), end=now):
             cost = _f(item.cost)
-            daily_total += cost
             if cost > 0:
                 by_object.append({
                     "object_id": item.object_id,
@@ -68,9 +106,12 @@ def collect() -> dict:
                                     (item.cost_by_resource or {}).items()},
                 })
     except Exception as e:
-        by_object = [{"error": f"{type(e).__name__}: {e}"}]
-
+        by_object = [{"error": f"{type(e).__name__}: {e} "
+                      "(rate limited or lagged; not used for alerting)"}]
     by_object.sort(key=lambda d: d.get("cost_usd", 0), reverse=True)
+
+    credits_used = abs(_f((s.adjustments or {}).get("Credits", 0)))
+    credits_left = max(0.0, MONTHLY_CREDIT_USD - credits_used)
 
     return {
         "generated_at": now.isoformat(timespec="seconds"),
@@ -78,38 +119,60 @@ def collect() -> dict:
         "cycle_end": s.end.isoformat(),
         "mtd_metered_usd": round(_f(s.metered_cost), 4),
         "mtd_billed_usd": round(_f(s.billed_cost), 4),
+        "credits_used_usd": round(credits_used, 4),
+        "credits_left_usd": round(credits_left, 4),
+        "credits_left_frac": round(credits_left / MONTHLY_CREDIT_USD, 3),
         "metered_breakdown": {k: round(_f(v), 4) for k, v in
                               (s.metered_cost_breakdown or {}).items()},
         "adjustments": {k: round(_f(v), 4) for k, v in (s.adjustments or {}).items()},
-        "last_24h_usd": round(daily_total, 4),
+        "burn_usd": burn_usd,
+        "burn_hours": burn_hours,
+        "burn_rate_usd_per_hour": burn_rate,
+        "first_reading": prev is None,
         "last_24h_by_object": by_object[:15],
     }
 
 
 def severity(d: dict) -> str:
-    if d["mtd_billed_usd"] >= MTD_ALERT_USD:
+    """Judged on metered spend and credit headroom, not on billed cost."""
+    if d["mtd_metered_usd"] >= MTD_ALERT_USD or d["credits_left_usd"] <= 0:
         return "ALERT"
-    if d["mtd_billed_usd"] >= MTD_WARN_USD or d["last_24h_usd"] >= DAILY_WARN_USD:
+    if (d["mtd_metered_usd"] >= MTD_WARN_USD
+            or (d.get("burn_usd") or 0) >= DAILY_WARN_USD
+            or d["credits_left_frac"] <= CREDIT_LOW_FRAC):
         return "WARN"
     return "OK"
 
 
 def render(d: dict) -> tuple[str, str]:
     sev = severity(d)
-    subject = (f"[{sev}] Modal spend — ${d['mtd_billed_usd']:.2f} MTD, "
-               f"${d['last_24h_usd']:.2f} last 24h")
+    burn = (f", ${d['burn_usd']:.2f} since last check"
+            if d.get("burn_usd") is not None else "")
+    subject = (f"[{sev}] Modal — ${d['mtd_metered_usd']:.2f} used, "
+               f"${d['credits_left_usd']:.2f} credits left{burn}")
 
     lines = [
         f"Modal spend digest — {d['generated_at']}",
         f"Severity: {sev}",
         "",
         f"Billing cycle: {d['cycle_start'][:10]} to {d['cycle_end'][:10]}",
-        f"  Month to date (billed):  ${d['mtd_billed_usd']:.2f}",
-        f"  Month to date (metered): ${d['mtd_metered_usd']:.2f}",
-        f"  Last 24 hours:           ${d['last_24h_usd']:.2f}",
+        f"  Usage this month (metered):  ${d['mtd_metered_usd']:.2f}",
+        f"  Credits remaining:           ${d['credits_left_usd']:.2f} "
+        f"of ${MONTHLY_CREDIT_USD:.0f}  ({d['credits_left_frac']:.0%})",
+        (f"  Since last check:            ${d['burn_usd']:.2f} "
+         f"over {d['burn_hours']:.1f}h"
+         + (f"  (${d['burn_rate_usd_per_hour']:.2f}/hr)"
+            if d.get("burn_rate_usd_per_hour") else "")
+         if d.get("burn_usd") is not None else
+         "  Since last check:            (first reading, no baseline yet)"),
+        f"  Actually charged so far:     ${d['mtd_billed_usd']:.2f}",
         "",
-        f"Thresholds: warn ${MTD_WARN_USD:.0f} MTD / ${DAILY_WARN_USD:.0f} daily, "
-        f"alert ${MTD_ALERT_USD:.0f} MTD",
+        f"Once credits run out, metered usage becomes real charges at full rate.",
+        f"At 8xH100 ($31.60/hr) the remaining credit is "
+        f"{d['credits_left_usd'] / 31.60:.1f} hours.",
+        "",
+        f"Thresholds: warn ${MTD_WARN_USD:.0f} metered / ${DAILY_WARN_USD:.0f} per check "
+        f"/ under {CREDIT_LOW_FRAC:.0%} credits, alert ${MTD_ALERT_USD:.0f} metered",
         "",
         "Metered breakdown:",
     ]
@@ -120,7 +183,7 @@ def render(d: dict) -> tuple[str, str]:
     for k, v in sorted(d["adjustments"].items(), key=lambda kv: kv[1]):
         lines.append(f"  {k:<24} ${v:.4f}")
 
-    lines += ["", "Top spenders, last 24h:"]
+    lines += ["", "Top spenders, last 24h (best-effort; this endpoint lags):"]
     if not d["last_24h_by_object"]:
         lines.append("  (nothing)")
     for o in d["last_24h_by_object"]:
