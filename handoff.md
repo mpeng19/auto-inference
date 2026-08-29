@@ -187,6 +187,38 @@ through Resend.
 
 ## Session log
 
+### 2026-08-29 — saturation knee found
+
+`saturate` ramped 5 -> 160 rps over 300s, 24807 requests, bucketed by arrival
+window:
+
+    window          offered     ok  met SLO  p99 TTFT  p99 TPOT
+        0-25           11.2    279     100%       138      15.1
+       25-50           26.1    652     100%        67      21.5
+       50-75           35.6    890     100%       382      30.0
+       75-100          49.1   1228      24%      3833      29.8
+      100-125          63.5   1588       0%     20775      49.4
+      275-300         152.9   3823       0%    421007      27.1
+
+**The knee is between 35.6 and 49.1 rps.** Sustained max throughput 34.3 rps.
+The collapse is violent: 100% -> 24% -> 0% across two windows.
+
+The failure mode matters as much as the number. **p99 TPOT stays flat at
+27-53ms throughout while p99 TTFT reaches 418 seconds.** Decode keeps up fine;
+prefill queueing is what collapses. That is an admission-control failure, and
+it is precisely the regime where scheduler and admission policy changes should
+be observable — so it is the right operating point for the whole project.
+
+Caveat: client dispatch lag p99 rose to 55ms in this run (vs ~2ms elsewhere) at
+24807 requests. Negligible against a 418s TTFT so the finding stands, but the
+client is no longer free at these volumes and should be watched.
+
+Suite rates recalibrated from this: `sustained` 4 -> 32 rps, `short_chat`
+24 -> 80, `prefix_heavy` 6 -> 20, `decode_heavy` 2 -> 7, `prefill_heavy`
+1.5 -> 1.8 (already near its own prefill-bound ceiling of ~2.2 req/s).
+Per-workload rates are set near each workload's own bottleneck, not to one
+global number.
+
 ### 2026-08-29 — full suite green, and calibrated far too low
 
 All 9 workloads ran against one server launch in 13 minutes (209s load, then
