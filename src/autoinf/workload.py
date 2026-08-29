@@ -232,73 +232,97 @@ def merge_traces(traces: list[Trace], name: str = "mixed") -> Trace:
 # a trade-off to see explicitly, not to average away.
 
 def suite(seed: int = 0, scale: float = 1.0) -> dict[str, WorkloadConfig]:
-    """Named workloads. `scale` multiplies request counts for longer runs."""
+    """Named workloads. `scale` multiplies request counts for longer runs.
+
+    Rates are calibrated against the **measured** saturation knee for
+    Qwen3-30B-A3B-FP8 on one H100 (see handoff.md, `saturate` run 2026-08-29):
+
+        offered 35.6 rps -> 100% met SLO, p99 TTFT 382ms
+        offered 49.1 rps ->  24% met SLO, p99 TTFT 3833ms
+        sustained max throughput 34.3 rps
+
+    The first calibration guessed rates ~10x too low and every workload met
+    both SLOs on 100% of requests — measuring an idle server, where no
+    scheduling change can possibly show up. These sit just below or astride the
+    knee, which is the only regime where serving decisions are observable.
+
+    Per-workload capacity differs sharply because the bottleneck differs:
+    prefill_heavy is prefill-bound (~8300 prefill tok/s, so ~2 req/s at 3825
+    tokens each), decode_heavy is decode-bound, short_chat is barely bound at
+    all. Rates are set near each one's own limit, not to a single global number.
+
+    **Re-derive these after any change to model, hardware or GPU count.** A
+    rate calibrated for 1xH100 means nothing on 8xH100.
+    """
     n = lambda k: max(20, int(k * scale))
 
     return {
-        # Baseline: smooth, memoryless. Everything else is compared to this.
+        # Just below the knee: sensitive to scheduling without being a
+        # foregone collapse. Everything else is compared to this.
         "sustained": WorkloadConfig(
-            name="sustained", arrival="poisson", request_rate=4.0,
-            n_requests=n(300), seed=seed),
+            name="sustained", arrival="poisson", request_rate=32.0,
+            n_requests=n(1600), seed=seed),
 
-        # Control: zero arrival variance. Any gap between this and `sustained`
-        # is the cost of randomness alone, independent of the scheduler.
+        # Control: zero arrival variance at the same mean rate. The gap to
+        # `sustained` is the cost of randomness alone.
         "constant": WorkloadConfig(
-            name="constant", arrival="constant", request_rate=4.0,
-            n_requests=n(300), seed=seed),
+            name="constant", arrival="constant", request_rate=32.0,
+            n_requests=n(1600), seed=seed),
 
-        # Same mean rate as `sustained`, delivered in 4x bursts. Isolates the
-        # effect of burstiness on queueing and batch formation.
+        # Same mean rate as `sustained`, delivered in 4x bursts that peak at
+        # 128 rps — well past the knee. Isolates burstiness: identical load,
+        # different shape, and the bursts should now actually hurt.
         "bursty": WorkloadConfig(
-            name="bursty", arrival="bursty", request_rate=4.0,
-            burst_factor=4.0, burst_on_s=2.0, n_requests=n(300), seed=seed),
+            name="bursty", arrival="bursty", request_rate=32.0,
+            burst_factor=4.0, burst_on_s=2.0, n_requests=n(1600), seed=seed),
 
-        # Climbs until the system breaks. Locates the saturation knee, which is
-        # the number that actually matters for capacity planning.
+        # Brackets the knee (10 -> 64) so the bend is inside the trace.
         "ramp": WorkloadConfig(
-            name="ramp", arrival="ramp", request_rate=2.0, ramp_end_rate=32.0,
-            duration_s=180.0, n_requests=None, seed=seed),
+            name="ramp", arrival="ramp", request_rate=10.0, ramp_end_rate=64.0,
+            duration_s=120.0, n_requests=None, seed=seed),
 
-        # Sudden 10x step. Tests admission control and, more importantly,
-        # whether the system *recovers* once the spike passes.
+        # Sits safely below the knee, then steps 4x past it for 10s. Tests
+        # admission control and, more importantly, whether it *recovers*.
         "spike": WorkloadConfig(
-            name="spike", arrival="spike", request_rate=4.0, spike_rate=40.0,
+            name="spike", arrival="spike", request_rate=24.0, spike_rate=96.0,
             spike_at_s=30.0, spike_dur_s=10.0, duration_s=90.0,
             n_requests=None, seed=seed),
 
-        # Prefill-dominated: long prompts, short answers. Stresses chunked
-        # prefill and prefill/decode interference.
+        # Prefill-dominated and prefill-bound: ~3825 tokens in, ~30 out. At
+        # ~8300 prefill tok/s the ceiling is ~2.2 req/s, so 1.8 is near the
+        # limit — this workload was already close to saturated at 1.5.
         "prefill_heavy": WorkloadConfig(
-            name="prefill_heavy", arrival="poisson", request_rate=1.5,
-            input_len_mu=8.1, input_len_sigma=0.5,      # median ~3300 tok
-            output_len_mu=3.4, output_len_sigma=0.4,    # median ~30 tok
-            n_requests=n(150), seed=seed),
+            name="prefill_heavy", arrival="poisson", request_rate=1.8,
+            input_len_mu=8.1, input_len_sigma=0.5,
+            output_len_mu=3.4, output_len_sigma=0.4,
+            n_requests=n(140), seed=seed),
 
-        # Decode-dominated: short prompts, long answers. Stresses KV growth,
-        # batch residency and inter-token latency.
+        # Decode-dominated: ~55 in, ~890 out. Bound by aggregate decode
+        # throughput (~7800 output tok/s), so ~8.8 req/s; 7.0 sits under it.
         "decode_heavy": WorkloadConfig(
-            name="decode_heavy", arrival="poisson", request_rate=2.0,
-            input_len_mu=3.9, input_len_sigma=0.4,      # median ~50 tok
-            output_len_mu=6.7, output_len_sigma=0.5,    # median ~810 tok
-            n_requests=n(150), seed=seed),
+            name="decode_heavy", arrival="poisson", request_rate=7.0,
+            input_len_mu=3.9, input_len_sigma=0.4,
+            output_len_mu=6.7, output_len_sigma=0.5,
+            n_requests=n(420), seed=seed),
 
-        # Heavy prefix reuse, as in multi-turn chat with a fixed system prompt.
-        # Without this, a good radix-cache policy is indistinguishable from a
-        # bad one.
+        # 89% of requests share a 1024-token prefix, so effective prefill is
+        # only the ~315-token unique body. That is a *partial* match, the
+        # regime where the cache genuinely helps (1.76x measured), which is why
+        # this can run far above prefill_heavy's rate.
         "prefix_heavy": WorkloadConfig(
-            name="prefix_heavy", arrival="poisson", request_rate=6.0,
+            name="prefix_heavy", arrival="poisson", request_rate=20.0,
             prefix_share_frac=0.9, n_shared_prefixes=6, shared_prefix_len=1024,
             input_len_mu=7.2, input_len_sigma=0.4,
             output_len_mu=4.6, output_len_sigma=0.5,
-            n_requests=n(400), seed=seed),
+            n_requests=n(1000), seed=seed),
 
-        # Many tiny requests: per-request scheduling overhead dominates, not
-        # GPU work.
+        # Tiny requests where per-request scheduling overhead dominates rather
+        # than GPU work. Ran clean at 23 rps, so push well past that.
         "short_chat": WorkloadConfig(
-            name="short_chat", arrival="poisson", request_rate=24.0,
-            input_len_mu=3.5, input_len_sigma=0.5,      # median ~33 tok
-            output_len_mu=3.9, output_len_sigma=0.5,    # median ~50 tok
-            n_requests=n(800), seed=seed),
+            name="short_chat", arrival="poisson", request_rate=80.0,
+            input_len_mu=3.5, input_len_sigma=0.5,
+            output_len_mu=3.9, output_len_sigma=0.5,
+            n_requests=n(3200), seed=seed),
     }
 
 
