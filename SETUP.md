@@ -67,46 +67,96 @@ Secret `huggingface` holds `HF_TOKEN`; verified valid. Not needed for the
 current ungated models, but available. To use it, uncomment the `secrets=[...]`
 line in `src/autoinf/modal_app.py`.
 
-## 5. GPU probes — run these before anything else
+## 5. The 1-GPU test case
 
-The probe answers the questions that would otherwise invalidate every later
-experiment. Cheap stage first:
-
-```bash
-# ~2 min once the image is built, no weights downloaded. Checks the image
-# builds, what hardware we get, and whether all 12 SGLang flags we emit are real.
-uv run modal run src/autoinf/probe.py::probe_env
-
-# ~15 min including a 31GB download. Checks ignore_eos, streamed usage
-# accounting, and whether the prefix cache actually helps.
-uv run modal run src/autoinf/probe.py::probe_serve
-```
-
-Then the benchmark itself:
+This is the day-to-day loop. One H100 ($3.95/hr), the 30B FP8 model, weights
+already cached in a Volume.
 
 ```bash
-uv run modal run src/autoinf/modal_app.py::prefetch --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
-uv run modal run src/autoinf/modal_app.py     # 60-request smoke run
+# Smallest end-to-end run: 60 requests, ~10 min, ~$0.70
+uv run modal run src/autoinf/modal_app.py::smoke
+
+# Full eval suite -- all 9 workloads against ONE server launch
+uv run modal run src/autoinf/modal_app.py::suite
+
+# Shorter/longer: scale multiplies request counts
+uv run modal run src/autoinf/modal_app.py::suite --scale 0.3
+
+# Noise floor: same config, N separate server launches
+uv run modal run src/autoinf/modal_app.py::noise --repeats 5
 ```
 
-## 6. Eval suite
+The suite runs every workload against a **single** server launch. Model load is
+~350s cold and dominates a short trace, so launching per workload would spend
+most of the budget loading rather than measuring. Anything that varies per
+launch (a `ServingConfig` field, an overlay) needs a separate call; traffic
+shape does not.
 
-Nine patterns plus a mixed stream, in `src/autoinf/workload.py::suite()`.
-`sustained` and `bursty` deliberately carry the same mean rate so any
-difference between them is attributable to burstiness alone.
+### Reading results
 
-| workload | shape | stresses |
-|---|---|---|
-| `sustained` | Poisson, CV~0.9 | baseline |
-| `constant` | clockwork, CV=0 | control: cost of arrival variance alone |
-| `bursty` | 4x bursts, CV~4.1 | queueing, batch formation |
-| `ramp` | 2 -> 32 rps | locates the saturation knee |
-| `spike` | 10x step for 10s | admission control and **recovery** |
-| `prefill_heavy` | ~3800 in / ~30 out | chunked prefill, prefill/decode interference |
-| `decode_heavy` | ~55 in / ~890 out | KV growth, batch residency, ITL |
-| `prefix_heavy` | 89% shared prefixes | radix cache, cache-aware routing |
-| `short_chat` | ~36/53 tok at 24 rps | per-request scheduling overhead |
-| `mixed` | merge of four | class interference — where schedulers usually fail |
+Every run is written to the `auto-inference-results` Volume as self-describing
+JSON -- config, trace digest, overlay digest, provenance, per-request records.
+
+```bash
+uv run modal run scripts/results.py::ls
+uv run modal run scripts/results.py::show --name <file>
+uv run modal run scripts/results.py::compare --a <file> --b <file>
+uv run modal run scripts/results.py::pull      # copy them all locally
+```
+
+`compare` refuses to treat two runs as comparable unless their **trace digests
+match**. Measuring two configs against different traffic is the easiest way to
+manufacture an improvement that is not there.
+
+## 6. Modifying the serving code
+
+Not limited to SGLang's CLI flags. Any module under `sglang/` can be replaced:
+
+```bash
+# Pull a stock module into overlays/ (records its upstream SHA)
+uv run modal run scripts/vendor.py::main --path srt/managers/scheduler.py
+uv run modal run scripts/vendor.py::ls --pattern mem_cache   # browse
+
+# Edit overlays/sglang/srt/managers/scheduler.py, then just run a bench.
+# No image rebuild -- overlays are mounted at container start.
+```
+
+Already vendored: `srt/managers/schedule_policy.py` (1500 lines),
+`srt/mem_cache/radix_cache.py` (862 lines).
+
+If SGLang is upgraded and an overlaid file changes upstream, `overlay.apply()`
+**refuses to run**. A stale overlay would silently revert upstream fixes while
+still looking like a valid experiment.
+
+### Before trusting any overlay result
+
+Run `noise` first. It reports a **canary floor**: how much the model's output
+differs between two runs of the *same* config. Greedy decoding is not bitwise
+deterministic across batch compositions, so some divergence is normal. A config
+that diverges materially more than that floor is suspect, and its goodput gain
+should not be believed.
+
+## 7. Scaling to 8xH100 (Phase 2)
+
+```bash
+# One-time: pull the 235B weights (~235GB, ~$21/mo to keep parked)
+uv run modal run src/autoinf/modal_app.py::prefetch_big
+
+# Full suite, 8xH100, TP=8 EP=8 -- ~$31.60/hr
+uv run modal run src/autoinf/modal_app.py::suite_8x
+```
+
+Consumes 8 of the Starter plan's 10 GPU concurrency, so nothing else can run
+alongside it. Pin `--region` once a baseline exists so later comparisons are
+like-for-like.
+
+## 8. GPU probes -- already run, re-run after any SGLang upgrade
+
+```bash
+uv run modal run src/autoinf/probe.py::probe_env     # image, hardware, flags
+uv run modal run src/autoinf/probe.py::probe_serve   # ignore_eos, usage, cache
+uv run modal run src/autoinf/probe.py::probe_prefix  # prefix-cache diagnostic
+```
 
 ---
 

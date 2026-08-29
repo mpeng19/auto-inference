@@ -104,7 +104,7 @@ def probe_serve(model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8") -> dict:
         try:
             from autoinf.bench import wait_until_ready
             t0 = time.perf_counter()
-            out["model_load_s"] = round(asyncio.run(wait_until_ready(SERVER_URL, 2400)), 1)
+            out["model_load_s"] = round(asyncio.run(wait_until_ready(SERVER_URL, 2400, proc=proc, log_path=log_path)), 1)
             print(f"ready in {out['model_load_s']}s", flush=True)
             out.update(asyncio.run(_serving_checks(model)))
             out["status"] = "ok"
@@ -274,6 +274,130 @@ async def _serving_checks(model: str) -> dict:
                      "quantization", "kv_cache_dtype", "context_length", "tp_size")}
         except Exception as e:
             res["server_info"] = f"{type(e).__name__}: {e}"
+    return res
+
+
+@app.function(gpu="H100", cpu=8.0, volumes={"/cache": hf_cache}, timeout=45 * 60)
+def probe_prefix(model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8") -> dict:
+    """Why is a warm prefix cache slower? Isolate the confounds.
+
+    The earlier measurement did `flush -> cold -> warm` in a loop, which
+    conflates two different things: the effect of a cache *hit*, and the effect
+    of having just called `/flush_cache`. This separates them, and also asks
+    whether TTFT depends on prompt length at all -- an 11-token prompt took
+    100ms while a 1213-token prompt took 36ms, which suggests TTFT at low load
+    is fixed overhead rather than prefill compute.
+    """
+    sc = ServingConfig(model=model)
+    cmd = ["python", "-m", "sglang.launch_server",
+           "--host", "127.0.0.1", "--port", str(SERVER_PORT), *sc.to_sglang_args()]
+    out: dict = {"model": model}
+    log_path = "/tmp/sglang-prefix.log"
+
+    with open(log_path, "wb") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            from autoinf.bench import wait_until_ready, warmup
+            out["model_load_s"] = round(asyncio.run(wait_until_ready(SERVER_URL, 2400, proc=proc, log_path=log_path)), 1)
+            asyncio.run(warmup(SERVER_URL, model, 20))
+            out.update(asyncio.run(_prefix_experiments(model)))
+            out["status"] = "ok"
+        except Exception as e:
+            out["status"] = "failed"; out["failure"] = f"{type(e).__name__}: {e}"
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    # SGLang logs per-batch cache hit rate; that is ground truth for whether a
+    # request actually hit, independent of our latency inference.
+    try:
+        txt = open(log_path, errors="replace").read()
+        hits = [l for l in txt.splitlines() if "cache hit rate" in l.lower()]
+        out["cache_hit_log_lines"] = hits[-12:]
+    except Exception:
+        pass
+    print(json.dumps({k: v for k, v in out.items() if k != "server_log_tail"},
+                     indent=2, default=str), flush=True)
+    return out
+
+
+def _tokens_to_text(n: int) -> str:
+    # ~4 chars/token of non-repeating-ish filler, unique per call site via seed.
+    return " ".join(f"w{i}" for i in range(n))
+
+
+async def _prefix_experiments(model: str) -> dict:
+    import aiohttp
+    res: dict = {}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as s:
+
+        # ── A: does TTFT depend on prompt length at all? ─────────
+        # Distinct prompt each time, so nothing can hit the cache and no flush
+        # is involved. If TTFT is flat across 10..4000 tokens, TTFT at low load
+        # is dominated by fixed overhead, not prefill compute.
+        by_len = {}
+        for n in (10, 100, 500, 1000, 2000, 4000):
+            samples = []
+            for k in range(4):
+                p = f"unique{n}x{k} " + _tokens_to_text(n)
+                r = await _stream(s, model, p, 8, True)
+                if r.get("ttft_ms"):
+                    samples.append(r["ttft_ms"])
+            by_len[n] = _dist(samples)
+        res["ttft_vs_prompt_len_uncached"] = by_len
+
+        # ── B: cache hit effect, WITHOUT any flush ───────────────
+        # Same prompt repeatedly. First is cold, rest should hit. No flush call
+        # anywhere, so the flush cannot be the explanation.
+        p = "sharedprefix " + _tokens_to_text(1000)
+        seq = []
+        for _ in range(6):
+            r = await _stream(s, model, p, 8, True)
+            if r.get("ttft_ms"):
+                seq.append(round(r["ttft_ms"], 1))
+        res["repeat_same_prompt_no_flush"] = {
+            "sequence_ttft_ms": seq,
+            "first": seq[0] if seq else None,
+            "rest": _dist(seq[1:]),
+        }
+
+        # ── C: effect of flush itself ────────────────────────────
+        # Flush, then immediately measure. If post-flush requests are fast
+        # regardless of cache state, the flush is the confound, not the cache.
+        post_flush, no_flush = [], []
+        for _ in range(5):
+            await _flush(s)
+            r = await _stream(s, model, p, 8, True)
+            if r.get("ttft_ms"):
+                post_flush.append(r["ttft_ms"])
+            r2 = await _stream(s, model, p, 8, True)
+            if r2.get("ttft_ms"):
+                no_flush.append(r2["ttft_ms"])
+        res["immediately_after_flush"] = _dist(post_flush)
+        res["second_request_after_flush"] = _dist(no_flush)
+
+        # ── D: partial prefix match ──────────────────────────────
+        # Share a 500-token head, differ in the tail. A cache that helps should
+        # make these faster than fully-unique prompts of the same length.
+        head = "commonhead " + _tokens_to_text(500)
+        await _stream(s, model, head + " warm", 8, True)     # populate
+        partial = []
+        for k in range(4):
+            r = await _stream(s, model, head + f" tail{k} " + _tokens_to_text(200), 8, True)
+            if r.get("ttft_ms"):
+                partial.append(r["ttft_ms"])
+        res["partial_prefix_match_700tok"] = _dist(partial)
+
+        unique700 = []
+        for k in range(4):
+            r = await _stream(s, model, f"nohead{k} " + _tokens_to_text(700), 8, True)
+            if r.get("ttft_ms"):
+                unique700.append(r["ttft_ms"])
+        res["fully_unique_700tok"] = _dist(unique700)
+
     return res
 
 

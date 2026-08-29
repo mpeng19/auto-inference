@@ -138,21 +138,92 @@ async def run_trace(
     return sorted(results, key=lambda r: r.idx)
 
 
-async def wait_until_ready(base_url: str, timeout_s: float = 1800.0) -> float:
+async def wait_until_ready(base_url: str, timeout_s: float = 1800.0,
+                           proc=None, log_path: str | None = None) -> float:
     """Block until the server answers /health. Returns seconds waited.
 
     Model load for a 30B MoE is minutes, not seconds; benchmarking a
     still-loading server is a classic way to produce garbage TTFT numbers.
+
+    If `proc` is given, a dead server aborts immediately instead of waiting out
+    the full timeout. Without this an unattended run burns the entire timeout
+    (and its GPU cost) only to report that the server never started. `log_path`
+    is echoed periodically so a stuck load is visible while it happens rather
+    than in a post-mortem.
     """
     url = base_url.rstrip("/") + "/health"
     start = time.perf_counter()
+    last_echo = 0.0
     async with aiohttp.ClientSession() as s:
         while time.perf_counter() - start < timeout_s:
+            if proc is not None and proc.poll() is not None:
+                tail = ""
+                if log_path:
+                    try:
+                        tail = open(log_path, errors="replace").read()[-3000:]
+                    except Exception:
+                        pass
+                raise RuntimeError(
+                    f"server process exited with code {proc.returncode} after "
+                    f"{time.perf_counter() - start:.0f}s\n--- log tail ---\n{tail}"
+                )
             try:
                 async with s.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
                     if r.status == 200:
                         return time.perf_counter() - start
             except Exception:
                 pass
+
+            elapsed = time.perf_counter() - start
+            if log_path and elapsed - last_echo >= 30:
+                last_echo = elapsed
+                try:
+                    lines = open(log_path, errors="replace").read().splitlines()
+                    if lines:
+                        print(f"  [{elapsed:.0f}s loading] {lines[-1][:150]}", flush=True)
+                except Exception:
+                    pass
             await asyncio.sleep(2.0)
     raise TimeoutError(f"server not ready after {timeout_s}s")
+
+
+async def complete(base_url: str, model: str, prompt: str, max_tokens: int,
+                   timeout_s: float = 300.0) -> str:
+    """Non-streaming completion, for canaries where only the text matters."""
+    async with aiohttp.ClientSession() as s_:
+        async with s_.post(
+            base_url.rstrip("/") + "/v1/chat/completions",
+            json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": max_tokens, "temperature": 0.0, "stream": False},
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+        ) as r:
+            if r.status != 200:
+                return f"<HTTP {r.status}>"
+            body = await r.json()
+            return (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+
+
+async def warmup(base_url: str, model: str, n: int = 20) -> float:
+    """Send throwaway requests so measurement starts against a warm server.
+
+    The first requests after launch pay for lazy CUDA graph capture and
+    allocator growth; including them makes the first workload of a suite look
+    systematically worse than the rest.
+    """
+    import time as _t
+    t0 = _t.perf_counter()
+    async with aiohttp.ClientSession() as s_:
+        for _ in range(n):
+            try:
+                async with s_.post(
+                    base_url.rstrip("/") + "/v1/chat/completions",
+                    json={"model": model,
+                          "messages": [{"role": "user", "content": "warmup"}],
+                          "max_tokens": 16, "temperature": 0.0, "stream": False,
+                          "ignore_eos": True},
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as r:
+                    await r.read()
+            except Exception:
+                pass
+    return _t.perf_counter() - t0
