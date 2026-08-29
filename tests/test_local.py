@@ -116,3 +116,33 @@ def test_config_digest_is_stable_and_sensitive():
     a = ServingConfig()
     assert a.digest() == ServingConfig().digest()
     assert a.digest() != ServingConfig(max_running_requests=128).digest()
+
+
+def test_warmup_window_excludes_the_opening_transient():
+    """A slow start must not drag down the whole trace's numbers."""
+    slo = SLO(ttft_ms=500, tpot_ms=40)
+    # First 10 requests are slow (cold cache), the next 40 are fine.
+    slow = [RequestResult(i, float(i), float(i), float(i) + 2.0, float(i) + 2.5,
+                          100, 10, True) for i in range(10)]
+    fast = [RequestResult(i, float(i), float(i), float(i) + 0.05, float(i) + 0.3,
+                          100, 10, True) for i in range(10, 50)]
+    rs = slow + fast
+
+    cold = summarize(rs, slo, window_s=50.0)
+    warm = summarize(rs, slo, window_s=40.0, warmup_s=10.0)
+
+    assert cold["n_good"] == 40           # the 10 slow ones miss TTFT
+    assert warm["n_good"] == 40
+    assert warm["n_excluded_warmup"] == 10
+    # Excluding the transient must raise the reported quality.
+    assert warm["good_frac"] > cold["good_frac"]
+    assert warm["ttft_ms"]["p99"] < cold["ttft_ms"]["p99"]
+
+
+def test_warmup_window_never_empties_the_result_set():
+    """An over-long warmup must degrade gracefully, not report zero requests."""
+    slo = SLO()
+    rs = [RequestResult(i, float(i), float(i), float(i) + 0.05, float(i) + 0.3,
+                        100, 10, True) for i in range(5)]
+    s = summarize(rs, slo, warmup_s=1000.0)
+    assert s["n_requests"] == 5

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 
 import aiohttp
@@ -139,23 +140,56 @@ async def run_trace(
 
 
 async def wait_until_ready(base_url: str, timeout_s: float = 1800.0,
-                           proc=None, log_path: str | None = None) -> float:
+                           proc=None, log_path: str | None = None,
+                           stall_s: float = 420.0) -> float:
     """Block until the server answers /health. Returns seconds waited.
 
     Model load for a 30B MoE is minutes, not seconds; benchmarking a
     still-loading server is a classic way to produce garbage TTFT numbers.
 
-    If `proc` is given, a dead server aborts immediately instead of waiting out
-    the full timeout. Without this an unattended run burns the entire timeout
-    (and its GPU cost) only to report that the server never started. `log_path`
-    is echoed periodically so a stuck load is visible while it happens rather
-    than in a post-mortem.
+    Three ways this can end badly, and all three are handled:
+
+      * **The process dies.** `proc` is polled, so a crash aborts at once.
+      * **The process hangs.** A live process making no progress is not caught
+        by a liveness check. `stall_s` aborts when the server log has not
+        changed for that long -- this actually happened: a run sat at
+        "loading shards: 0%" for the full 2400s timeout, costing ~$2.60 of
+        H100 time to learn nothing. Loads normally finish in 90-505s, so a
+        7-minute silence means something is wrong, not slow.
+      * **It is merely slow.** `timeout_s` remains the outer bound.
+
+    `log_path` is echoed periodically so a stuck load is visible while it is
+    happening rather than in a post-mortem.
     """
     url = base_url.rstrip("/") + "/health"
     start = time.perf_counter()
     last_echo = 0.0
+    last_size, last_change = -1, time.perf_counter()
+
+    def _log_size() -> int:
+        try:
+            return os.path.getsize(log_path) if log_path else -1
+        except OSError:
+            return -1
+
     async with aiohttp.ClientSession() as s:
         while time.perf_counter() - start < timeout_s:
+            # Progress is measured by the server log growing. A live process
+            # writing nothing for `stall_s` is stuck, not loading.
+            if log_path:
+                sz = _log_size()
+                if sz != last_size:
+                    last_size, last_change = sz, time.perf_counter()
+                elif time.perf_counter() - last_change > stall_s:
+                    tail = ""
+                    try:
+                        tail = open(log_path, errors="replace").read()[-2000:]
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"server load stalled: no log output for {stall_s:.0f}s "
+                        f"({time.perf_counter() - start:.0f}s elapsed). Normal "
+                        f"loads finish in 90-505s.\n--- log tail ---\n{tail}")
             if proc is not None and proc.poll() is not None:
                 tail = ""
                 if log_path:

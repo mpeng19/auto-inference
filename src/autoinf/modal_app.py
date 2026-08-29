@@ -166,8 +166,12 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
         try:
+            # 2400s outer bound was far too generous: a stalled load consumed
+            # all of it. 900s covers the worst observed real load (505s) with
+            # margin; the stall detector catches hangs long before that.
             record["model_load_s"] = round(asyncio.run(wait_until_ready(
-                SERVER_URL, timeout_s=2400, proc=proc, log_path=log_path)), 1)
+                SERVER_URL, timeout_s=900, proc=proc, log_path=log_path,
+                stall_s=420)), 1)
             print(f"server ready in {record['model_load_s']}s", flush=True)
             # Persist any weights just downloaded, so the next run starts warm.
             # Without this the 30B FP8 model is re-fetched (~350s) every run.
@@ -207,7 +211,10 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
                 wall = round(time.perf_counter() - t0, 1)
                 after = asyncio.run(server_metrics.scrape(SERVER_URL))
 
-                m = summarize(results, sl)
+                # Discard the opening transient so results depend on the
+                # workload, not on trace length or position in the sequence.
+                warm = min(20.0, 0.15 * max(1.0, trace.duration_s))
+                m = summarize(results, sl, warmup_s=warm)
                 srv = server_metrics.diff(before, after) if (before and after) else {}
                 health = client_health(results, pl)
                 record["runs"].append({

@@ -85,7 +85,23 @@ def _stats(xs: list[float]) -> dict:
     }
 
 
-def summarize(results: list[RequestResult], slo: SLO, window_s: float | None = None) -> dict:
+def summarize(results: list[RequestResult], slo: SLO, window_s: float | None = None,
+              warmup_s: float = 0.0) -> dict:
+    """Aggregate per-request records.
+
+    `warmup_s` discards requests scheduled in the opening seconds of a trace.
+    This matters more than it sounds: a 10-minute suite and a 30-minute suite
+    of the *same* workload at the same offered rate differed by 17% in goodput
+    (26.13 vs 30.53), because a fixed startup transient is amortised over more
+    requests in a longer trace. Workloads also run sequentially against one
+    server, so whichever goes first sees the coldest cache.
+
+    Excluding the transient makes a result depend on the workload rather than
+    on how long the trace happened to be or where it sat in the sequence.
+    """
+    measured = [r for r in results if r.scheduled_s >= warmup_s]
+    excluded = len(results) - len(measured)
+    results = measured or results
     ok = [r for r in results if r.ok]
     failed = [r for r in results if not r.ok]
 
@@ -118,6 +134,8 @@ def summarize(results: list[RequestResult], slo: SLO, window_s: float | None = N
         "n_requests": len(results),
         "n_ok": len(ok),
         "n_failed": len(failed),
+        "n_excluded_warmup": excluded,
+        "warmup_s": warmup_s,
         "window_s": window_s,
         # ── headline ──
         "goodput_rps": good / window_s if window_s > 0 else 0.0,
