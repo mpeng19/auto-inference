@@ -117,6 +117,21 @@ class WorkloadConfig:
     spike_rate: float = 40.0
     spike_dur_s: float = 5.0
 
+    # staircase: hold each level for `stair_step_s`, then step up by
+    # `stair_step_pct` of the full rate. `request_rate` is the *peak*. Unlike a
+    # smooth ramp this holds each level long enough to reach steady state, so
+    # the level at which the system breaks is read directly off the plateau
+    # rather than inferred from a moving target.
+    stair_start_pct: float = 5.0
+    stair_step_pct: float = 5.0
+    stair_step_s: float = 60.0
+
+    # Human-plausible request mix. When set, prompts are generated from these
+    # categories (see prompts.py) and each request's length comes from its own
+    # category profile rather than one global distribution. When None, the
+    # lognormal fields above govern and prompts are generic prose.
+    category_mix: tuple[str, ...] | None = None
+
     # ── length distributions ─────────────────────────────────────
     # Lognormal; these are the underlying normal's mu/sigma, so median = exp(mu).
     input_len_mu: float = 6.0           # median ~403 tokens
@@ -140,7 +155,21 @@ class WorkloadConfig:
         """Average arrival rate over the trace, for sizing and sanity checks."""
         if self.arrival == "ramp":
             return (self.request_rate + self.ramp_end_rate) / 2.0
+        if self.arrival == "staircase":
+            lv = self.stair_levels()
+            return self.request_rate * sum(lv) / len(lv) / 100.0
         return self.request_rate
+
+    def stair_levels(self) -> list[float]:
+        """Percentages of the peak rate, one per plateau."""
+        out, pct = [], self.stair_start_pct
+        while pct <= 100.0 + 1e-9:
+            out.append(min(100.0, pct))
+            pct += self.stair_step_pct
+        return out or [100.0]
+
+    def stair_duration(self) -> float:
+        return len(self.stair_levels()) * self.stair_step_s
 
     def digest(self) -> str:
         return _digest(asdict(self))

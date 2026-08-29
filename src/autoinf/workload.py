@@ -23,6 +23,7 @@ import random
 from dataclasses import asdict, dataclass, replace
 from typing import Callable
 
+from . import prompts as _prompts
 from .config import WorkloadConfig
 
 
@@ -35,6 +36,7 @@ class Request:
     max_tokens: int
     prefix_id: int | None   # which shared prefix, if any
     tag: str = ""           # which suite component produced it (for mixtures)
+    category: str = ""      # human-request category, when a mix is configured
 
 
 @dataclass(frozen=True)
@@ -144,13 +146,28 @@ def _rate_fn(cfg: WorkloadConfig, duration_s: float) -> tuple[Callable[[float], 
         a, b = cfg.spike_at_s, cfg.spike_at_s + cfg.spike_dur_s
         return (lambda t: cfg.spike_rate if a <= t < b else r0), max(r0, cfg.spike_rate, 1e-9)
 
+    if cfg.arrival == "staircase":
+        levels = cfg.stair_levels()
+        step = cfg.stair_step_s
+
+        def rate_at(t: float) -> float:
+            i = min(int(t / step), len(levels) - 1)
+            return r0 * levels[i] / 100.0
+
+        return rate_at, max(r0, 1e-9)
+
     raise ValueError(f"unknown arrival process: {cfg.arrival!r}")
 
 
 def _arrival_times(cfg: WorkloadConfig, rng: random.Random) -> list[float]:
     # Duration is either given, or derived from the mean rate with headroom so
     # that a count-based trace reliably reaches n_requests.
-    if cfg.duration_s is not None:
+    if cfg.arrival == "staircase" and cfg.duration_s is None:
+        # The plateau schedule defines the length; a request count would
+        # truncate it mid-climb and hide the level we are looking for.
+        duration = cfg.stair_duration()
+        hard_cap = None
+    elif cfg.duration_s is not None:
         duration = cfg.duration_s
         hard_cap = cfg.n_requests
     else:
@@ -185,28 +202,62 @@ def _arrival_times(cfg: WorkloadConfig, rng: random.Random) -> list[float]:
 def build_trace(cfg: WorkloadConfig) -> Trace:
     rng = random.Random(cfg.seed)
 
-    shared = [
-        _filler(cfg.shared_prefix_len, random.Random(cfg.seed * 1000 + i))
-        for i in range(cfg.n_shared_prefixes)
-    ]
+    # Real deployments put a stable system preamble in front of every request;
+    # that is what a prefix cache exists to exploit. Use real ones when a human
+    # mix is configured, padded to the requested prefix length.
+    if cfg.category_mix:
+        base = [t for _, t in _prompts.SYSTEM_PROMPTS]
+        shared = [
+            _prompts._pad_to(base[i % len(base)], cfg.shared_prefix_len,
+                             random.Random(cfg.seed * 1000 + i))
+            for i in range(cfg.n_shared_prefixes)
+        ]
+    else:
+        shared = [
+            _filler(cfg.shared_prefix_len, random.Random(cfg.seed * 1000 + i))
+            for i in range(cfg.n_shared_prefixes)
+        ]
 
     times = _arrival_times(cfg, rng)
 
+    mix = cfg.category_mix
     reqs: list[Request] = []
     for i, t in enumerate(times):
-        in_len = _lognormal_int(rng, cfg.input_len_mu, cfg.input_len_sigma, cfg.input_len_cap)
-        out_len = _lognormal_int(rng, cfg.output_len_mu, cfg.output_len_sigma, cfg.output_len_cap)
+        cat_name = ""
+        if mix:
+            # Human mix: the category picks the length profile, because intent
+            # and length are correlated in real traffic -- a summarize request
+            # is long-in/short-out, a creative one is the reverse. Drawing both
+            # from one global distribution erases exactly the prefill/decode
+            # asymmetry that serving decisions turn on.
+            cat = _prompts.sample_category(rng, mix)
+            cat_name = cat.name
+            in_len = _lognormal_int(rng, cat.in_mu, cat.in_sigma, cfg.input_len_cap)
+            out_len = _lognormal_int(rng, cat.out_mu, cat.out_sigma, cfg.output_len_cap)
+        else:
+            in_len = _lognormal_int(rng, cfg.input_len_mu, cfg.input_len_sigma,
+                                    cfg.input_len_cap)
+            out_len = _lognormal_int(rng, cfg.output_len_mu, cfg.output_len_sigma,
+                                     cfg.output_len_cap)
 
+        body_target = in_len
         prefix_id = None
+        prefix_text = ""
         if shared and rng.random() < cfg.prefix_share_frac:
             prefix_id = rng.randrange(len(shared))
-            body = max(1, in_len - cfg.shared_prefix_len)
-            prompt = shared[prefix_id] + " " + _filler(body, rng)
-            in_len = cfg.shared_prefix_len + body
-        else:
-            prompt = _filler(in_len, rng)
+            prefix_text = shared[prefix_id] + "\n\n"
+            body_target = max(1, in_len - cfg.shared_prefix_len)
 
-        reqs.append(Request(i, t, prompt, in_len, out_len, prefix_id, cfg.name))
+        if mix:
+            body = _prompts.make_request(rng, cat_name, body_target)
+            in_len = int(len(prefix_text + body) / _prompts.CHARS_PER_TOKEN)
+        else:
+            body = _filler(body_target, rng)
+            in_len = (cfg.shared_prefix_len + body_target) if prefix_id is not None \
+                else body_target
+
+        reqs.append(Request(i, t, prefix_text + body, in_len, out_len,
+                            prefix_id, cfg.name, cat_name))
 
     return Trace(tuple(reqs), cfg)
 
@@ -230,6 +281,31 @@ def merge_traces(traces: list[Trace], name: str = "mixed") -> Trace:
 # Each entry stresses a different part of the serving stack. Run the whole
 # suite against a config; a change that helps one pattern and wrecks another is
 # a trade-off to see explicitly, not to average away.
+
+def roofline_rps(model=None, hw=None, in_tok: int | None = None,
+                 out_tok: int | None = None, batch: int = 146) -> float:
+    """Ceiling request rate for the human mix, from the capacity model.
+
+    Sizing the suite as a *fraction of theoretical capacity* rather than an
+    absolute rps makes the same suite meaningful on different hardware. An
+    "80% of roofline" workload means the same thing on 1xH100 and 8xH100; "32
+    rps" does not.
+    """
+    import math
+
+    from .flops import H100, QWEN3_30B_A3B, capacity
+    from .prompts import CATEGORIES
+
+    model = model or QWEN3_30B_A3B
+    hw = hw or H100
+    if in_tok is None or out_tok is None:
+        tw = sum(c.weight for c in CATEGORIES)
+        in_tok = int(sum(c.weight * math.exp(c.in_mu + c.in_sigma ** 2 / 2)
+                         for c in CATEGORIES) / tw)
+        out_tok = int(sum(c.weight * math.exp(c.out_mu + c.out_sigma ** 2 / 2)
+                          for c in CATEGORIES) / tw)
+    return capacity(model, hw, in_tok, out_tok, batch=batch)["max_rps_roofline"]
+
 
 def suite(seed: int = 0, scale: float = 1.0) -> dict[str, WorkloadConfig]:
     """Named workloads. `scale` multiplies request counts for longer runs.
@@ -323,7 +399,40 @@ def suite(seed: int = 0, scale: float = 1.0) -> dict[str, WorkloadConfig]:
             input_len_mu=3.5, input_len_sigma=0.5,
             output_len_mu=3.9, output_len_sigma=0.5,
             n_requests=n(3200), seed=seed),
+
+        # Realistic mixed traffic: ten request categories at their real-world
+        # shares, human-plausible prompts, and 40% behind a shared system
+        # prompt. Rate is 60% of roofline -- roughly the achievable maximum,
+        # since measurement put real throughput at 61% of the ceiling.
+        "human": WorkloadConfig(
+            name="human", arrival="poisson",
+            request_rate=round(roofline_rps() * 0.60, 1),
+            category_mix=_prompts.ALL_CATEGORIES,
+            prefix_share_frac=0.4, n_shared_prefixes=3, shared_prefix_len=180,
+            n_requests=n(1500), seed=seed),
     }
+
+
+def staircase(seed: int = 0, peak_fraction: float = 1.0, step_pct: float = 5.0,
+              step_s: float = 60.0, start_pct: float = 5.0) -> WorkloadConfig:
+    """Step to `peak_fraction` of roofline in `step_pct` increments.
+
+    Each level is held long enough (60s) to reach steady state, so the level at
+    which the system breaks is read straight off a plateau. A smooth ramp
+    cannot do that: the rate is still moving while the queue is filling, so the
+    reported break point lags the true one by however long the queue takes to
+    build.
+
+    Defaults give 20 levels of 60s = 20 minutes, stepping 5% -> 100% of the
+    theoretical ceiling.
+    """
+    return WorkloadConfig(
+        name="staircase", arrival="staircase",
+        request_rate=round(roofline_rps() * peak_fraction, 1),
+        stair_start_pct=start_pct, stair_step_pct=step_pct, stair_step_s=step_s,
+        category_mix=_prompts.ALL_CATEGORIES,
+        prefix_share_frac=0.4, n_shared_prefixes=3, shared_prefix_len=180,
+        n_requests=None, duration_s=None, seed=seed)
 
 
 def mixed_trace(seed: int = 0, scale: float = 1.0) -> Trace:

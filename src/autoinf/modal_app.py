@@ -461,3 +461,71 @@ def saturate(lo: float = 5.0, hi: float = 160.0, duration: float = 300.0):
               f"{len(ttfts):>7}{met / len(rs) * 100:>8.0f}%"
               f"{f(ttfts):>10.0f}{f(tpots):>10.1f}")
     print("\nThe knee is the first window where 'met SLO' drops below 100%.")
+
+
+@app.local_entrypoint()
+def staircase(peak_fraction: float = 1.0, step_pct: float = 5.0,
+              step_s: float = 60.0, seed: int = 0):
+    """Step to a fraction of theoretical capacity in 5% increments.
+
+    Each level is held 60s -- long enough to reach steady state -- so the level
+    at which the system breaks is read off a plateau rather than inferred from
+    a moving ramp. The peak is `peak_fraction` of the roofline from
+    docs/capacity.md, so levels are fractions of theoretical capacity and mean
+    the same thing on different hardware.
+    """
+    from autoinf.config import SLO, ServingConfig
+    from autoinf.workload import roofline_rps, staircase as mk
+
+    wc = mk(seed=seed, peak_fraction=peak_fraction, step_pct=step_pct, step_s=step_s)
+    roof = roofline_rps()
+    print(f"roofline {roof:.1f} rps | peak {wc.request_rate:.1f} rps "
+          f"({peak_fraction:.0%}) | {len(wc.stair_levels())} levels x {step_s:.0f}s "
+          f"= {wc.stair_duration()/60:.0f} min")
+
+    rec = bench.remote(asdict(ServingConfig()), [asdict(wc)], asdict(SLO()),
+                       note=f"staircase-{peak_fraction:.2f}", canaries=False)
+    print(json.dumps({k: rec.get(k) for k in
+                      ("status", "model_load_s", "total_wall_s", "result_path",
+                       "failure")}, indent=2, default=str))
+    if not rec.get("runs"):
+        return
+
+    run = rec["runs"][0]
+    slo = rec["slo"]
+    per = run["per_request"]
+
+    print(f"\n{'level':>7}{'target':>9}{'offered':>9}{'done':>7}{'met SLO':>9}"
+          f"{'p50 TTFT':>10}{'p99 TTFT':>10}{'p99 TPOT':>10}")
+    print("-" * 71)
+    knee = None
+    for i, pct in enumerate(wc.stair_levels()):
+        lo, hi = i * step_s, (i + 1) * step_s
+        rs = [r for r in per if lo <= r["scheduled_s"] < hi]
+        if not rs:
+            continue
+        ttfts, tpots, met = [], [], 0
+        for r in rs:
+            if not r["ok"] or r["first_token_s"] is None:
+                continue
+            t = (r["first_token_s"] - r["dispatched_s"]) * 1000
+            ttfts.append(t)
+            pt = None
+            if r["end_s"] is not None and r["output_tokens"] > 1:
+                pt = (r["end_s"] - r["first_token_s"]) * 1000 / (r["output_tokens"] - 1)
+                tpots.append(pt)
+            if t <= slo["ttft_ms"] and (pt is None or pt <= slo["tpot_ms"]):
+                met += 1
+        q = lambda xs, p: sorted(xs)[min(len(xs) - 1, int(len(xs) * p))] if xs else 0
+        frac = met / len(rs)
+        if knee is None and frac < 0.99:
+            knee = pct
+        print(f"{pct:>6.0f}%{wc.request_rate * pct / 100:>9.1f}{len(rs) / step_s:>9.1f}"
+              f"{len(ttfts):>7}{frac * 100:>8.0f}%"
+              f"{q(ttfts, 0.5):>10.0f}{q(ttfts, 0.99):>10.0f}{q(tpots, 0.99):>10.1f}")
+
+    if knee is not None:
+        print(f"\nBreaks at {knee:.0f}% of roofline "
+              f"({wc.request_rate * knee / 100:.1f} rps).")
+    else:
+        print("\nNever broke — raise peak_fraction above 1.0.")
