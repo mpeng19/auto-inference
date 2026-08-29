@@ -24,14 +24,17 @@ suite. It has not yet met SGLang.
 | Metrics + goodput (`metrics.py`) | done, tested |
 | Load generator (`bench.py`) | done, tested against a fake SSE server |
 | Eval suite (9 patterns + mixed) | done, tested |
-| Modal app (`modal_app.py`) | written, **never executed** |
+| Modal app (`modal_app.py`) | **first end-to-end run green** |
 | H100 probe (`probe.py`) | both stages **PASS** |
 | Source overlays (`overlay.py`) | built; `schedule_policy.py` vendored |
-| Correctness gating | **not built — now the top risk** |
+| Correctness gating | canaries built; **floor not yet measured** |
+| Results tooling | `scripts/results.py` — ls / show / compare / pull |
+| 1-GPU workflow | `smoke`, `suite`, `noise` entrypoints |
+| 8xH100 path | `suite_8x`, `prefetch_big` — written, never run |
 | Spend monitor (`spend_monitor.py`) | done, **email delivery verified**; not deployed |
 | Secrets (HF, Resend, Modal token) | done, both keys verified live |
 | Weights in a Volume | not started |
-| Baseline / noise floor | not started |
+| Baseline / noise floor | suite + prefix diagnostic running |
 
 `uv run pytest -q` → **29 passed**.
 
@@ -50,6 +53,35 @@ suite. It has not yet met SGLang.
 7. Only then start turning knobs.
 
 ## Decisions
+
+**One server launch per suite, not per workload.** Model load is ~250s warm
+(349s cold, including the 31GB download) and would otherwise dominate a
+2-minute trace. `bench()` takes a *list* of workloads and replays each against
+the same server. Anything that varies per launch — a `ServingConfig` field, an
+overlay — still needs its own call; traffic shape does not.
+
+That ~250s is the real constraint on sweep size: every config change costs
+about $0.27 of pure loading before any measurement happens, so a 50-config
+sweep spends ~3.5 GPU-hours just loading. Worth knowing that several
+interesting knobs (`schedule_policy`, `max_running_requests`,
+`chunked_prefill_size`) are launch-time only in stock SGLang but could be made
+runtime-tunable *via an overlay* — which would collapse a whole sweep into one
+model load. That is probably the highest-leverage use of the overlay mechanism
+and should come before any large sweep.
+
+**Correctness is judged against a measured floor, not against exact match.**
+Greedy decoding is not bitwise deterministic across batch compositions —
+reduction order shifts and near-tied tokens flip. An exact-match test would
+fail constantly and train us to ignore it. So `noise` measures how much two
+runs of the *same* config diverge, and every other config is judged against
+that floor. Equal divergence is ordinary non-determinism; materially more is
+suspect.
+
+**Fail fast on a dead server.** `wait_until_ready` now watches the server
+process and aborts the moment it exits, and echoes the load log every 30s. The
+previous version would poll a corpse for the full 40-minute timeout — roughly
+$2.60 of GPU time to learn the server never started, with no visibility while
+it happened. That matters specifically for unattended runs.
 
 **Serving research means editing code, not just turning flags.** SGLang's CLI
 knobs are a thin slice of the design space; a better scheduler, KV eviction
@@ -159,6 +191,34 @@ through Resend.
    `client_dispatch_lag_ms` on the first real run.
 
 ## Session log
+
+### 2026-08-29 — first real bench run
+
+`smoke` green end to end: 60 requests, 0 failures, goodput 1.57 rps, p99 TTFT
+38ms, p99 TPOT 7.1ms, all 6 canaries returned. **Client dispatch lag p99 was
+2.6ms**, so the load generator was nowhere near saturated and the server
+numbers are trustworthy. At 1.6 rps nothing is stressed — the SLOs are 13x
+away from binding — which is what a smoke test should look like.
+
+Fixed along the way:
+
+- **The HF token was never attached.** We created the secret and left the
+  `secrets=[...]` line commented out, so SGLang was making unauthenticated Hub
+  requests. Now wired into every GPU function.
+- **fd limit raised to 65536.** The `ramp` workload issues ~3000 requests and
+  the client holds a socket per in-flight request; a default 1024 cap would
+  have surfaced as connection errors *attributed to the server*, which is a
+  wrong conclusion drawn from a client-side limit.
+- **Fast-fail on a dead server** plus a load-progress echo every 30s. The old
+  path polled `/health` for the full 40-minute timeout with no visibility —
+  ~$2.60 of GPU time to discover the server never started. Found this while
+  blind-waiting on the smoke run and unable to tell loading from crashed.
+- `hf_cache.commit()` after load, so a fresh download persists.
+
+**Model load time is highly variable: 247s, 349s, 505s across runs.** The
+weights are cached (the log confirms `skipping download`), so this is Volume
+read throughput, not network. It is the dominant per-experiment cost and it is
+not stable, which matters for planning sweeps.
 
 ### 2026-08-29 — probe_serve + overlay architecture
 

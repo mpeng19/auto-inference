@@ -89,7 +89,7 @@ def _provenance() -> dict:
     cpu=8.0,                          # headroom so the client is not the bottleneck
     volumes={"/cache": hf_cache, "/results": results_vol},
     timeout=90 * 60,
-    # secrets=[modal.Secret.from_name("huggingface")],  # only for gated repos
+    secrets=[modal.Secret.from_name("huggingface")],
 )
 def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
           warmup_n: int = 20, canaries: bool = True) -> dict:
@@ -107,6 +107,18 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
     from autoinf.config import SLO, ServingConfig, WorkloadConfig
     from autoinf.metrics import summarize
     from autoinf.workload import build_trace
+
+    # The ramp workload issues ~3000 requests and the client holds a socket
+    # per in-flight request. A default 1024-fd limit would surface as
+    # connection errors attributed to the *server*, which would be wrong.
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(65536, hard), hard))
+        print(f"RLIMIT_NOFILE {soft} -> {resource.getrlimit(resource.RLIMIT_NOFILE)[0]}",
+              flush=True)
+    except Exception as e:
+        print(f"could not raise fd limit: {e}", flush=True)
 
     sc = ServingConfig(**serving)
     sl = SLO(**slo)
@@ -213,7 +225,8 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
     return record
 
 
-@app.function(image=image, gpu="H100", volumes={"/cache": hf_cache}, timeout=60 * 60)
+@app.function(image=image, gpu="H100", volumes={"/cache": hf_cache},
+              secrets=[modal.Secret.from_name("huggingface")], timeout=60 * 60)
 def prefetch(model: str) -> str:
     """Download weights into the Volume once, so benchmark runs start warm."""
     from huggingface_hub import snapshot_download
@@ -371,7 +384,8 @@ def suite_8x(model: str = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
 
 
 @app.function(image=image, gpu="H100:8", cpu=16.0,
-              volumes={"/cache": hf_cache}, timeout=3 * 60 * 60)
+              volumes={"/cache": hf_cache},
+              secrets=[modal.Secret.from_name("huggingface")], timeout=3 * 60 * 60)
 def prefetch_big(model: str = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8") -> str:
     """Pull the 235B weights (~235GB) into the Volume. Storage is $0.09/GiB/mo,
     so this costs ~$21/month to keep parked -- delete it when not in use."""
