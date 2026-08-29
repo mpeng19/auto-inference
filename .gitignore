@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environments / secrets
+.env
+.env.*
+*.modal.toml
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Experiment outputs
+results/
+logs/
+*.log
+
+# Experiment artifacts
+runs/*.json
+!runs/.gitkeep
+
+# macOS
+.DS_Store
+
+# Large reference binaries — keep local, not in git history
+docs/*.pdf
