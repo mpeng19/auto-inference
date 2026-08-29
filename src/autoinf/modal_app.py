@@ -344,8 +344,22 @@ def smoke():
         print("\ncanary digests:", json.dumps(rec["canaries"]["digests"], indent=2))
 
 
+def _record(rec: dict, hypothesis: str, notes: str = "") -> None:
+    """Append a completed run to the local ledger, then print its health."""
+    from autoinf.ledger import Ledger, from_bench_record
+    if rec.get("status") != "ok" or not rec.get("runs"):
+        return
+    led = Ledger()
+    n = len(led.load())
+    e = led.append(from_bench_record(rec, f"e{n:04d}", hypothesis, notes=notes))
+    r = led.report()
+    print(f"\nledger: {e.id} recorded  |  {r['n']} experiments  |  "
+          f"cost ${r['total_cost_usd']}  |  {r['verdict']}")
+
+
 @app.local_entrypoint()
-def suite(minutes: float = 10.0, scale: float = 1.0, seed: int = 0):
+def suite(minutes: float = 10.0, scale: float = 1.0, seed: int = 0,
+          hypothesis: str = "baseline eval suite"):
     """Full eval suite against one server launch -- the 1-GPU test case.
 
     `minutes` is trace wall time, not total runtime; add ~4 min for model load.
@@ -359,6 +373,7 @@ def suite(minutes: float = 10.0, scale: float = 1.0, seed: int = 0):
                        "failure")}, indent=2, default=str))
     if rec.get("runs"):
         _print_table(rec["runs"])
+    _record(rec, hypothesis)
 
 
 @app.local_entrypoint()

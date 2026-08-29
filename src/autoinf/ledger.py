@@ -252,3 +252,68 @@ class Ledger:
                 + (f"\n    NOTE: {e.notes}" if e.notes else "")
             )
         return "\n".join(lines)
+
+
+# Modal per-second rates, for attributing cost to an experiment. Refresh with
+# `modal billing rates`.
+GPU_USD_PER_HOUR = {
+    "H100": 3.95, "H200": 4.54, "B200": 6.25, "B300": 7.10,
+    "A100-40GB": 2.10, "A100-80GB": 2.50, "L40S": 1.95, "L4": 0.80,
+    "A10G": 1.10, "T4": 0.59, "RTX PRO 6000": 3.03,
+}
+
+
+def estimate_cost(gpu: str, n_gpu: int, wall_s: float, cpus: float = 16.0) -> float:
+    """What one experiment cost, from wall time and the resources it held.
+
+    Charged from container start, so model load counts. That is the honest
+    accounting: a config that takes 500s to load costs more per experiment than
+    one that takes 90s, and a search should feel that.
+    """
+    gpu_rate = GPU_USD_PER_HOUR.get(gpu, 0.0) * max(1, n_gpu)
+    cpu_rate = 0.0473 * cpus
+    return (gpu_rate + cpu_rate) * wall_s / 3600.0
+
+
+def from_bench_record(rec: dict, exp_id: str, hypothesis: str,
+                      parent_id: str | None = None, notes: str = "",
+                      workload: str = "sustained") -> Experiment:
+    """Turn a `bench()` result into a ledger entry.
+
+    Scored on one named workload so experiments are comparable. Comparing a
+    config measured on `spike` against one measured on `sustained` would make
+    the ledger's progress curve meaningless.
+    """
+    cfg = rec.get("serving") or {}
+    ov = rec.get("overlay") or {}
+    runs = rec.get("runs") or []
+    chosen = next((r for r in runs if r.get("workload", {}).get("name") == workload),
+                  runs[0] if runs else None)
+
+    m = (chosen or {}).get("metrics") or {}
+    ttft = m.get("ttft_ms") or {}
+
+    canary_rate = None
+    if rec.get("canary_comparison"):
+        canary_rate = rec["canary_comparison"].get("exact_match_rate")
+
+    wall = float(rec.get("total_wall_s") or 0.0)
+    return Experiment(
+        id=exp_id,
+        ts=time.time(),
+        hypothesis=hypothesis,
+        config=cfg,
+        overlay_digest=ov.get("digest", ""),
+        overlay_files=tuple(ov.get("applied") or ()),
+        parent_id=parent_id,
+        goodput_rps=m.get("goodput_rps"),
+        p99_ttft_ms=ttft.get("p99"),
+        good_frac=m.get("good_frac"),
+        n_failed=int(m.get("n_failed") or 0),
+        canary_exact_rate=canary_rate,
+        cost_usd=round(estimate_cost(cfg.get("gpu", "H100"),
+                                     int(cfg.get("n_gpu") or 1), wall), 4),
+        wall_s=wall,
+        status=rec.get("status", "ok"),
+        notes=notes,
+    )
