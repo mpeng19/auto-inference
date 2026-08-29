@@ -46,6 +46,7 @@ image = (
         "aiohttp>=3.9",
         "hf-transfer>=0.1.6",
         "huggingface-hub>=0.26",
+        "anthropic>=0.40",          # drives the virtual-user simulator
     )
     .env({
         "HF_HOME": "/cache/huggingface",
@@ -529,3 +530,101 @@ def staircase(peak_fraction: float = 1.0, step_pct: float = 5.0,
               f"({wc.request_rate * knee / 100:.1f} rps).")
     else:
         print("\nNever broke — raise peak_fraction above 1.0.")
+
+
+@app.function(
+    image=image, gpu="H100", cpu=16.0,
+    volumes={"/cache": hf_cache, "/results": results_vol},
+    secrets=[modal.Secret.from_name("huggingface"),
+             modal.Secret.from_name("auto-inference-anthropic")],
+    timeout=90 * 60,
+)
+def humans(n_users: int = 40, duration_s: float = 300.0, arrival_rps: float = 2.0,
+           seed: int = 0, backend: str = "claude",
+           model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8") -> dict:
+    """Realism track: LLM-driven virtual users holding real conversations.
+
+    Runs inside the container so users reach the server over loopback. Driving
+    this from a laptop would put 20-80ms of WAN latency ahead of every TTFT,
+    which is larger than most effects we care about.
+    """
+    from autoinf.bench import wait_until_ready, warmup
+    from autoinf.virtual_users import run_virtual_users, summarize_sessions
+    from autoinf import overlay
+
+    sc = ServingConfig(model=model)
+    ov = overlay.apply("/overlays")
+    cmd = ["python", "-m", "sglang.launch_server", "--host", "127.0.0.1",
+           "--port", str(SERVER_PORT), *sc.to_sglang_args()]
+    print("launching:", " ".join(cmd), flush=True)
+
+    rec: dict = {"note": "virtual-users", "serving": asdict(sc), "overlay": ov,
+                 "params": {"n_users": n_users, "duration_s": duration_s,
+                            "arrival_rps": arrival_rps, "seed": seed,
+                            "backend": backend}}
+    log_path = "/tmp/sglang-humans.log"
+    with open(log_path, "wb") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            rec["model_load_s"] = round(asyncio.run(wait_until_ready(
+                SERVER_URL, 2400, proc=proc, log_path=log_path)), 1)
+            hf_cache.commit()
+            asyncio.run(warmup(SERVER_URL, model, 10))
+
+            turns = asyncio.run(run_virtual_users(
+                SERVER_URL, model, n_users=n_users, duration_s=duration_s,
+                arrival_rps=arrival_rps, seed=seed, backend=backend))
+            rec["summary"] = summarize_sessions(turns)
+            rec["turns"] = [asdict(t) for t in turns]
+            rec["status"] = "ok"
+        except Exception as e:
+            rec["status"] = "failed"
+            rec["failure"] = f"{type(e).__name__}: {e}"
+            print("FAILED:", rec["failure"], flush=True)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    stamp = f"{int(time.time())}-humans-{seed}"
+    os.makedirs("/results/runs", exist_ok=True)
+    with open(f"/results/runs/{stamp}.json", "w") as f:
+        json.dump(rec, f, indent=2, default=str)
+    results_vol.commit()
+    rec["result_path"] = f"/results/runs/{stamp}.json"
+    return rec
+
+
+@app.local_entrypoint()
+def realism(n_users: int = 40, duration_s: float = 300.0, seed: int = 0,
+            backend: str = "claude"):
+    """Run the virtual-user realism track and print what it found."""
+    rec = humans.remote(n_users=n_users, duration_s=duration_s, seed=seed,
+                        backend=backend)
+    print(json.dumps({k: rec.get(k) for k in
+                      ("status", "model_load_s", "result_path", "failure")},
+                     indent=2, default=str))
+    s = rec.get("summary")
+    if not s or not s.get("n_turns"):
+        return
+
+    print(f"\nsessions {s['n_sessions']}  turns {s['n_turns']}  ok {s['n_ok']}  "
+          f"abandoned {s['n_abandoned']} ({s['abandon_rate']:.0%})")
+    print(f"TTFT p50 {s['ttft_p50_ms']} ms   p99 {s['ttft_p99_ms']} ms")
+
+    print(f"\n{'turn':>5}{'n':>7}{'hist chars':>12}{'prompt tok':>12}{'TTFT p50':>10}")
+    print("-" * 46)
+    for d, v in s["by_turn_depth"].items():
+        print(f"{d:>5}{v['n']:>7}{v['mean_history_chars']:>12}"
+              f"{v['mean_prompt_tokens']:>12}{v['ttft_p50_ms'] or 0:>10.0f}")
+    print("\nTTFT should FALL with turn depth even as prompts grow: the shared\n"
+          "conversation prefix gets longer, so the cache serves more of it. If it\n"
+          "rises instead, prefix caching is not helping real multi-turn traffic\n"
+          "regardless of what the synthetic prefix_heavy workload reports.")
+
+    print(f"\n{'persona':<14}{'n':>6}{'TTFT p50':>10}{'out tok':>9}")
+    print("-" * 39)
+    for name, v in s["by_persona"].items():
+        print(f"{name:<14}{v['n']:>6}{v['ttft_p50_ms'] or 0:>10.0f}{v['mean_out_tokens']:>9}")
