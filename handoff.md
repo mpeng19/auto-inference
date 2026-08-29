@@ -187,6 +187,45 @@ through Resend.
 
 ## Session log
 
+### 2026-08-29 — recalibrated suite: it finally discriminates
+
+    workload         goodput   thruput   p99 TTFT  p99 TPOT  failed  lag p99
+    sustained          26.13     26.13         68      24.0       0        2
+    constant           26.57     26.57         74      25.9       0        2
+    bursty             25.45     27.11       1233      46.1       0       90
+    ramp               13.25     31.43      11847      29.1       0        2
+    spike               8.79     30.17      19804      71.0       0        3
+    prefill_heavy       1.80      1.80         89       7.8       0        3
+    decode_heavy        5.42      5.42         41      14.0       0        2
+    prefix_heavy       19.11     19.11        185      22.9       0        3
+    short_chat         76.17     76.17         45      25.2       0        2
+
+Goodput now diverges from throughput in three workloads. There is signal.
+
+**`spike` is the standout target.** Ten seconds of 4x overload inside a
+90-second trace costs **71% of all requests** their SLO (8.79 vs 30.17), and
+p99 TPOT breaches its 40ms target at 71ms. The damage vastly outlasts the
+spike — the server does not recover. That is the single most promising
+optimisation target we have: a clear mechanism (no admission control, unbounded
+prefill queue), a clean measurement, and a large effect.
+
+**`bursty` vs `sustained` at identical 32 rps mean:** goodput moves only -2.6%
+(25.45 vs 26.13) while p99 TTFT goes 68ms -> 1233ms, an 18x tail blowup.
+Burstiness costs almost nothing in aggregate and everything in the tail. Had we
+tracked goodput alone we would have called burstiness harmless; the
+constant/sustained/bursty triple at matched mean rate is what makes this
+visible.
+
+**`sustained` vs `constant`:** 26.13 vs 26.57 — arrival randomness alone costs
+~1.7%.
+
+**Caveat, not glossed:** `bursty` shows client dispatch lag p99 of 90ms (vs
+~2ms elsewhere) — at 128 rps peaks the load generator strains. The 1233ms TTFT
+is an order of magnitude above that so the signal survives, but bursty is the
+least trustworthy row in the table. Bumped the bench container to 16 CPUs; CPU
+is $0.047/core/hr against $3.95 for the H100, so removing a measurement
+confound is nearly free.
+
 ### 2026-08-29 — saturation knee found
 
 `saturate` ramped 5 -> 160 rps over 300s, 24807 requests, bucketed by arrival

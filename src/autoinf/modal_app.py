@@ -86,7 +86,11 @@ def _provenance() -> dict:
 @app.function(
     image=image,
     gpu="H100",                       # override per-call: .with_options(gpu="H100:8")
-    cpu=8.0,                          # headroom so the client is not the bottleneck
+    cpu=16.0,                         # headroom so the client is not the bottleneck.
+                                      # Client lag hit 90ms on `bursty` (128 rps peaks)
+                                      # at cpu=8. CPU is $0.047/core/hr against $3.95
+                                      # for the H100 -- cheap insurance against a
+                                      # client-side artefact polluting server numbers.
     volumes={"/cache": hf_cache, "/results": results_vol},
     timeout=90 * 60,
     secrets=[modal.Secret.from_name("huggingface")],
@@ -250,7 +254,7 @@ def bench_for(sc, region: str | None = None):
     n = max(1, sc.n_gpu)
     opts = {
         "gpu": f"{sc.gpu}:{n}" if n > 1 else sc.gpu,
-        "cpu": float(max(8, 2 * n)),
+        "cpu": float(max(16, 4 * n)),
         "timeout": 60 * 60 * (2 if n > 1 else 1) + 1800,
     }
     if region:
