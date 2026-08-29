@@ -146,3 +146,47 @@ def test_warmup_window_never_empties_the_result_set():
                         100, 10, True) for i in range(5)]
     s = summarize(rs, slo, warmup_s=1000.0)
     assert s["n_requests"] == 5
+
+
+def _ttft_trace(fn, n=600, gap=0.03):
+    return [RequestResult(i, i * gap, i * gap, i * gap + fn(i),
+                          i * gap + fn(i) + 0.5, 100, 20, True) for i in range(n)]
+
+
+def test_collapse_detector_ignores_a_stable_trace():
+    from autoinf.metrics import detect_collapse
+    d = detect_collapse(_ttft_trace(lambda i: 0.040))
+    assert d["available"] and not d["collapsed"]
+
+
+def test_collapse_detector_catches_a_late_runaway():
+    """The shape actually observed: flat, then unbounded escalation."""
+    from autoinf.metrics import detect_collapse
+    d = detect_collapse(_ttft_trace(
+        lambda i: 0.040 if i < 400 else 0.040 * (1 + (i - 400) / 40) ** 2))
+    assert d["collapsed"], d
+    assert d["escalation_ratio"] > 5
+    assert d["onset_s"] is not None
+
+
+def test_collapse_detector_does_not_fire_on_a_recovered_spike():
+    """A transient that recovers is not a collapse; the run is still usable."""
+    from autoinf.metrics import detect_collapse
+    d = detect_collapse(_ttft_trace(
+        lambda i: 0.400 if 250 <= i < 330 else 0.040))
+    assert not d["collapsed"], d
+
+
+def test_collapse_detector_reproduces_the_observed_run():
+    """Bucket medians from the real diverging run, 2026-08-29."""
+    from autoinf.metrics import detect_collapse
+    med = [96, 153, 79, 234, 69, 99, 87, 135, 366, 75, 97, 616, 1219, 1521, 2704]
+    rs = []
+    for b, v in enumerate(med):
+        for k in range(40):
+            i = b * 40 + k
+            rs.append(RequestResult(i, i * 0.25, i * 0.25, i * 0.25 + v / 1000,
+                                    i * 0.25 + v / 1000 + 0.5, 100, 20, True))
+    d = detect_collapse(rs, n_buckets=15)
+    assert d["collapsed"]
+    assert 100 < d["onset_s"] < 120, d["onset_s"]

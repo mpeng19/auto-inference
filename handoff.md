@@ -220,6 +220,66 @@ through Resend.
 
 ## Session log
 
+### 2026-08-29 — metastable congestion collapse (the big one)
+
+Two **identical** 30-minute suite runs, same seed, same config, same hardware:
+
+    workload        run A    run B
+    sustained       30.47    19.62
+    constant        30.29     0.54
+    bursty          27.74     4.73
+    human           21.18     1.57
+    prefill_heavy    1.82     1.82
+    decode_heavy     6.17     6.14
+    prefix_heavy    19.28    19.27
+    short_chat      77.52    77.37
+
+The low-rate workloads agree to three digits. The ~30 rps ones disagree by up
+to 98%.
+
+**Server-side metrics identified it.** Same throughput (30.47 vs 30.39), same
+decode speed (ITL p99 60 vs 56ms), same GPU and driver, and **queue time
+negligible in both** (1ms vs 5ms) — yet server-reported TTFT p99 was 99ms in A
+and 3616ms in B. Not a slow host, and not queueing as SGLang accounts for it.
+
+The time series settled it. TTFT p50 per bucket:
+
+    t(s)     0    40    81   111   121   131   142
+    A       35    39    39    41    41    39    42
+    B       96    69   366   616  1219  1521  2704
+
+**A is flat for 152s. B enters a runaway at t~110 and never recovers.**
+
+This is metastable congestion collapse. At ~30 rps against ~34 rps capacity we
+sit at ~88% utilisation, where there is no slack to drain a transient. One
+unlucky excursion builds a backlog that never clears; TTFT escalates without
+bound while throughput stays pinned, because the server is still completing
+requests, just increasingly late ones.
+
+**It also explains `spike`**: 10s of overload costing 71% of a 90s trace with no
+recovery is the same mechanism.
+
+Two consequences.
+
+*A design error of mine.* Calibrating the suite to sit just below the knee
+maximised sensitivity and put it inside the metastable region, where a single
+run measures which basin it fell into. Reproducibility and sensitivity were in
+conflict and I optimised only for sensitivity. General-purpose workloads now
+sit at ~60% of measured max throughput (20 rps), outside that region.
+
+*A research target.* A server that collapses unboundedly at 88% load has no
+admission control. `metrics.detect_collapse` makes this a first-class metric —
+whether and when TTFT runs away — so the instability is measured rather than
+averaged into a number that never occurs. A new `stress` workload sits
+deliberately inside the region; there the metric is collapse *rate* over
+repeats, never single-run goodput.
+
+The detector was itself wrong on first write: it required most bucket
+transitions to rise, which a collapse with a flat prefix fails. It now tests
+that the final third is far above the first *and* the trace ends near its peak,
+which separates a runaway from a spike that recovered. Validated against the
+real run B: onset 109.8s, 28.2x escalation.
+
 ### 2026-08-29 — noise floor: 0.03% on goodput
 
 Five separate server launches, same config, same trace — fresh container and

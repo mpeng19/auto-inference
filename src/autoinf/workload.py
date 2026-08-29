@@ -311,17 +311,25 @@ def suite(seed: int = 0, scale: float = 1.0,
           minutes: float | None = None) -> dict[str, WorkloadConfig]:
     """Named workloads. `scale` multiplies request counts for longer runs.
 
-    Rates are calibrated against the **measured** saturation knee for
-    Qwen3-30B-A3B-FP8 on one H100 (see handoff.md, `saturate` run 2026-08-29):
+    Rates are calibrated against the **measured** behaviour of
+    Qwen3-30B-A3B-FP8 on one H100 (see handoff.md):
 
-        offered 35.6 rps -> 100% met SLO, p99 TTFT 382ms
-        offered 49.1 rps ->  24% met SLO, p99 TTFT 3833ms
-        sustained max throughput 34.3 rps
+        offered 35.6 rps -> 100% met SLO       max throughput 34.3 rps
+        offered 49.1 rps ->  24% met SLO
 
-    The first calibration guessed rates ~10x too low and every workload met
-    both SLOs on 100% of requests — measuring an idle server, where no
-    scheduling change can possibly show up. These sit just below or astride the
-    knee, which is the only regime where serving decisions are observable.
+    **Two corrections got us here.** The first calibration guessed rates ~10x
+    too low: every workload passed trivially, measuring an idle server. The
+    second overcorrected to ~32 rps, just under the knee — which put the suite
+    inside the *metastable* region. Two identical runs there produced 30.47 and
+    19.62 goodput, and one of them escalated from 96ms to 2704ms TTFT mid-trace
+    at unchanged throughput. At ~88% utilisation there is no slack to drain a
+    transient, so a run measures which basin it fell into.
+
+    The general-purpose workloads now sit near **60% of measured max
+    throughput**, comfortably outside that region, which is what makes A/B
+    comparison meaningful. Load near and past the knee is still covered, by
+    `ramp`, `spike` and `stress` — but there the honest metric is *whether and
+    when it collapses* (`metrics.detect_collapse`), not goodput at a point.
 
     Per-workload capacity differs sharply because the bottleneck differs:
     prefill_heavy is prefill-bound (~8300 prefill tok/s, so ~2 req/s at 3825
@@ -345,20 +353,20 @@ def suite(seed: int = 0, scale: float = 1.0,
         # Just below the knee: sensitive to scheduling without being a
         # foregone collapse. Everything else is compared to this.
         "sustained": WorkloadConfig(
-            name="sustained", arrival="poisson", request_rate=32.0,
+            name="sustained", arrival="poisson", request_rate=20.0,
             n_requests=n(1600), seed=seed),
 
         # Control: zero arrival variance at the same mean rate. The gap to
         # `sustained` is the cost of randomness alone.
         "constant": WorkloadConfig(
-            name="constant", arrival="constant", request_rate=32.0,
+            name="constant", arrival="constant", request_rate=20.0,
             n_requests=n(1600), seed=seed),
 
         # Same mean rate as `sustained`, delivered in 4x bursts that peak at
         # 128 rps — well past the knee. Isolates burstiness: identical load,
         # different shape, and the bursts should now actually hurt.
         "bursty": WorkloadConfig(
-            name="bursty", arrival="bursty", request_rate=32.0,
+            name="bursty", arrival="bursty", request_rate=20.0,
             burst_factor=4.0, burst_on_s=2.0, n_requests=n(1600), seed=seed),
 
         # Brackets the knee (10 -> 64) so the bend is inside the trace.
@@ -411,11 +419,22 @@ def suite(seed: int = 0, scale: float = 1.0,
 
         # Realistic mixed traffic: ten request categories at their real-world
         # shares, human-plausible prompts, and 40% behind a shared system
-        # prompt. Rate is 60% of roofline -- roughly the achievable maximum,
-        # since measurement put real throughput at 61% of the ceiling.
+        # prompt. Held at the same stable rate as `sustained` so the two are
+        # directly comparable -- the difference is then traffic *composition*,
+        # not load.
+        # Deliberately inside the metastable region. Goodput here is not a
+        # reproducible number and must not be A/B'd; the metric is
+        # `detect_collapse` -- did it run away, and when. Run it repeatedly and
+        # report the collapse *rate*.
+        "stress": WorkloadConfig(
+            name="stress", arrival="poisson", request_rate=32.0,
+            category_mix=_prompts.ALL_CATEGORIES,
+            prefix_share_frac=0.4, n_shared_prefixes=3, shared_prefix_len=180,
+            n_requests=n(1600), seed=seed),
+
         "human": WorkloadConfig(
             name="human", arrival="poisson",
-            request_rate=round(roofline_rps() * 0.60, 1),
+            request_rate=20.0,
             category_mix=_prompts.ALL_CATEGORIES,
             prefix_share_frac=0.4, n_shared_prefixes=3, shared_prefix_len=180,
             n_requests=n(1500), seed=seed),

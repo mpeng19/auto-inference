@@ -122,7 +122,7 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
                                  run_trace_sp)
     from autoinf.canary import CANARIES, digest as cdigest
     from autoinf.config import SLO, ServingConfig, WorkloadConfig
-    from autoinf.metrics import summarize
+    from autoinf.metrics import detect_collapse, summarize
     from autoinf.workload import build_trace
 
     # The ramp workload issues ~3000 requests and the client holds a socket
@@ -224,6 +224,7 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
                     "trace_describe": trace.describe(),
                     "bench_wall_s": wall,
                     "metrics": m,
+                    "collapse": detect_collapse(results),
                     "server_metrics": srv,
                     "client_health": health,
                     "client_vs_server": server_metrics.compare_client_server(
@@ -250,6 +251,13 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
                       + (f" | queue p99 {qt*1000:.0f}ms" if qt else "")
                       + f" | failed {m['n_failed']} | client {health['verdict'].split(' ')[0]}",
                       flush=True)
+                col = record["runs"][-1]["collapse"]
+                if col.get("collapsed"):
+                    print(f"   COLLAPSE: TTFT {col['ttft_first_bucket_ms']:.0f} -> "
+                          f"{col['ttft_last_bucket_ms']:.0f} ms "
+                          f"({col['escalation_ratio']:.1f}x) from t={col['onset_s']}s "
+                          f"-- goodput here measures the basin, not the config",
+                          flush=True)
                 if record.get("stopped_early"):
                     break
 

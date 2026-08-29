@@ -162,3 +162,86 @@ def _error_counts(failed: list[RequestResult]) -> dict:
         key = (r.error or "unknown")[:120]
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def detect_collapse(results: list["RequestResult"], n_buckets: int = 12,
+                    escalation_factor: float = 3.0) -> dict:
+    """Did latency run away during the trace?
+
+    Near saturation a continuous-batching server is **metastable**: the same
+    offered load either holds steady or enters an unbounded escalation,
+    depending on whether an early transient happened to build a backlog that
+    could not drain. Observed directly -- two identical 30 rps runs, one flat at
+    40ms TTFT for 152s, the other climbing 96 -> 2704ms and never recovering,
+    at the same throughput.
+
+    Single-point goodput cannot express this: it reports which basin the run
+    fell into, and averaging across runs invents a middle value that never
+    occurs. So collapse is measured as its own property.
+
+    A stable run has flat TTFT across the trace. A collapsed run has TTFT that
+    climbs monotonically and ends far above where it started.
+    """
+    ok = [r for r in results if r.ok and r.ttft_ms is not None]
+    if len(ok) < 4 * n_buckets:
+        return {"available": False, "reason": "too few requests to bucket"}
+
+    span = max(r.scheduled_s for r in ok) - min(r.scheduled_s for r in ok)
+    if span <= 0:
+        return {"available": False, "reason": "zero-duration trace"}
+    t0 = min(r.scheduled_s for r in ok)
+
+    buckets: list[list[float]] = [[] for _ in range(n_buckets)]
+    for r in ok:
+        i = min(n_buckets - 1, int((r.scheduled_s - t0) / span * n_buckets))
+        buckets[i].append(r.ttft_ms)
+
+    med = [percentile(b, 50) for b in buckets if b]
+    if len(med) < n_buckets // 2:
+        return {"available": False, "reason": "sparse buckets"}
+
+    first, last = med[0], med[-1]
+    ratio = last / first if first > 0 else float("inf")
+
+    # Escalation must be sustained rather than a spike that recovered. Two
+    # conditions: the final third sits well above the first, and the trace
+    # *ends* near its worst.
+    #
+    # An earlier version also required most bucket-to-bucket transitions to
+    # rise. That was wrong: a collapse beginning midway through has a flat
+    # prefix contributing no rises, so the check rejected precisely the shape it
+    # was meant to catch. "Ends near its worst" separates runaway from spike
+    # without penalising a late onset.
+    third = max(1, len(med) // 3)
+    early = sum(med[:third]) / third
+    late = sum(med[-third:]) / third
+    peak = max(med)
+    ends_high = med[-1] >= 0.7 * peak
+    rises = sum(1 for a, b in zip(med, med[1:]) if b > a)
+    monotonic_frac = rises / max(1, len(med) - 1)
+
+    collapsed = (late > early * escalation_factor) and ends_high
+
+    onset = None
+    if collapsed:
+        for i, v in enumerate(med):
+            if v > early * escalation_factor:
+                onset = round(t0 + span * i / n_buckets, 1)
+                break
+
+    return {
+        "available": True,
+        "collapsed": collapsed,
+        "ttft_first_bucket_ms": round(first, 1),
+        "ttft_last_bucket_ms": round(last, 1),
+        "escalation_ratio": round(ratio, 2),
+        "early_third_ms": round(early, 1),
+        "late_third_ms": round(late, 1),
+        "monotonic_frac": round(monotonic_frac, 2),
+        "ends_near_peak": ends_high,
+        "onset_s": onset,
+        "bucket_medians_ms": [round(m, 1) for m in med],
+        "note": ("A collapsed run is not a slower run: throughput is typically "
+                 "unchanged. It has entered a backlog it cannot drain, so "
+                 "goodput from it measures the basin, not the configuration."),
+    }
