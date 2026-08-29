@@ -25,7 +25,9 @@ suite. It has not yet met SGLang.
 | Load generator (`bench.py`) | done, tested against a fake SSE server |
 | Eval suite (9 patterns + mixed) | done, tested |
 | Modal app (`modal_app.py`) | written, **never executed** |
-| H100 probe (`probe.py`) | `probe_env` **PASS**; `probe_serve` not yet run |
+| H100 probe (`probe.py`) | both stages **PASS** |
+| Source overlays (`overlay.py`) | built; `schedule_policy.py` vendored |
+| Correctness gating | **not built — now the top risk** |
 | Spend monitor (`spend_monitor.py`) | done, **email delivery verified**; not deployed |
 | Secrets (HF, Resend, Modal token) | done, both keys verified live |
 | Weights in a Volume | not started |
@@ -48,6 +50,33 @@ suite. It has not yet met SGLang.
 7. Only then start turning knobs.
 
 ## Decisions
+
+**Serving research means editing code, not just turning flags.** SGLang's CLI
+knobs are a thin slice of the design space; a better scheduler, KV eviction
+policy, batch former or dataloader is code, not configuration. `overlay.py`
+makes any file under `sglang/` replaceable:
+
+    overlays/sglang/srt/managers/schedule_policy.py
+        replaces
+    site-packages/sglang/srt/managers/schedule_policy.py
+
+This is cheap because SGLang's serving layer is pure Python — verified by
+probe: `managers/{scheduler,schedule_policy,schedule_batch,tp_worker}.py` and
+`mem_cache/{radix_cache,memory_pool}.py` all exist as plain modules, while the
+compiled code sits in separate packages (`sgl_kernel`, `sgl_deep_gemm`,
+`sgl_deep_ep`). So overlays need no recompilation, and Modal mounts the overlay
+directory at runtime (`copy=False`), so an edit costs a container start rather
+than an image rebuild.
+
+Every overlay records the SHA of the upstream file it came from. If SGLang is
+upgraded and that file moves, `apply()` refuses to run — a stale overlay would
+silently revert upstream changes while still looking like a valid experiment.
+The run record carries the overlay digest, so a result is attributable to a
+specific version of the serving *code*, not just a config.
+
+Tiers, cheapest first: **0** config flags; **1** overlaid Python modules;
+**2** wholly new components injected via overlay; **3** CUDA kernels, which do
+need compilation and an image rebuild, and are deliberately out of scope now.
 
 **Dev on Qwen3-30B-A3B-Instruct-2507-FP8, single H100 — not the 235B target.**
 ~31GB of weights leaves ~49GB for KV on one H100, at $3.95/hr instead of
@@ -97,18 +126,29 @@ through Resend.
 1. ~~Does the image build?~~ **Answered: yes.** 228s, sglang 0.5.18,
    torch 2.13.0+cu130, flash-attn-4, flashinfer 0.6.17.
 2. ~~Are the SGLang flag names right?~~ **Answered: all 12 present.**
-3. **Is `ignore_eos` honoured** by SGLang's OpenAI-compatible endpoint? Without
-   it, output lengths depend on when the model emits EOS and the decode
-   workload stops being controlled. `probe_serve` tests this directly by asking
-   for exactly 64 tokens on a prompt the model would answer in a handful.
-4. **Does Modal give consistent hardware run to run?** The noise floor answers
-   this directly. If it is bad, the serverless abstraction may make Modal the
-   wrong substrate for measurement, and a dedicated node elsewhere becomes the
-   better call.
+3. ~~Is `ignore_eos` honoured?~~ **Answered: yes.** Asked 64, got 64.
+4. ~~Does Modal give consistent hardware?~~ **Answered: yes, tightly.**
+   Idle TTFT CV 0.022, total CV 0.009 over n=20. A 10% effect is detectable.
+   This is the idle floor; under load it will be worse.
 5. **Starter's GPU concurrency limit of 10** means one 8×H100 run at a time and
    no parallel sweeps. Fine for Phase 0/1; a Phase-2 blocker.
-6. **Is `stream_options.include_usage` supported?** The client falls back to
-   counting deltas, which is an approximation — a delta is not always one token.
+6. ~~Is `stream_options.include_usage` supported?~~ **Answered: yes**, and
+   deltas != tokens (62 vs 64), so counting deltas would have biased TPOT ~3%
+   on every request. `bench.py` uses `usage`, which was the right call.
+9. **Why is a warm prefix cache SLOWER?** Reproducible at CV ~1%: cold TTFT
+   36.2ms, warm 105.9ms over 6 flush-separated trials. And an 11-token prompt
+   takes 100ms to first token while a 1213-token prompt cold-prefills in 36ms
+   — 110x more prefill work, faster. TTFT at low load is evidently dominated
+   by fixed scheduling overhead, not compute; the likely story is that a
+   request with no prefill work waits for a scheduler tick while one with real
+   work is picked up immediately. **`prefix_heavy` results mean nothing until
+   this is understood.** First diagnostic now that overlays exist: instrument
+   `schedule_policy.py` directly.
+10. **Correctness gating does not exist yet.** Overlays make the serving code
+    editable, which means it is now possible to "win" by breaking correctness —
+    truncating outputs, dropping requests, altering sampling. Output-equivalence
+    checks at temp=0 against a stock baseline must land before any overlay is
+    trusted, and certainly before an agent is allowed to write one.
 7. **Should we upgrade the Modal image builder?** The workspace is on the legacy
    `2023.12` builder and Modal suggests upgrading. Doing so changes the base
    image for everything and forces a rebuild, so it is a deliberate choice, not
@@ -119,6 +159,26 @@ through Resend.
    `client_dispatch_lag_ms` on the first real run.
 
 ## Session log
+
+### 2026-08-29 — probe_serve + overlay architecture
+
+- `probe_serve` PASS. `ignore_eos` honoured (64 asked, 64 returned; 12 without).
+  Usage present in stream. Deltas != tokens (62 vs 64) — vindicates using the
+  server's `usage` rather than counting stream chunks.
+- **Noise floor measured: idle TTFT CV 0.022, total CV 0.009 over n=20.**
+  Modal hardware is consistent enough to detect a 10% effect. Biggest
+  existential risk to the project retired.
+- **Prefix cache is reproducibly backwards** (cold 36.2ms vs warm 105.9ms,
+  CV ~1%, n=6 with `/flush_cache` between trials). First run had suggested this
+  at n=1 and was rightly dismissed as noise; repeated measurement made it real.
+  Logged as open question 9.
+- Reworked the probe to repeat every latency measurement and compare medians —
+  the n=1 version produced a nonsense answer that looked like a finding.
+- **Built the overlay system** in response to the point that the harness should
+  not be limited to SGLang's exposed flags. Vendored
+  `srt/managers/schedule_policy.py` (1500 lines) as the first editable target.
+- `modal_app.bench` now applies overlays before launch and records their digest
+  in every run record.
 
 ### 2026-08-29 — probe_env results
 

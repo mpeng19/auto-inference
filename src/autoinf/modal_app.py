@@ -55,6 +55,10 @@ image = (
     })
     # Ship our harness source into the image.
     .add_local_python_source("autoinf")
+    # Source overlays: files here replace their counterparts inside the
+    # installed sglang package at container start. Mounted (copy=False), so
+    # editing a scheduler costs a container start, not an image rebuild.
+    .add_local_dir("overlays", "/overlays", copy=False)
 )
 
 app = modal.App(APP_NAME)
@@ -94,9 +98,18 @@ def bench(serving: dict, workload: dict, slo: dict, note: str = "") -> dict:
     from autoinf.metrics import summarize
     from autoinf.workload import build_trace
 
+    from autoinf import overlay
+
     sc = ServingConfig(**serving)
     wc = WorkloadConfig(**workload)
     sl = SLO(**slo)
+
+    # Apply source overlays before the server imports anything. Raises if an
+    # overlay has gone stale against the installed SGLang, rather than quietly
+    # producing a result attributed to the wrong code.
+    ov = overlay.apply("/overlays")
+    if ov["n_overlays"]:
+        print(f"applied {ov['n_overlays']} overlay(s): {ov['applied']}", flush=True)
 
     cmd = [
         "python", "-m", "sglang.launch_server",
@@ -116,6 +129,8 @@ def bench(serving: dict, workload: dict, slo: dict, note: str = "") -> dict:
             "workload": asdict(wc), "workload_digest": wc.digest(),
             "slo": asdict(sl),
             "provenance": _provenance(),
+            # Which serving *code* produced this result, not just which config.
+            "overlay": ov,
         }
 
         try:
@@ -153,7 +168,7 @@ def bench(serving: dict, workload: dict, slo: dict, note: str = "") -> dict:
         pass
 
     # Persist inside the container too, so a crashed caller does not lose the run.
-    stamp = f"{int(time.time())}-{sc.digest()}-{wc.digest()}"
+    stamp = f"{int(time.time())}-{sc.digest()}-{wc.digest()}-{ov['digest']}"
     os.makedirs("/results/runs", exist_ok=True)
     with open(f"/results/runs/{stamp}.json", "w") as f:
         json.dump(record, f, indent=2, default=str)

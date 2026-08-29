@@ -168,51 +168,112 @@ async def _stream(session, model: str, prompt: str, max_tokens: int,
             "deltas": deltas, "usage": usage}
 
 
+async def _repeat(session, model, prompt, max_tokens, n, ignore_eos=True) -> list[dict]:
+    out = []
+    for _ in range(n):
+        out.append(await _stream(session, model, prompt, max_tokens, ignore_eos))
+    return out
+
+
+def _dist(xs: list[float]) -> dict:
+    """Median-centred summary. n=1 latency numbers are not evidence."""
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return {"n": 0}
+    mid = xs[len(xs) // 2]
+    mean = sum(xs) / len(xs)
+    var = sum((x - mean) ** 2 for x in xs) / len(xs)
+    return {
+        "n": len(xs), "median": round(mid, 1),
+        "min": round(xs[0], 1), "max": round(xs[-1], 1),
+        "cv": round((var ** 0.5) / mean, 3) if mean else None,
+    }
+
+
+async def _flush(session) -> bool:
+    """Drop the radix cache so a 'cold' measurement is genuinely cold."""
+    for path in ("/flush_cache", "/flush_cache/"):
+        try:
+            async with session.post(SERVER_URL + path) as r:
+                if r.status in (200, 204):
+                    await asyncio.sleep(0.5)
+                    return True
+        except Exception:
+            pass
+    return False
+
+
 async def _serving_checks(model: str) -> dict:
     import aiohttp
 
     res: dict = {}
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=300)
-    ) as s:
-        # Q3: is ignore_eos honoured? Ask for exactly 64 tokens on a prompt the
-        # model would normally answer in a handful, and see what comes back.
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as s:
+        # ── Q3: is ignore_eos honoured? ──────────────────────────
         want = 64
-        with_ignore = await _stream(s, model, "Say hi.", want, ignore_eos=True)
-        without = await _stream(s, model, "Say hi.", want, ignore_eos=False)
-        res["ignore_eos_on"] = with_ignore
-        res["ignore_eos_off"] = without
+        on = await _stream(s, model, "Say hi.", want, ignore_eos=True)
+        off = await _stream(s, model, "Say hi.", want, ignore_eos=False)
+        got = (on.get("usage") or {}).get("completion_tokens")
+        res["ignore_eos"] = {
+            "asked": want, "got_with_flag": got,
+            "got_without_flag": (off.get("usage") or {}).get("completion_tokens"),
+            "honoured": got == want,
+        }
 
-        got = (with_ignore.get("usage") or {}).get("completion_tokens")
-        res["ignore_eos_honoured"] = (got == want)
-        res["ignore_eos_note"] = (
-            f"asked {want}, got {got}. If these differ, output length is not "
-            "controlled and decode workload varies run to run."
-        )
+        # ── Q6: usage accounting ─────────────────────────────────
+        u = on.get("usage") or {}
+        res["usage_in_stream"] = bool(u)
+        res["deltas_vs_tokens"] = {
+            "deltas": on.get("deltas"), "completion_tokens": u.get("completion_tokens"),
+            "equal": on.get("deltas") == u.get("completion_tokens"),
+            "note": "if unequal, counting deltas would bias TPOT; bench.py uses usage",
+        }
 
-        # Q6: does the server report usage in the stream?
-        res["usage_in_stream"] = bool(with_ignore.get("usage"))
-        u = with_ignore.get("usage") or {}
-        res["delta_equals_token_count"] = (with_ignore.get("deltas") == u.get("completion_tokens"))
+        # ── warm up, then measure single-request noise ───────────
+        # This is a preview of the noise floor: identical requests, no load,
+        # nothing else running. Whatever spread shows up here is a lower bound
+        # on the spread of any benchmark number.
+        await _repeat(s, model, "Say hi.", 32, 5)
+        idle = await _repeat(s, model, "Say hi.", 32, 20)
+        res["idle_ttft_ms"] = _dist([r.get("ttft_ms") for r in idle])
+        res["idle_total_ms"] = _dist([r.get("total_ms") for r in idle])
 
-        # Prefix cache: identical long prompt twice. The second should be
-        # markedly faster to first token if the radix cache is working.
+        # ── prefix cache, measured properly ──────────────────────
+        # Previous run compared one cold sample to one warm sample and got a
+        # nonsense answer (warm slower than cold). Flush between trials and
+        # repeat, so the comparison is between distributions.
         long_prompt = ("system latency throughput scheduler " * 300) + " Summarize."
-        cold = await _stream(s, model, long_prompt, 8, ignore_eos=True)
-        warm = await _stream(s, model, long_prompt, 8, ignore_eos=True)
-        res["prefix_cold"] = cold
-        res["prefix_warm"] = warm
-        if cold.get("ttft_ms") and warm.get("ttft_ms"):
-            res["prefix_speedup"] = round(cold["ttft_ms"] / warm["ttft_ms"], 2)
+        res["flush_supported"] = await _flush(s)
 
-        # Server-reported scheduler state, if exposed.
-        for path in ("/get_server_info", "/health_generate"):
-            try:
-                async with s.get(SERVER_URL + path) as r:
-                    res[f"endpoint{path}"] = (await r.text())[:800] if r.status == 200 \
-                        else f"HTTP {r.status}"
-            except Exception as e:
-                res[f"endpoint{path}"] = f"{type(e).__name__}"
+        colds, warms = [], []
+        for _ in range(6):
+            await _flush(s)
+            c = await _stream(s, model, long_prompt, 8, True)
+            w = await _stream(s, model, long_prompt, 8, True)
+            if c.get("ttft_ms"):
+                colds.append(c["ttft_ms"])
+            if w.get("ttft_ms"):
+                warms.append(w["ttft_ms"])
+
+        res["prefix_cold_ttft_ms"] = _dist(colds)
+        res["prefix_warm_ttft_ms"] = _dist(warms)
+        cm = res["prefix_cold_ttft_ms"].get("median")
+        wm = res["prefix_warm_ttft_ms"].get("median")
+        if cm and wm:
+            res["prefix_speedup_median"] = round(cm / wm, 2)
+            res["prefix_verdict"] = (
+                "cache helps" if cm / wm > 1.3 else
+                "no measurable benefit — investigate before trusting prefix_heavy"
+            )
+
+        try:
+            async with s.get(SERVER_URL + "/get_server_info") as r:
+                info = await r.json()
+                res["server_info"] = {k: info.get(k) for k in
+                    ("max_running_requests", "max_total_num_tokens", "chunked_prefill_size",
+                     "schedule_policy", "mem_fraction_static", "disable_radix_cache",
+                     "quantization", "kv_cache_dtype", "context_length", "tp_size")}
+        except Exception as e:
+            res["server_info"] = f"{type(e).__name__}: {e}"
     return res
 
 
