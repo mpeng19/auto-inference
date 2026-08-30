@@ -41,6 +41,10 @@ class ModelSpec:
     n_experts_active: int
     vocab_size: int
     bytes_per_param: float = 1.0        # FP8
+    tie_embeddings: bool = False
+    # A dense model is the degenerate MoE: one "expert", always active. Keeping
+    # one code path means the roofline maths does not fork by architecture.
+    dense: bool = False
 
     # ── parameter counts ─────────────────────────────────────────
     @property
@@ -59,17 +63,22 @@ class ModelSpec:
 
     @property
     def moe_params_per_layer(self) -> int:
+        if self.dense:
+            return self.expert_params          # no router, single FFN
         router = self.hidden_size * self.n_experts
         return self.n_experts * self.expert_params + router
 
     @property
     def active_moe_params_per_layer(self) -> int:
+        if self.dense:
+            return self.expert_params
         return self.n_experts_active * self.expert_params + self.hidden_size * self.n_experts
 
     @property
     def total_params(self) -> int:
         body = self.n_layers * (self.attn_params_per_layer + self.moe_params_per_layer)
-        return body + 2 * self.vocab_size * self.hidden_size   # embed + lm_head
+        heads = 1 if self.tie_embeddings else 2
+        return body + heads * self.vocab_size * self.hidden_size
 
     @property
     def active_params(self) -> int:
@@ -98,6 +107,8 @@ class ModelSpec:
         saturates fast: at batch 64 with 8-of-128 routing, ~127 of 128 experts
         are touched. That is why decode bytes track *total* params, not active.
         """
+        if self.dense:
+            return 1.0
         p_unused = (1.0 - self.n_experts_active / self.n_experts) ** batch
         return self.n_experts * (1.0 - p_unused)
 
@@ -133,6 +144,25 @@ QWEN3_30B_A3B = ModelSpec(
     moe_intermediate=768, n_experts=128, n_experts_active=8, vocab_size=151936,
 )
 
+# Dense small models, for cheap iteration. They lose the MoE dynamics (expert
+# routing, the all-experts-touched decode read) but keep every scheduling,
+# batching, KV and prefix-cache behaviour, which is most of what the serving
+# layer actually does. Qwen3-4B is the pick: 262k native context, so it can
+# hold an agentic conversation, on a GPU that costs a fraction of an H100.
+QWEN3_4B = ModelSpec(
+    name="Qwen/Qwen3-4B-Instruct-2507-FP8",
+    hidden_size=2560, n_layers=36, n_heads=32, n_kv_heads=8, head_dim=128,
+    moe_intermediate=9728, n_experts=1, n_experts_active=1, vocab_size=151936,
+    tie_embeddings=True, dense=True,
+)
+
+QWEN3_8B = ModelSpec(
+    name="Qwen/Qwen3-8B-FP8",
+    hidden_size=4096, n_layers=36, n_heads=32, n_kv_heads=8, head_dim=128,
+    moe_intermediate=12288, n_experts=1, n_experts_active=1, vocab_size=151936,
+    tie_embeddings=False, dense=True,
+)
+
 QWEN3_235B_A22B = ModelSpec(
     name="Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
     hidden_size=4096, n_layers=94, n_heads=64, n_kv_heads=4, head_dim=128,
@@ -143,6 +173,19 @@ QWEN3_235B_A22B = ModelSpec(
 # does not use), 3.35 TB/s HBM3.
 H100 = HardwareSpec("H100 SXM5", 1, 989.4e12, 3.35e12, 80e9)
 H100_8X = HardwareSpec("8x H100 SXM5", 8, 989.4e12, 3.35e12, 80e9)
+# Cheaper accelerators for iteration. Note how much bandwidth they give up:
+# decode is bandwidth-bound, so an L4 is ~11x slower at decode than an H100
+# while costing only ~5x less. Cheaper per hour is not cheaper per token.
+L40S = HardwareSpec("L40S", 1, 362e12, 864e9, 48e9)
+A10G = HardwareSpec("A10G", 1, 125e12, 600e9, 24e9)
+L4 = HardwareSpec("L4", 1, 121e12, 300e9, 24e9)
+
+MODELS = {m.name: m for m in (QWEN3_4B, QWEN3_8B, QWEN3_30B_A3B, QWEN3_235B_A22B)}
+HARDWARE = {"H100": H100, "L40S": L40S, "A10G": A10G, "L4": L4}
+
+# Modal per-hour rates, for cost-per-token comparisons.
+GPU_HOURLY = {"H100": 3.95, "H200": 4.54, "B200": 6.25, "L40S": 1.95,
+              "A10G": 1.10, "L4": 0.80}
 
 
 def request_cost(m: ModelSpec, input_tokens: int, output_tokens: int) -> dict:

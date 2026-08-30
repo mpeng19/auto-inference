@@ -21,8 +21,21 @@ from dataclasses import asdict, dataclass, field
 @dataclass(frozen=True)
 class ServingConfig:
     # ── fixed within a study (recorded, not searched) ────────────
-    model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
-    gpu: str = "H100"
+    #
+    # Default is the small dense model on a cheap GPU: $1.10/hr against $3.95,
+    # so harness iteration costs a third as much. Be clear about what that
+    # trades away -- Qwen3-4B on an A10G is **prefill-bound** at our request
+    # shapes, while Qwen3-30B-A3B on an H100 is **decode-bound**. Opposite sides
+    # of the roofline. Use the small setup to develop and debug the harness; use
+    # the 30B (or the 235B on 8xH100) whenever a serving-policy result is meant
+    # to transfer.
+    #
+    #   Qwen/Qwen3-4B-Instruct-2507-FP8    A10G   $1.10/hr   262k ctx
+    #   Qwen/Qwen3-8B-FP8                  L40S   $1.95/hr    41k ctx
+    #   Qwen/Qwen3-30B-A3B-Instruct-2507-FP8  H100  $3.95/hr  MoE, decode-bound
+    #   Qwen/Qwen3-235B-A22B-Instruct-2507-FP8  8xH100  $31.60/hr
+    model: str = "Qwen/Qwen3-4B-Instruct-2507-FP8"
+    gpu: str = "A10G"
     n_gpu: int = 1
 
     # ── parallelism ──────────────────────────────────────────────
@@ -134,6 +147,26 @@ class WorkloadConfig:
     stair_start_pct: float = 5.0
     stair_step_pct: float = 5.0
     stair_step_s: float = 60.0
+
+    # ── multi-turn conversations ─────────────────────────────────
+    # When set, `request_rate` becomes the *session* arrival rate and each
+    # session runs several turns. The conversation is resent in full each turn,
+    # so the shared prefix **grows** -- 500 tokens at turn 1, several thousand
+    # by turn 8. That is a different regime from `prefix_heavy`, which shares a
+    # *static* system prompt: there the cached prefix is constant, here it
+    # extends every turn and each request is a partial match against the
+    # previous turn's entire context.
+    #
+    # Turns within a session are closed-loop (a user waits for the reply, then
+    # thinks, then replies) while sessions arrive open-loop. That hybrid is what
+    # production actually looks like, and it means a slower server receives less
+    # load from the same users -- real backpressure that a fixed trace cannot
+    # express.
+    multi_turn: bool = False
+    turns_mu: float = 4.0               # mean turns per session
+    turns_max: int = 12
+    think_mu: float = 1.1               # lognormal seconds between turns
+    think_sigma: float = 0.6
 
     # Human-plausible request mix. When set, prompts are generated from these
     # categories (see prompts.py) and each request's length comes from its own

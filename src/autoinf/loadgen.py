@@ -320,3 +320,141 @@ def client_health(results, plan_info: dict | None = None) -> dict:
     if plan_info:
         out["plan"] = plan_info
     return out
+
+
+# ── multi-turn ───────────────────────────────────────────────────
+
+async def _one_session(session, base_url: str, model: str, start_wall: float,
+                       timeout_s: float, http, out: list) -> None:
+    """Run one conversation. Turns are sequential; the prompt grows each turn."""
+    import aiohttp
+
+    delay = (start_wall + session.arrival_s) - time.time()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    url = base_url.rstrip("/") + "/v1/chat/completions"
+    history: list[dict] = [{"role": "system", "content": session.system}]
+
+    for k, turn in enumerate(session.turns):
+        history.append({"role": "user", "content": turn.text})
+        hist_tokens = sum(len(m["content"]) for m in history) // 4
+
+        scheduled = time.time() - start_wall
+        dispatched = scheduled
+        first = end = None
+        n = 0
+        u_in = u_out = None
+        reply: list[str] = []
+        err = None
+        try:
+            async with http.post(url, json={
+                "model": model, "messages": history,
+                "max_tokens": turn.max_tokens, "temperature": 0.0,
+                "stream": True, "stream_options": {"include_usage": True},
+                "ignore_eos": True,
+            }, timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
+                if r.status != 200:
+                    err = f"HTTP {r.status}"
+                else:
+                    async for raw in r.content:
+                        if not raw.startswith(b"data:"):
+                            continue
+                        i = raw.find(_CONTENT)
+                        if i != -1:
+                            j = i + len(_CONTENT)
+                            if j < len(raw) and raw[j] != _QUOTE:
+                                if first is None:
+                                    first = time.time() - start_wall
+                                n += 1
+                                try:
+                                    ch = json.loads(raw[5:].strip())
+                                    piece = (ch["choices"][0].get("delta") or {}).get("content")
+                                    if piece:
+                                        reply.append(piece)
+                                except Exception:
+                                    pass
+                                continue
+                        if _DONE in raw:
+                            break
+                        if _USAGE in raw:
+                            try:
+                                ch = json.loads(raw[5:].strip())
+                            except Exception:
+                                continue
+                            if ch.get("usage"):
+                                u_in = ch["usage"].get("prompt_tokens")
+                                u_out = ch["usage"].get("completion_tokens")
+                    end = time.time() - start_wall
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"[:160]
+
+        out_tokens = u_out if u_out is not None else n
+        ok = err is None and first is not None and out_tokens > 0
+        out.append(RequestResult(
+            idx=len(out), scheduled_s=scheduled, dispatched_s=dispatched,
+            first_token_s=first, end_s=end, prompt_tokens=u_in,
+            output_tokens=out_tokens, ok=ok, error=err,
+            session=session.idx, turn=k, history_tokens=hist_tokens))
+
+        if not ok:
+            return                      # a failed turn ends the conversation
+        history.append({"role": "assistant", "content": "".join(reply)})
+        if k < len(session.think_s):
+            await asyncio.sleep(session.think_s[k])
+
+
+async def run_sessions(trace, base_url: str, model: str,
+                       timeout_s: float = 600.0, lead_in_s: float = 1.0,
+                       conn_limit: int = 8192) -> list[RequestResult]:
+    """Replay a SessionTrace.
+
+    Sessions start on schedule regardless of load (open-loop arrivals), but a
+    session's later turns wait for its earlier replies (closed-loop within the
+    conversation). A slower server therefore receives fewer turns per second
+    from the same users, which is real backpressure and is what production
+    looks like -- a purely open-loop multi-turn trace would keep firing turn 5
+    while turn 2 was still unanswered, which no chat client does.
+    """
+    import aiohttp
+
+    start_wall = time.time() + lead_in_s
+    out: list[RequestResult] = []
+    conn = aiohttp.TCPConnector(limit=conn_limit, force_close=False,
+                                enable_cleanup_closed=True)
+    async with aiohttp.ClientSession(connector=conn) as http:
+        await asyncio.gather(*[
+            asyncio.create_task(
+                _one_session(s, base_url, model, start_wall, timeout_s, http, out))
+            for s in trace.sessions
+        ], return_exceptions=True)
+    return sorted(out, key=lambda r: (r.session, r.turn))
+
+
+def summarize_turns(results: list[RequestResult], max_depth: int = 8) -> dict:
+    """Break results down by conversation depth.
+
+    The headline question for multi-turn: does TTFT fall as the conversation
+    grows? It should. The prompt gets longer every turn, but almost all of it
+    was cached by the previous turn, so only the new tail needs prefilling. If
+    TTFT instead rises with depth, prefix caching is not working on real
+    conversational traffic -- whatever the static-prefix workload reports.
+    """
+    from .metrics import percentile
+
+    by: dict[int, list[RequestResult]] = {}
+    for r in results:
+        if r.ok and r.turn >= 0:
+            by.setdefault(min(r.turn, max_depth), []).append(r)
+
+    rows = {}
+    for d, rs in sorted(by.items()):
+        ttfts = [r.ttft_ms for r in rs if r.ttft_ms is not None]
+        rows[str(d)] = {
+            "n": len(rs),
+            "mean_prompt_tokens": round(sum(r.prompt_tokens or 0 for r in rs) / len(rs)),
+            "mean_history_tokens": round(sum(r.history_tokens for r in rs) / len(rs)),
+            "ttft_p50_ms": round(percentile(ttfts, 50) or 0, 1),
+            "ttft_p99_ms": round(percentile(ttfts, 99) or 0, 1),
+        }
+    return {"by_turn_depth": rows, "n_sessions": len({r.session for r in results})}

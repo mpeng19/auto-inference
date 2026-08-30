@@ -40,6 +40,67 @@ class Request:
 
 
 @dataclass(frozen=True)
+class Turn:
+    """One user message inside a conversation."""
+    text: str
+    max_tokens: int
+    category: str = ""
+
+
+@dataclass(frozen=True)
+class Session:
+    """A conversation: arrives once, then runs closed-loop turn by turn."""
+    idx: int
+    arrival_s: float
+    system: str                     # stable preamble, shared across sessions
+    turns: tuple[Turn, ...]
+    think_s: tuple[float, ...]      # gap after each turn before the next
+
+    @property
+    def n_turns(self) -> int:
+        return len(self.turns)
+
+
+@dataclass(frozen=True)
+class SessionTrace:
+    sessions: tuple[Session, ...]
+    config: WorkloadConfig
+
+    @property
+    def duration_s(self) -> float:
+        return self.sessions[-1].arrival_s if self.sessions else 0.0
+
+    @property
+    def n_turns(self) -> int:
+        return sum(s.n_turns for s in self.sessions)
+
+    def digest(self) -> str:
+        blob = json.dumps(
+            [(s.idx, round(s.arrival_s, 6), len(s.turns),
+              [(len(t.text), t.max_tokens) for t in s.turns]) for s in self.sessions],
+            sort_keys=True).encode()
+        return hashlib.sha256(blob).hexdigest()[:12]
+
+    def describe(self) -> dict:
+        tp = [s.n_turns for s in self.sessions]
+        firsts = [len(s.turns[0].text) // 4 for s in self.sessions if s.turns]
+        return {
+            "name": self.config.name,
+            "multi_turn": True,
+            "n_sessions": len(self.sessions),
+            "n_turns": self.n_turns,
+            "duration_s": round(self.duration_s, 2),
+            "session_rate_rps": round(len(self.sessions) / self.duration_s, 3)
+            if self.duration_s else 0.0,
+            "turns_per_session_mean": round(sum(tp) / len(tp), 2) if tp else 0,
+            "turns_per_session_max": max(tp) if tp else 0,
+            "first_turn_tokens_mean": round(sum(firsts) / len(firsts)) if firsts else 0,
+            "system_prompt_tokens": len(self.sessions[0].system) // 4 if self.sessions else 0,
+            "digest": self.digest(),
+        }
+
+
+@dataclass(frozen=True)
 class Trace:
     requests: tuple[Request, ...]
     config: WorkloadConfig
@@ -307,6 +368,26 @@ def roofline_rps(model=None, hw=None, in_tok: int | None = None,
     return capacity(model, hw, in_tok, out_tok, batch=batch)["max_rps_roofline"]
 
 
+# The hardware the suite rates were derived from. Rates are meaningless on
+# anything else, and getting this wrong is the single most expensive mistake
+# available: the first calibration was 10x low and measured an idle server.
+CALIBRATED_FOR = ("Qwen/Qwen3-30B-A3B-Instruct-2507-FP8", "H100", 1)
+
+
+def check_calibration(cfg) -> str | None:
+    """Warn when the suite is run against hardware it was not calibrated for."""
+    got = (cfg.model, cfg.gpu, cfg.n_gpu)
+    if got == CALIBRATED_FOR:
+        return None
+    return (f"suite rates were calibrated for {CALIBRATED_FOR[0].split('/')[-1]} "
+            f"on {CALIBRATED_FOR[2]}x{CALIBRATED_FOR[1]}, but this run uses "
+            f"{got[0].split('/')[-1]} on {got[2]}x{got[1]}. Absolute goodput is "
+            f"not comparable across the two, and the load levels may sit in a "
+            f"different regime entirely (the small dense models are "
+            f"prefill-bound where the 30B MoE is decode-bound). Re-derive with "
+            f"`make staircase` before trusting these numbers.")
+
+
 def suite(seed: int = 0, scale: float = 1.0,
           minutes: float | None = None) -> dict[str, WorkloadConfig]:
     """Named workloads. `scale` multiplies request counts for longer runs.
@@ -432,6 +513,27 @@ def suite(seed: int = 0, scale: float = 1.0,
             prefix_share_frac=0.4, n_shared_prefixes=3, shared_prefix_len=180,
             n_requests=n(1600), seed=seed),
 
+        # ── multi-turn ───────────────────────────────────────────
+        # Conversations, not independent requests. `request_rate` is the
+        # *session* arrival rate; each session runs ~4 turns with human think
+        # time, resending the whole conversation each time. The shared prefix
+        # therefore grows turn over turn, which is the pattern real chat has and
+        # `prefix_heavy` (static shared prompt) does not.
+        "chat_multiturn": WorkloadConfig(
+            name="chat_multiturn", multi_turn=True, request_rate=4.0,
+            turns_mu=4.0, think_mu=1.1, think_sigma=0.6,
+            category_mix=_prompts.ALL_CATEGORIES,
+            shared_prefix_len=180, n_requests=n(300), seed=seed),
+
+        # Long conversations: 10 turns, so the prefix reaches several thousand
+        # tokens. This is where growing-prefix caching either pays off or does
+        # not, and it is the closest thing in the suite to agentic traffic.
+        "chat_deep": WorkloadConfig(
+            name="chat_deep", multi_turn=True, request_rate=1.5,
+            turns_mu=10.0, turns_max=20, think_mu=0.7, think_sigma=0.5,
+            category_mix=("code_debug", "analysis", "explain", "rag"),
+            shared_prefix_len=400, n_requests=n(80), seed=seed),
+
         "human": WorkloadConfig(
             name="human", arrival="poisson",
             request_rate=20.0,
@@ -501,3 +603,69 @@ def staircase_levels(seed: int = 0, peak_fraction: float = 1.0,
             seed=seed + int(pct)))
         pct += step_pct
     return out
+
+
+# ── multi-turn ───────────────────────────────────────────────────
+
+_FOLLOWUPS = [
+    "Can you expand on that?",
+    "Why does that work?",
+    "What would break if I did the opposite?",
+    "Show me a concrete example.",
+    "Is there a simpler way?",
+    "What are the failure modes?",
+    "How would I test that?",
+    "Does that still hold at scale?",
+    "What would you do differently in production?",
+    "Summarise that as bullet points.",
+]
+
+
+def build_sessions(cfg: WorkloadConfig) -> SessionTrace:
+    """Generate conversations. Deterministic given the seed.
+
+    Only the *structure* is fixed here -- who arrives when, how many turns, what
+    they say, how long they think. The prompt actually sent at turn k is
+    assembled at run time from the replies the server gave, because that is what
+    a chat client does and it is what makes the prefix grow the way a real one
+    does.
+    """
+    rng = random.Random(cfg.seed)
+    system = _prompts.SYSTEM_PROMPTS[0][1]
+    if cfg.shared_prefix_len:
+        system = _prompts._pad_to(system, cfg.shared_prefix_len,
+                                  random.Random(cfg.seed * 7717))
+
+    # Sessions arrive as a Poisson process at `request_rate`.
+    n_sessions = cfg.n_requests or 200
+    duration = cfg.duration_s
+    times, t = [], 0.0
+    for _ in range(n_sessions):
+        t += rng.expovariate(max(cfg.request_rate, 1e-9))
+        if duration is not None and t > duration:
+            break
+        times.append(t)
+
+    mix = cfg.category_mix or _prompts.ALL_CATEGORIES
+    sessions = []
+    for i, at in enumerate(times):
+        k = max(1, min(cfg.turns_max, int(rng.expovariate(1.0 / cfg.turns_mu)) + 1))
+        cat = _prompts.sample_category(rng, mix)
+
+        turns = [Turn(_prompts.make_request(rng, cat.name,
+                                            _lognormal_int(rng, cat.in_mu, cat.in_sigma,
+                                                           cfg.input_len_cap)),
+                      _lognormal_int(rng, cat.out_mu, cat.out_sigma, cfg.output_len_cap),
+                      cat.name)]
+        for _ in range(k - 1):
+            # Follow-ups are short; the growth comes from accumulated history,
+            # not from the user typing more.
+            turns.append(Turn(rng.choice(_FOLLOWUPS),
+                              _lognormal_int(rng, cat.out_mu, cat.out_sigma,
+                                             cfg.output_len_cap),
+                              cat.name))
+        think = tuple(min(60.0, rng.lognormvariate(cfg.think_mu, cfg.think_sigma))
+                      for _ in range(k))
+        sessions.append(Session(i, at, system, tuple(turns), think))
+
+    return SessionTrace(tuple(sessions), cfg)

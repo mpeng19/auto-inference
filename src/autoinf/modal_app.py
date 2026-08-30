@@ -123,7 +123,8 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
     from autoinf.canary import CANARIES, digest as cdigest
     from autoinf.config import SLO, ServingConfig, WorkloadConfig
     from autoinf.metrics import detect_collapse, summarize
-    from autoinf.workload import build_trace
+    from autoinf.workload import (build_sessions, build_trace,
+                                  check_calibration)
 
     # The ramp workload issues ~3000 requests and the client holds a socket
     # per in-flight request. A default 1024-fd limit would surface as
@@ -148,6 +149,10 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
     if ov["n_overlays"]:
         print(f"applied {ov['n_overlays']} overlay(s): {ov['applied']}", flush=True)
 
+    warn = check_calibration(sc)
+    if warn:
+        print(f"\n!! CALIBRATION: {warn}\n", flush=True)
+
     cmd = ["python", "-m", "sglang.launch_server",
            "--host", "127.0.0.1", "--port", str(SERVER_PORT), *sc.to_sglang_args()]
     print("launching:", " ".join(cmd), flush=True)
@@ -158,6 +163,7 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
         "slo": asdict(sl),
         "provenance": _provenance(),
         "overlay": ov,
+        "calibration_warning": warn,
         "runs": [],
     }
 
@@ -197,6 +203,9 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
             record["event_loop"] = install_fast_loop()
 
             for wc in wcs:
+                if wc.multi_turn:
+                    record["runs"].append(_run_multiturn(wc, sc, sl, SERVER_URL))
+                    continue
                 trace = build_trace(wc)
                 pl = plan(trace)
                 print(f"-- workload {wc.name}: {len(trace.requests)} reqs, "
@@ -322,6 +331,48 @@ def bench_for(sc, region: str | None = None):
     if region:
         opts["region"] = region
     return bench.with_options(**opts)
+
+
+def _run_multiturn(wc, sc, sl, server_url: str) -> dict:
+    """Replay a conversational workload and report by turn depth."""
+    from autoinf import server_metrics
+    from autoinf.loadgen import client_health, run_sessions, summarize_turns
+    from autoinf.metrics import detect_collapse, summarize
+    from autoinf.workload import build_sessions
+
+    tr = build_sessions(wc)
+    print(f"-- workload {wc.name}: {len(tr.sessions)} sessions, "
+          f"{tr.n_turns} turns, {tr.duration_s:.0f}s of arrivals", flush=True)
+
+    before = asyncio.run(server_metrics.scrape(server_url))
+    t0 = time.perf_counter()
+    results = asyncio.run(run_sessions(tr, server_url, sc.model))
+    wall = round(time.perf_counter() - t0, 1)
+    after = asyncio.run(server_metrics.scrape(server_url))
+
+    warm = min(20.0, 0.15 * max(1.0, tr.duration_s))
+    m = summarize(results, sl, warmup_s=warm)
+    srv = server_metrics.diff(before, after) if (before and after) else {}
+    depth = summarize_turns(results)
+
+    rows = depth["by_turn_depth"]
+    if rows:
+        ks = sorted(rows, key=int)
+        print(f"   turn depth:  " + "  ".join(
+            f"t{k}:{rows[k]['ttft_p50_ms']:.0f}ms/{rows[k]['mean_prompt_tokens']}tok"
+            for k in ks[:6]), flush=True)
+    print(f"   goodput {m['goodput_rps']:.2f} rps | "
+          f"TTFT p99 {(m['ttft_ms'] or {}).get('p99', 0):.0f}ms | "
+          f"failed {m['n_failed']}", flush=True)
+
+    return {
+        "workload": asdict(wc), "workload_digest": wc.digest(),
+        "trace_digest": tr.digest(), "trace_describe": tr.describe(),
+        "bench_wall_s": wall, "metrics": m, "collapse": detect_collapse(results),
+        "server_metrics": srv, "client_health": client_health(results),
+        "turn_depth": depth,
+        "per_request": [asdict(r) for r in results],
+    }
 
 
 def _summary_row(name: str, m: dict) -> str:

@@ -26,6 +26,12 @@ class RequestResult:
     output_tokens: int
     ok: bool
     error: str | None = None
+    # Populated for multi-turn runs. Turn depth is the axis that matters there:
+    # TTFT should improve with depth as the cached conversation prefix grows,
+    # even though the prompt is getting longer.
+    session: int = -1
+    turn: int = -1
+    history_tokens: int = 0
 
     @property
     def ttft_ms(self) -> float | None:
