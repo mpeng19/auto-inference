@@ -30,12 +30,21 @@ class ServingConfig:
     # the 30B (or the 235B on 8xH100) whenever a serving-policy result is meant
     # to transfer.
     #
-    #   Qwen/Qwen3-4B-Instruct-2507-FP8    A10G   $1.10/hr   262k ctx
+    # Two constraints picked the GPU, and both rule out the cheapest option:
+    #
+    #   * **FP8 needs SM89+.** A10G is SM86 (Ampere) with no native FP8, so an
+    #     FP8 checkpoint cannot run there at all. L4/L40S (Ada) and H100
+    #     (Hopper) can.
+    #   * **KV cache dominates at long context.** Qwen3-4B costs 144 KiB/token
+    #     of KV, so at a 40k-token agentic context an L4 holds only 3 concurrent
+    #     sequences -- too few to study batching. L40S holds 7, H100 13.
+    #
+    #   Qwen/Qwen3-4B-Instruct-2507-FP8    L40S   $1.95/hr   262k ctx
     #   Qwen/Qwen3-8B-FP8                  L40S   $1.95/hr    41k ctx
     #   Qwen/Qwen3-30B-A3B-Instruct-2507-FP8  H100  $3.95/hr  MoE, decode-bound
     #   Qwen/Qwen3-235B-A22B-Instruct-2507-FP8  8xH100  $31.60/hr
     model: str = "Qwen/Qwen3-4B-Instruct-2507-FP8"
-    gpu: str = "A10G"
+    gpu: str = "L40S"
     n_gpu: int = 1
 
     # ── parallelism ──────────────────────────────────────────────

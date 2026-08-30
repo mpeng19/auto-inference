@@ -402,7 +402,18 @@ async def _prefix_experiments(model: str) -> dict:
 
 
 @app.local_entrypoint()
-def main(stage: str = "env"):
-    r = probe_env.remote() if stage == "env" else probe_serve.remote()
+def main(stage: str = "env", gpu: str = "", model: str = ""):
+    """Probe a specific target. `gpu` overrides the declared resource.
+
+    The probe previously hardcoded H100, so probing before switching hardware
+    verified the wrong machine -- which is exactly the mistake the probe exists
+    to prevent.
+    """
+    if stage == "env":
+        fn = probe_env.with_options(gpu=gpu) if gpu else probe_env
+        r = fn.remote()
+    else:
+        fn = probe_serve.with_options(gpu=gpu) if gpu else probe_serve
+        r = fn.remote(model) if model else fn.remote()
     print(json.dumps({k: v for k, v in r.items() if k != "server_log_tail"},
                      indent=2, default=str))

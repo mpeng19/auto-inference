@@ -49,6 +49,7 @@ image = (
         "huggingface-hub>=0.26",
         "anthropic>=0.40",          # drives the virtual-user simulator
         "uvloop>=0.19",             # 2-4x faster event loop for the client
+        "fastapi>=0.110",
     )
     .env({
         "HF_HOME": "/cache/huggingface",
@@ -88,7 +89,7 @@ def _provenance() -> dict:
 
 @app.function(
     image=image,
-    gpu="H100",                       # override per-call: .with_options(gpu="H100:8")
+    gpu="L40S",                       # override per-call via bench_for(sc)
     cpu=16.0,                         # headroom so the client is not the bottleneck.
                                       # Client lag hit 90ms on `bursty` (128 rps peaks)
                                       # at cpu=8. CPU is $0.047/core/hr against $3.95
@@ -773,3 +774,95 @@ def realism(n_users: int = 40, duration_s: float = 300.0, seed: int = 0,
     print("-" * 39)
     for name, v in s["by_persona"].items():
         print(f"{name:<14}{v['n']:>6}{v['ttft_p50_ms'] or 0:>10.0f}{v['mean_out_tokens']:>9}")
+
+
+AGENT_PORT = 8000
+
+
+@app.function(
+    image=image, gpu="L40S", cpu=8.0,
+    volumes={"/cache": hf_cache, "/results": results_vol},
+    secrets=[modal.Secret.from_name("huggingface")],
+    timeout=6 * 60 * 60, max_containers=1, scaledown_window=20 * 60,
+)
+@modal.web_server(AGENT_PORT, startup_timeout=20 * 60)
+def agent_endpoint():
+    """Public OpenAI-compatible endpoint, with a recording proxy in front.
+
+    Point a real agent at `<url>/v1` and let it work. The proxy streams
+    responses through untouched and records the traffic *shape* -- prompt
+    growth, prefix reuse, think time -- to the results Volume.
+
+    `max_containers=1` so every session hits the same server: two replicas
+    would split the prefix cache and make reuse look worse than it is.
+
+    Deploy rather than `modal run`, so the URL is stable:
+
+        modal deploy src/autoinf/modal_app.py
+        # then point the agent at https://<workspace>--auto-inference-agent-endpoint.modal.run/v1
+    """
+    from autoinf.config import ServingConfig
+
+    sc = ServingConfig()
+    os.makedirs("/results/traces", exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+
+    subprocess.Popen(
+        ["python", "-m", "sglang.launch_server",
+         "--host", "127.0.0.1", "--port", str(SERVER_PORT), *sc.to_sglang_args()],
+        stdout=open("/tmp/sglang-agent.log", "wb"), stderr=subprocess.STDOUT)
+
+    env = {**os.environ,
+           "UPSTREAM": SERVER_URL,
+           "PROXY_PORT": str(AGENT_PORT),
+           "TRACE_PATH": f"/results/traces/agent-{stamp}.jsonl"}
+    # The proxy waits for SGLang itself, so the port opens as soon as the model
+    # is up and Modal's startup probe succeeds.
+    subprocess.Popen(
+        ["python", "-c",
+         "import asyncio,aiohttp,os\n"
+         "from autoinf.bench import wait_until_ready\n"
+         "asyncio.run(wait_until_ready(os.environ['UPSTREAM'], 1200,"
+         " log_path='/tmp/sglang-agent.log'))\n"
+         "from aiohttp import web\n"
+         "from autoinf.proxy_app import make_app\n"
+         "web.run_app(make_app(), host='0.0.0.0', port=int(os.environ['PROXY_PORT']))"],
+        env=env)
+
+
+@app.function(image=image, volumes={"/results": results_vol}, timeout=900)
+def list_traces() -> list[dict]:
+    import pathlib
+    d = pathlib.Path("/results/traces")
+    if not d.is_dir():
+        return []
+    out = []
+    for f in sorted(d.glob("*.jsonl")):
+        n = sum(1 for _ in open(f))
+        out.append({"file": f.name, "requests": n,
+                    "kb": round(f.stat().st_size / 1024)})
+    return out
+
+
+@app.function(image=image, volumes={"/results": results_vol}, timeout=900)
+def read_trace(name: str) -> dict:
+    import pathlib
+    from autoinf.gateway import Capture, summarize_captures
+    caps = [Capture(**json.loads(l)) for l in
+            pathlib.Path(f"/results/traces/{name}").read_text().splitlines() if l.strip()]
+    return {"summary": summarize_captures(caps), "captures": [asdict(c) for c in caps]}
+
+
+@app.local_entrypoint()
+def traces(name: str = ""):
+    """List captured agent traces, or summarise one."""
+    if not name:
+        rows = list_traces.remote()
+        if not rows:
+            print("no traces captured yet — deploy agent_endpoint and point an agent at it")
+            return
+        for r in rows:
+            print(f"{r['file']:<34}{r['requests']:>6} requests{r['kb']:>8} KB")
+        return
+    d = read_trace.remote(name)
+    print(json.dumps(d["summary"], indent=2))
