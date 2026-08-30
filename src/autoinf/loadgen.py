@@ -458,3 +458,124 @@ def summarize_turns(results: list[RequestResult], max_depth: int = 8) -> dict:
             "ttft_p99_ms": round(percentile(ttfts, 99) or 0, 1),
         }
     return {"by_turn_depth": rows, "n_sessions": len({r.session for r in results})}
+
+
+# ── closed-loop concurrency (the SLO frontier) ───────────────────
+
+async def _user_worker(uid: int, make_session, base_url: str, model: str,
+                       start_wall: float, deadline: float, timeout_s: float,
+                       http, out: list) -> None:
+    """One simulated user: conversation, think, another conversation, forever."""
+    n = 0
+    while time.time() < deadline:
+        sess = make_session(uid, n)
+        for k, turn in enumerate(sess.turns):
+            if time.time() >= deadline:
+                return
+            await _turn(sess, k, turn, uid, base_url, model, start_wall,
+                        timeout_s, http, out)
+            if k < len(sess.think_s):
+                await asyncio.sleep(min(sess.think_s[k], max(0.0, deadline - time.time())))
+        n += 1
+
+
+async def run_concurrent_users(make_session, base_url: str, model: str,
+                               n_users: int, duration_s: float,
+                               timeout_s: float = 600.0,
+                               conn_limit: int = 8192) -> list[RequestResult]:
+    """Hold exactly `n_users` conversations in flight for `duration_s`.
+
+    This is the marketplace question -- "how many users can we serve at once" --
+    and it is genuinely closed-loop: a user cannot send their next message
+    before reading the last reply. That differs from the open-loop rate sweeps
+    used for scheduler comparison, and deliberately so. Under overload a
+    closed-loop population self-limits (users wait longer, so send less), which
+    is what real users do and what makes the concurrency axis meaningful.
+    """
+    import aiohttp
+
+    start_wall = time.time()
+    deadline = start_wall + duration_s
+    out: list[RequestResult] = []
+    conn = aiohttp.TCPConnector(limit=conn_limit, force_close=False,
+                                enable_cleanup_closed=True)
+    async with aiohttp.ClientSession(connector=conn) as http:
+        await asyncio.gather(*[
+            asyncio.create_task(_user_worker(i, make_session, base_url, model,
+                                             start_wall, deadline, timeout_s,
+                                             http, out))
+            for i in range(n_users)
+        ], return_exceptions=True)
+    return sorted(out, key=lambda r: r.dispatched_s)
+
+
+async def _turn(sess, k, turn, uid, base_url, model, start_wall, timeout_s,
+                http, out) -> None:
+    """One request within a conversation. Shares the multi-turn accounting."""
+    import aiohttp
+
+    if not hasattr(sess, "_history"):
+        object.__setattr__(sess, "_history",
+                           [{"role": "system", "content": sess.system}])
+    history = sess._history
+    history.append({"role": "user", "content": turn.text})
+    hist_tokens = sum(len(m["content"]) for m in history) // 4
+
+    dispatched = time.time() - start_wall
+    first = end = None
+    n = 0
+    u_in = u_out = None
+    reply: list[str] = []
+    err = None
+    try:
+        async with http.post(
+            base_url.rstrip("/") + "/v1/chat/completions",
+            json={"model": model, "messages": history,
+                  "max_tokens": turn.max_tokens, "temperature": 0.0,
+                  "stream": True, "stream_options": {"include_usage": True},
+                  "ignore_eos": True},
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+        ) as r:
+            if r.status != 200:
+                err = f"HTTP {r.status}"
+            else:
+                async for raw in r.content:
+                    if not raw.startswith(b"data:"):
+                        continue
+                    i = raw.find(_CONTENT)
+                    if i != -1 and i + len(_CONTENT) < len(raw) \
+                            and raw[i + len(_CONTENT)] != _QUOTE:
+                        if first is None:
+                            first = time.time() - start_wall
+                        n += 1
+                        try:
+                            ch = json.loads(raw[5:].strip())
+                            piece = (ch["choices"][0].get("delta") or {}).get("content")
+                            if piece:
+                                reply.append(piece)
+                        except Exception:
+                            pass
+                        continue
+                    if _DONE in raw:
+                        break
+                    if _USAGE in raw:
+                        try:
+                            ch = json.loads(raw[5:].strip())
+                            u = ch.get("usage") or {}
+                            u_in = u.get("prompt_tokens") or u_in
+                            u_out = u.get("completion_tokens") or u_out
+                        except Exception:
+                            pass
+                end = time.time() - start_wall
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"[:160]
+
+    out_tokens = u_out if u_out is not None else n
+    ok = err is None and first is not None and out_tokens > 0
+    out.append(RequestResult(
+        idx=len(out), scheduled_s=dispatched, dispatched_s=dispatched,
+        first_token_s=first, end_s=end, prompt_tokens=u_in,
+        output_tokens=out_tokens, ok=ok, error=err,
+        session=uid, turn=k, history_tokens=hist_tokens))
+    if ok:
+        history.append({"role": "assistant", "content": "".join(reply)})

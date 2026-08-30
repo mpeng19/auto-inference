@@ -5,6 +5,7 @@ description = "Harness for autonomous optimization of an LLM inference/serving s
 requires-python = ">=3.12"
 dependencies = [
     "modal>=1.5.5",
+    "numpy>=2.5.2",
     "uvloop>=0.22.1",
 ]
 

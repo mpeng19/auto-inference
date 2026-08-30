@@ -868,3 +868,243 @@ def traces(name: str = ""):
         return
     d = read_trace.remote(name)
     print(json.dumps(d["summary"], indent=2))
+
+
+@app.function(
+    image=image, gpu="L40S", cpu=16.0,
+    volumes={"/cache": hf_cache, "/results": results_vol},
+    secrets=[modal.Secret.from_name("huggingface")],
+    timeout=4 * 60 * 60,
+)
+def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: float = 90.0,
+             repeats: int = 1, note: str = "") -> dict:
+    """Sweep concurrent users and find the largest population meeting SLOs.
+
+    Two outputs, from one server launch:
+
+      1. **The SLO frontier.** goodput and latency at each concurrency level.
+         `N*` is the largest level meeting the targets *in every repeat* --
+         near saturation this server is metastable, so a single passing run is
+         not evidence that a level is sustainable.
+
+      2. **Token-mix observations for cost attribution.** Each level reports
+         uncached input, cached input and output tokens (from SGLang's own
+         counters) against the GPU-seconds it consumed. Different levels shift
+         the mix -- deeper conversations cache more -- which is what makes the
+         three per-token costs separable.
+    """
+    from autoinf import overlay, server_metrics
+    from autoinf.bench import wait_until_ready, warmup
+    from autoinf.config import SLO, ServingConfig, WorkloadConfig
+    from autoinf.loadgen import client_health, install_fast_loop, run_concurrent_users
+    from autoinf.metrics import detect_collapse, percentile, summarize
+    from autoinf.workload import build_sessions
+
+    try:
+        import resource
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(65536, hard), hard))
+    except Exception:
+        pass
+
+    sc, sl = ServingConfig(**serving), SLO(**slo)
+    ov = overlay.apply("/overlays")
+    install_fast_loop()
+
+    cmd = ["python", "-m", "sglang.launch_server", "--host", "127.0.0.1",
+           "--port", str(SERVER_PORT), *sc.to_sglang_args()]
+    print("launching:", " ".join(cmd), flush=True)
+
+    rec: dict = {"note": note, "serving": asdict(sc), "serving_digest": sc.digest(),
+                 "slo": asdict(sl), "overlay": ov, "provenance": _provenance(),
+                 "levels": [], "seconds_per_level": seconds_per_level,
+                 "repeats": repeats}
+    log_path = "/tmp/sglang-frontier.log"
+
+    with open(log_path, "wb") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            rec["model_load_s"] = round(asyncio.run(wait_until_ready(
+                SERVER_URL, 900, proc=proc, log_path=log_path, stall_s=420)), 1)
+            hf_cache.commit()
+            asyncio.run(warmup(SERVER_URL, sc.model, 20))
+
+            # A pool of conversations; each simulated user pulls a fresh one.
+            base = WorkloadConfig(name="frontier", multi_turn=True,
+                                  turns_mu=6.0, turns_max=20,
+                                  think_mu=0.4, think_sigma=0.5,
+                                  category_mix=("code_debug", "code_gen",
+                                                "analysis", "explain"),
+                                  shared_prefix_len=300, n_requests=400, seed=0)
+            pool = build_sessions(base).sessions
+            make_session = lambda uid, n: pool[(uid * 7919 + n * 104729) % len(pool)]
+
+            for n_users in levels:
+                for rep in range(repeats):
+                    before = asyncio.run(server_metrics.scrape(SERVER_URL))
+                    t0 = time.perf_counter()
+                    res = asyncio.run(run_concurrent_users(
+                        make_session, SERVER_URL, sc.model, n_users,
+                        seconds_per_level))
+                    wall = time.perf_counter() - t0
+                    after = asyncio.run(server_metrics.scrape(SERVER_URL))
+
+                    warm = min(20.0, 0.2 * seconds_per_level)
+                    m = summarize(res, sl, warmup_s=warm)
+                    srv = server_metrics.diff(before, after) if (before and after) else {}
+                    ctr = srv.get("counters", {})
+                    p_tok = ctr.get("sglang:prompt_tokens_total", 0.0)
+                    c_tok = ctr.get("sglang:cached_tokens_total", 0.0)
+                    g_tok = ctr.get("sglang:generation_tokens_total", 0.0)
+
+                    lvl = {
+                        "n_users": n_users, "repeat": rep,
+                        "wall_s": round(wall, 1),
+                        "gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
+                        "goodput_rps": m["goodput_rps"],
+                        "throughput_rps": m["throughput_rps"],
+                        "good_frac": m["good_frac"],
+                        "ttft_p99_ms": (m["ttft_ms"] or {}).get("p99"),
+                        "tpot_p99_ms": (m["tpot_ms"] or {}).get("p99"),
+                        "n_failed": m["n_failed"],
+                        "meets_slo": bool(m["good_frac"] >= 0.99 and m["n_failed"] == 0),
+                        # Token mix for cost attribution.
+                        "prompt_tokens": p_tok, "cached_tokens": c_tok,
+                        "uncached_tokens": max(0.0, p_tok - c_tok),
+                        "output_tokens": g_tok,
+                        "cache_hit_rate": round(c_tok / p_tok, 4) if p_tok else None,
+                        "collapse": detect_collapse(res),
+                        "client_health": client_health(res),
+                    }
+                    rec["levels"].append(lvl)
+                    print(f"  N={n_users:<5} rep{rep}  goodput {lvl['goodput_rps']:>7.2f}"
+                          f"  SLO {lvl['good_frac'] * 100:>5.1f}%"
+                          f"  TTFT p99 {(lvl['ttft_p99_ms'] or 0):>7.0f}ms"
+                          f"  hit {(lvl['cache_hit_rate'] or 0):.2f}"
+                          f"  {'OK' if lvl['meets_slo'] else 'MISS'}", flush=True)
+            rec["status"] = "ok"
+        except Exception as e:
+            rec["status"] = "failed"
+            rec["failure"] = f"{type(e).__name__}: {e}"
+            print("FAILED:", rec["failure"], flush=True)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    try:
+        rec["server_log_tail"] = open(log_path, errors="replace").read()[-6000:]
+    except Exception:
+        pass
+    stamp = f"{int(time.time())}-frontier-{sc.digest()}"
+    os.makedirs("/results/runs", exist_ok=True)
+    with open(f"/results/runs/{stamp}.json", "w") as f:
+        json.dump(rec, f, indent=2, default=str)
+    results_vol.commit()
+    rec["result_path"] = f"/results/runs/{stamp}.json"
+    return rec
+
+
+# Live OpenRouter table for qwen/qwen3.8-27b, fetched 2026-08-30.
+# (provider, input $/M, output $/M, cache read $/M)
+MARKET_QWEN38_27B = [
+    ("Reka", 0.250, 3.000, 0.025), ("AkashML", 0.350, 2.550, 0.050),
+    ("Chutes", 0.350, 2.750, 0.035), ("Parasail", 0.350, 3.200, 0.050),
+    ("Phala", 0.400, 3.000, 0.150), ("CoreWeave", 0.400, 3.000, 0.150),
+    ("Novita", 0.420, 3.000, 0.085), ("Alibaba", 0.425, 2.550, 0.085),
+    ("Cloudflare", 0.450, 3.200, 0.050), ("Venice", 0.450, 3.200, None),
+    ("Io Net", 0.480, 3.400, 0.250),
+]
+
+
+@app.local_entrypoint()
+def price(levels: str = "1,2,4,8,16,32,64,128", seconds: float = 90.0,
+          repeats: int = 1, basis: str = "nebius-h100-committed",
+          utilization: float = 0.6, margin: float = 0.25,
+          ttft_ms: float = 1000.0, tpot_ms: float = 50.0):
+    """Measure the SLO frontier, attribute cost per token, and price it.
+
+    The whole objective in one command: how many concurrent users can we hold
+    within the marketplace's latency targets, what does each class of token
+    cost us in GPU-seconds, and where would the resulting effective input price
+    sit on the live provider table.
+    """
+    from autoinf.config import SLO, ServingConfig
+    from autoinf.pricing import (Observation, attribute, conditioning,
+                                 effective_in, fmt_prices, prices, rank_vs_market)
+
+    ns = [int(x) for x in levels.split(",") if x.strip()]
+    sc, sl = ServingConfig(), SLO(ttft_ms=ttft_ms, tpot_ms=tpot_ms)
+    print(f"SLOs: TTFT p99 < {ttft_ms:.0f}ms, TPOT p99 < {tpot_ms:.0f}ms")
+    print(f"model {sc.model.split('/')[-1]} on {sc.n_gpu}x{sc.gpu}\n")
+
+    rec = frontier.remote(asdict(sc), ns, asdict(sl), seconds, repeats, "frontier")
+    if rec.get("status") != "ok" or not rec.get("levels"):
+        print(json.dumps({k: rec.get(k) for k in ("status", "failure")}, indent=2))
+        return
+
+    print(f"\n{'users':>6}{'goodput':>10}{'thruput':>10}{'SLO%':>7}"
+          f"{'TTFT p99':>10}{'TPOT p99':>10}{'hit':>7}{'':>6}")
+    print("-" * 66)
+    for l in rec["levels"]:
+        print(f"{l['n_users']:>6}{l['goodput_rps']:>10.2f}{l['throughput_rps']:>10.2f}"
+              f"{l['good_frac'] * 100:>7.1f}{(l['ttft_p99_ms'] or 0):>10.0f}"
+              f"{(l['tpot_p99_ms'] or 0):>10.1f}{(l['cache_hit_rate'] or 0):>7.2f}"
+              f"{'  OK' if l['meets_slo'] else '  MISS':>6}")
+
+    # N* must hold in EVERY repeat: near saturation a single pass is luck.
+    by_n: dict[int, list[dict]] = {}
+    for l in rec["levels"]:
+        by_n.setdefault(l["n_users"], []).append(l)
+    ok_levels = [n for n, ls in by_n.items() if all(x["meets_slo"] for x in ls)]
+    n_star = max(ok_levels) if ok_levels else None
+    if n_star is None:
+        print("\nNo level met the SLOs — lower the smallest level or relax the targets.")
+        return
+
+    best = max((l for l in by_n[n_star]), key=lambda l: l["goodput_rps"])
+    print(f"\nN* = {n_star} concurrent users  "
+          f"(goodput {best['goodput_rps']:.2f} rps, "
+          f"{best['output_tokens'] / max(best['wall_s'], 1e-9):.0f} out tok/s, "
+          f"cache hit {best['cache_hit_rate']:.2f})")
+
+    # ── cost attribution ─────────────────────────────────────────
+    obs = [Observation(f"N{l['n_users']}r{l['repeat']}", l["uncached_tokens"],
+                       l["cached_tokens"], l["output_tokens"], l["gpu_seconds"])
+           for l in rec["levels"] if l["output_tokens"] > 0]
+    if len(obs) < 3:
+        print("\nnot enough levels with token counts for attribution")
+        return
+    cond = conditioning(obs)
+    attr = attribute(obs)
+    print(f"\nGPU-seconds per token   uncached_in {attr.per_uncached_in:.3e}"
+          f"  cached_in {attr.per_cached_in:.3e}  out {attr.per_out:.3e}")
+    print(f"  fit r2 {attr.r2}   condition {cond['condition_number']}"
+          f"   {'well-conditioned' if cond['well_conditioned'] else 'ILL-CONDITIONED'}")
+    if attr.cache_discount is not None:
+        print(f"  cache discount {attr.cache_discount:.3f}  "
+              f"(a cached token costs this fraction of an uncached one; "
+              f"the market prices it at ~0.1)")
+    if not cond["well_conditioned"]:
+        print(f"  !! {cond['note']}")
+
+    p = prices(attr, basis=basis, n_gpu=sc.n_gpu,
+               utilization=utilization, margin=margin)
+    f = fmt_prices(p)
+    print(f"\n{basis} @ ${p['usd_per_gpu_hour']}/GPU-hr, "
+          f"utilisation {utilization:.0%}, margin {margin:.0%}")
+    print(f"  input        ${f['price_in_per_mtok']}/M")
+    print(f"  cached input ${f['price_cached_in_per_mtok']}/M")
+    print(f"  output       ${f['price_out_per_mtok']}/M")
+
+    print(f"\n{'hit rate':>9}{'eff in $/M':>13}{'rank':>7}   best competitor")
+    print("-" * 52)
+    for h in (0.5, 0.8, 0.9, 0.95):
+        eff = effective_in(p["price_in_per_mtok"], p["price_cached_in_per_mtok"], h)
+        r = rank_vs_market(eff, MARKET_QWEN38_27B, h)
+        print(f"{h:>9.2f}{eff:>13.4f}{r['rank']:>4}/{r['of']:<3}"
+              f"   {r['best_competitor']} @ {r['best_competitor_price']:.4f}")
+    print("\nutilisation is the largest single lever and is an assumption, not a\n"
+          "measurement: at 30% instead of 60% every price above doubles.")
