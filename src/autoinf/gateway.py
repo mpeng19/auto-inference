@@ -135,8 +135,13 @@ def summarize_captures(caps: list[Capture]) -> dict:
             "p95": q([c.completion_tokens for c in caps], 0.95)},
         "think_ms": {"p50": q([c.think_ms for c in caps], 0.5),
                      "p95": q([c.think_ms for c in caps], 0.95)},
-        "ttft_ms": {"p50": q([c.ttft_ms for c in caps], 0.5),
-                    "p99": q([c.ttft_ms for c in caps], 0.99)},
+        # TTFT only exists for streaming requests -- there is no "first token"
+        # in a single JSON response. Null here means the client did not stream,
+        # not that timing failed.
+        "n_streamed": sum(1 for c in caps if c.stream),
+        "ttft_ms": {"p50": q([c.ttft_ms for c in caps if c.stream], 0.5),
+                    "p99": q([c.ttft_ms for c in caps if c.stream], 0.99),
+                    "note": "streaming requests only"},
         # The headline for agentic traffic: what fraction of each prompt is a
         # verbatim repeat of the previous turn. High reuse is what makes the
         # prefix cache decisive rather than incidental.

@@ -180,7 +180,43 @@ rather than the result, and flags:
 by dropping slow requests, and that looks identical to a real improvement from
 the outside.
 
-## 9. GPU probes -- already run, re-run after any SGLang upgrade
+## 9. Capturing real agent traffic
+
+A deployed OpenAI-compatible endpoint with a recording proxy in front of
+SGLang. Point a real agent at it, let it work, and it records the traffic
+*shape* without ever being in the measurement loop.
+
+    https://mpeng19--auto-inference-agent-endpoint.modal.run/v1
+
+OpenHands: Settings -> LLM
+
+| field        | value |
+|---|---|
+| Custom Model | `openai/Qwen/Qwen3-4B-Instruct-2507-FP8` |
+| Base URL     | the URL above |
+| API Key      | the `auto-inference-gateway` secret |
+
+Run OpenHands in **Docker mode with a scratch directory mounted**, not this
+repo. An agent doing a coding task has no reason to touch the harness measuring
+it, and "no reason to" is not isolation.
+
+```bash
+uv run modal run src/autoinf/modal_app.py::traces                 # list
+uv run modal run src/autoinf/modal_app.py::traces --name <file>   # summarise
+```
+
+The number to look at is `prefix_reuse_frac`: what fraction of each prompt is a
+verbatim repeat of the previous turn. Chat sits around 0.5; a coding agent
+resending file contents and tool output should be far higher, and that is what
+makes prefix caching decisive rather than incidental for this traffic.
+
+Why this matters: our synthetic workloads are chat-shaped -- ~500 tokens in,
+decode-bound. A coding-agent turn is 8k-90k tokens in and ~99% prefill-bound,
+183x to 768x the work per request, on the opposite side of the roofline. An
+optimisation tuned on the current suite could be irrelevant, or actively wrong,
+for agentic traffic.
+
+## 10. GPU probes -- already run, re-run after any SGLang upgrade
 
 ```bash
 uv run modal run src/autoinf/probe.py::probe_env     # image, hardware, flags
