@@ -116,3 +116,30 @@ async def test_summarize_turns_reports_growth(server):
     if len(depths) > 1:
         first, last = rows[str(depths[0])], rows[str(depths[-1])]
         assert last["mean_history_tokens"] > first["mean_history_tokens"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_users_do_not_share_history(server):
+    """Sessions come from a shared pool; two users drawing the same one must
+    not interleave conversations, and history must reset between loops."""
+    from autoinf.loadgen import run_concurrent_users
+    url = f"http://{server.host}:{server.port}"
+    tr = build_sessions(_cfg(n_requests=3, turns_mu=3.0))
+    pool = tr.sessions
+    # Every user gets the SAME session object -- the worst case for sharing.
+    res = await run_concurrent_users(lambda uid, n: pool[0], url, "m",
+                                     n_users=4, duration_s=2.0)
+    assert res, "no requests issued"
+    by_user: dict[int, list] = {}
+    for r in res:
+        by_user.setdefault(r.session, []).append(r)
+    assert len(by_user) >= 2, "expected several users to have issued requests"
+    for rs in by_user.values():
+        rs.sort(key=lambda r: r.dispatched_s)
+        # Turn indices must restart at 0 for each new conversation loop,
+        # never climb without bound.
+        assert min(r.turn for r in rs) == 0
+        assert max(r.turn for r in rs) < 20, "history leaked across loops"
+    # History size must stay bounded rather than growing across conversations.
+    assert max(r.history_tokens for r in res) < 5000, \
+        "history grew without bound -- shared or never reset"

@@ -469,10 +469,16 @@ async def _user_worker(uid: int, make_session, base_url: str, model: str,
     n = 0
     while time.time() < deadline:
         sess = make_session(uid, n)
+        # History is owned by the *worker*, not the Session. Sessions come from
+        # a shared pool, so attaching history to one would let two users
+        # interleave the same conversation, and would never reset between
+        # loops -- prompts would grow without bound and every length in the run
+        # would be meaningless.
+        history = [{"role": "system", "content": sess.system}]
         for k, turn in enumerate(sess.turns):
             if time.time() >= deadline:
                 return
-            await _turn(sess, k, turn, uid, base_url, model, start_wall,
+            await _turn(history, k, turn, uid, base_url, model, start_wall,
                         timeout_s, http, out)
             if k < len(sess.think_s):
                 await asyncio.sleep(min(sess.think_s[k], max(0.0, deadline - time.time())))
@@ -509,15 +515,11 @@ async def run_concurrent_users(make_session, base_url: str, model: str,
     return sorted(out, key=lambda r: r.dispatched_s)
 
 
-async def _turn(sess, k, turn, uid, base_url, model, start_wall, timeout_s,
-                http, out) -> None:
-    """One request within a conversation. Shares the multi-turn accounting."""
+async def _turn(history: list[dict], k, turn, uid, base_url, model, start_wall,
+                timeout_s, http, out) -> None:
+    """One request within a conversation. `history` is caller-owned and mutated."""
     import aiohttp
 
-    if not hasattr(sess, "_history"):
-        object.__setattr__(sess, "_history",
-                           [{"role": "system", "content": sess.system}])
-    history = sess._history
     history.append({"role": "user", "content": turn.text})
     hist_tokens = sum(len(m["content"]) for m in history) // 4
 
