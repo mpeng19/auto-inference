@@ -6,6 +6,7 @@ have generated. Metadata is teed off the stream as it passes.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import time
@@ -17,7 +18,25 @@ from autoinf.gateway import Capture, Recorder
 
 UPSTREAM = os.environ.get("UPSTREAM", "http://127.0.0.1:30000")
 TRACE_PATH = os.environ.get("TRACE_PATH", "/results/traces/capture.jsonl")
+# A public GPU-backed LLM endpoint on a paid account is an open invitation.
+# Checked as a standard OpenAI-style bearer token, so any client that can talk
+# to the OpenAI API can authenticate by setting its api_key -- no special
+# handling needed on the agent side.
+API_KEY = os.environ.get("GATEWAY_API_KEY", "")
 _rec = Recorder(TRACE_PATH)
+
+
+@web.middleware
+async def _auth(request, handler):
+    if not API_KEY or request.path == "/health":
+        return await handler(request)
+    sent = (request.headers.get("Authorization", "")
+            .removeprefix("Bearer ").strip())
+    if not hmac.compare_digest(sent, API_KEY):
+        return web.json_response(
+            {"error": {"message": "invalid api key", "type": "invalid_request_error"}},
+            status=401)
+    return await handler(request)
 
 
 async def _models(request):
@@ -106,7 +125,7 @@ def _capture(key, turn, messages, body, meta, t0, first, usage_in, usage_out,
 
 
 def make_app() -> web.Application:
-    app = web.Application(client_max_size=1024 ** 3)
+    app = web.Application(client_max_size=1024 ** 3, middlewares=[_auth])
     app.router.add_post("/v1/chat/completions", _chat)
     app.router.add_get("/v1/models", _models)
     app.router.add_get("/health", _health)

@@ -782,7 +782,8 @@ AGENT_PORT = 8000
 @app.function(
     image=image, gpu="L40S", cpu=8.0,
     volumes={"/cache": hf_cache, "/results": results_vol},
-    secrets=[modal.Secret.from_name("huggingface")],
+    secrets=[modal.Secret.from_name("huggingface"),
+             modal.Secret.from_name("auto-inference-gateway")],
     timeout=6 * 60 * 60, max_containers=1, scaledown_window=20 * 60,
 )
 @modal.web_server(AGENT_PORT, startup_timeout=20 * 60)
@@ -815,7 +816,8 @@ def agent_endpoint():
     env = {**os.environ,
            "UPSTREAM": SERVER_URL,
            "PROXY_PORT": str(AGENT_PORT),
-           "TRACE_PATH": f"/results/traces/agent-{stamp}.jsonl"}
+           "TRACE_PATH": f"/results/traces/agent-{stamp}.jsonl",
+           "GATEWAY_API_KEY": os.environ.get("GATEWAY_API_KEY", "")}
     # The proxy waits for SGLang itself, so the port opens as soon as the model
     # is up and Modal's startup probe succeeds.
     subprocess.Popen(
