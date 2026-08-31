@@ -273,3 +273,76 @@ def infer_operating_point(tokens_per_s: float, context: int,
                         m, hw, n, max(1, int(batch)), context, e),
                     "tpot_ms": round(step_s * 1e3, 2)})
     return out
+
+
+# ── the model that actually predicts: constant step time ─────────────────
+#
+# The roofline model above scores 38% mean leave-one-out error across TP
+# 1/2/4/8 because it assumes tensor parallelism is free. It is not: measured
+# decode efficiency falls from 0.60 at TP=2 to 0.29 at TP=8.
+#
+# What the data shows instead is that the time to advance one decode step is
+# ~constant, across 8x the GPUs and 6x the batch:
+#
+#     GPUs  batch  batch/GPU  step ms   GPU-s/out token
+#        1   15.6       15.6     23.0         1.473e-03
+#        2   40.6       20.3     20.6         1.017e-03
+#        4   78.1       19.5     20.3         1.042e-03
+#        8   96.7       12.1     21.5         1.775e-03
+#
+#     mean 21.4ms, sd 1.0ms, spread 1.13x
+#
+# So cost per output token is STEP * n_gpu / batch, and everything reduces to
+# *what batch a configuration can sustain*. One parameter, 5% mean LOO error.
+#
+# This is an empirical invariant, not a derivation -- 21.4ms has no first-
+# principles justification, and roofline says TP=8 should manage 6.2ms. Treat
+# it as calibrated-for-this-stack: it should be re-measured for a different
+# model, GPU, or workload shape, and a change in it is itself a finding, since
+# closing the gap to roofline is the largest available optimisation.
+
+
+@dataclass(frozen=True)
+class StepModel:
+    """Cost per output token = step_s * n_gpu / batch."""
+    step_s: float = 0.0214
+
+    def gpu_s_out(self, n_gpu: int, batch: float) -> float:
+        return self.step_s * n_gpu / batch
+
+    def tokens_per_s(self, batch: float) -> float:
+        return batch / self.step_s
+
+
+def calibrate_step(obs: list[Observation]) -> StepModel:
+    """Each observation implies a step time directly; the fit is their mean."""
+    return StepModel(sum(o.gpu_s_out * o.batch / o.n_gpu for o in obs) / len(obs))
+
+
+def validate_loo_step(obs: list[Observation]) -> dict:
+    """The same held-out test applied to the constant-step model."""
+    if len(obs) < 2:
+        return {"available": False, "reason": "need >= 2 configurations"}
+    rows = []
+    for i, held in enumerate(obs):
+        rest = obs[:i] + obs[i + 1:]
+        pred = calibrate_step(rest).gpu_s_out(held.n_gpu, held.batch)
+        rows.append({"n_gpu": held.n_gpu, "batch": round(held.batch, 1),
+                     "predicted": pred, "measured": held.gpu_s_out,
+                     "rel_error": round((pred - held.gpu_s_out) / held.gpu_s_out, 4)})
+    errs = [abs(r["rel_error"]) for r in rows]
+    m = calibrate_step(obs)
+    return {"available": True, "rows": rows,
+            "mean_abs_error": round(sum(errs) / len(errs), 4),
+            "worst_abs_error": round(max(errs), 4),
+            "step_ms": round(m.step_s * 1e3, 2)}
+
+
+# Measured on the market workload (20,583 in / 2,076 out) at TP 1/2/4/8.
+# `batch` is the decode mix's mean running batch from `BatchSampler`.
+SWEEP_2026_08_31 = [
+    Observation(n_gpu=1, batch=15.6, context=22_659, gpu_s_out=1.473e-03),
+    Observation(n_gpu=2, batch=40.6, context=22_659, gpu_s_out=1.017e-03),
+    Observation(n_gpu=4, batch=78.1, context=22_659, gpu_s_out=1.042e-03),
+    Observation(n_gpu=8, batch=96.7, context=22_659, gpu_s_out=1.775e-03),
+]

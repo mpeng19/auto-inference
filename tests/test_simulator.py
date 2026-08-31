@@ -98,3 +98,42 @@ def test_efficiency_rejects_impossible_values():
     for bad in (0.0, -0.1, 1.5):
         with pytest.raises(ValueError):
             Efficiency(decode_bw=bad)
+
+
+def test_constant_step_model_beats_roofline_out_of_sample():
+    """The whole point of having a fidelity number: it picked the better model.
+
+    Roofline assumes TP divides bytes and bandwidth equally, so cost per token
+    is TP-invariant. Measured, it is not -- efficiency halves from TP=2 to
+    TP=8. A one-parameter constant-step model predicts held-out configurations
+    roughly seven times better.
+    """
+    from autoinf.simulator import SWEEP_2026_08_31, validate_loo_step
+
+    step = validate_loo_step(SWEEP_2026_08_31)
+    roof = validate_loo(SWEEP_2026_08_31)
+    assert step["mean_abs_error"] < 0.10, step
+    assert step["worst_abs_error"] < 0.15, step
+    assert step["mean_abs_error"] < roof["mean_abs_error"] / 3, (step, roof)
+
+
+def test_measured_step_time_is_stable_across_the_sweep():
+    """21.4ms +- 1.0ms across 8x the GPUs and 6x the batch."""
+    from autoinf.simulator import SWEEP_2026_08_31, calibrate_step
+
+    steps = [o.gpu_s_out * o.batch / o.n_gpu for o in SWEEP_2026_08_31]
+    assert max(steps) / min(steps) < 1.2, steps
+    assert 0.018 < calibrate_step(SWEEP_2026_08_31).step_s < 0.025
+
+
+def test_roofline_still_fails_the_held_out_test():
+    """Kept as a pinned negative result, not deleted.
+
+    Roofline remains in the module because the gap between it and measurement
+    (21.4ms against 6.2ms at TP=8) is the optimisation headroom. But it must
+    not be used to predict cost.
+    """
+    from autoinf.simulator import SWEEP_2026_08_31
+
+    v = validate_loo(SWEEP_2026_08_31)
+    assert v["mean_abs_error"] > 0.20, v
