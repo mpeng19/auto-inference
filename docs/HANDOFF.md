@@ -252,10 +252,49 @@ TP 2/4/8 -- growing with TP, consistent with per-layer synchronisation across
 64 layers rather than bandwidth (all-reduce volume at TP=8 is ~111MB/step,
 which NVLink moves in 0.12ms).
 
-**Do not add a TP term yet.** Three configurations cannot identify a
-two-parameter correction without overfitting the thing LOO is meant to test.
-The TP=1 run is the point that matters, because TP=1 has no communication at
-all and isolates the overhead.
+**Resolved by the TP=1 run (`1788207351`).** Decode step time is ~constant
+across the whole sweep:
+
+    GPUs  batch  batch/GPU  step ms   GPU-s/out token   cache discount
+       1   15.6       15.6     23.0         1.473e-03            0.101
+       2   40.6       20.3     20.6         1.017e-03            0.127
+       4   78.1       19.5     20.3         1.042e-03            0.222
+       8   96.7       12.1     21.5         1.775e-03            0.324
+
+    mean 21.4ms, sd 1.0ms -- stable across 8x the GPUs and 6x the batch
+
+So cost per output token is **`step * n_gpu / batch`**. One parameter:
+
+    LOO, constant-step model    5% mean error,  9% worst
+    LOO, roofline model        38% mean error, 50% worst
+
+**The simulator's job therefore reduces to predicting the batch a
+configuration sustains** -- given batch, cost follows. `StepModel`,
+`calibrate_step`, `validate_loo_step`, and the sweep data are in
+`simulator.py`; `tests/test_simulator.py` pins the comparison.
+
+Two honest limits. The 21.4ms is an **empirical invariant, not a derivation** —
+roofline says TP=8 should reach 6.2ms, so we sit 3.5x off, and *that gap is the
+optimisation headroom*. And it is calibrated for this model, GPU and workload;
+re-measure it if any of those change. The roofline path stays in the module as
+a pinned negative result, because the distance between the two is the target.
+
+**Cache discount is monotonic in TP** — 0.101 / 0.127 / 0.222 / 0.324 at TP
+1/2/4/8. At TP=1 it exactly matches the market's ~0.10.
+
+**Deployment economics**, break-even against the best provider, and the share
+of the market's 17.9B tokens/day needed to reach it:
+
+    GPUs  $/hr   capacity   break-even util   market share needed
+       1  2.50   0.32B/day             33%                 0.60%
+       2  5.00   1.01B/day             27%                 1.54%
+       4 10.00   1.64B/day             31%                 2.84%
+       8 20.00   2.81B/day             52%                 8.16%
+
+**2xH100 has the best break-even utilisation; 1xH100 needs the least absolute
+demand.** Either is viable where 8xH100 is not. Caveat: the TP=1 run never
+found its N\* — all four levels passed — so 1 GPU is under-characterised and
+may be better than measured. Re-run it with higher levels.
 
 ### 3d. The market-realistic run — run `1788203369`, and it supersedes §3
 
