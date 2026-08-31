@@ -105,6 +105,43 @@ class ServingConfig:
         a += list(self.extra_args)
         return a
 
+    def validate(self) -> list[str]:
+        """Catch launch-time constraints before spending GPU minutes on them.
+
+        Two 8xH100 attempts died in the first minutes for reasons a check could
+        have caught: TP=8 requested against a single allocated GPU, and an
+        MoE/FP8 block-size constraint. Both were cheap only because the
+        fast-fail path works; neither needed a GPU to detect.
+        """
+        from .flops import MODELS
+
+        problems: list[str] = []
+        if self.tp_size > self.n_gpu:
+            problems.append(
+                f"tp_size={self.tp_size} exceeds n_gpu={self.n_gpu}. n_gpu must "
+                f"also be allocated at call time -- it does not allocate itself.")
+        if self.ep_size and self.ep_size > self.n_gpu:
+            problems.append(f"ep_size={self.ep_size} exceeds n_gpu={self.n_gpu}")
+
+        spec = MODELS.get(self.model)
+        if spec is not None and spec.n_experts > 1:
+            # FP8 weights are stored in 128x128 blocks, so each rank's slice of
+            # an expert must be a whole number of blocks.
+            block = 128
+            moe_tp = max(1, self.tp_size // max(1, self.ep_size or 1))
+            per_rank = spec.moe_intermediate / moe_tp
+            if per_rank % block != 0:
+                ok = [e for e in (1, 2, 4, 8, 16)
+                      if e <= self.n_gpu
+                      and (spec.moe_intermediate /
+                           max(1, self.tp_size // e)) % block == 0]
+                problems.append(
+                    f"MoE/FP8 block constraint: moe_intermediate="
+                    f"{spec.moe_intermediate} / moe_tp={moe_tp} = {per_rank:.0f}, "
+                    f"not a multiple of {block}. Valid ep_size for tp_size="
+                    f"{self.tp_size}: {ok or 'none -- change tp_size'}")
+        return problems
+
     def digest(self) -> str:
         return _digest(asdict(self))
 

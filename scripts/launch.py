@@ -40,6 +40,15 @@ def cmd_frontier(a) -> int:
     if a.gpu:
         sc = dataclasses.replace(sc, gpu=a.gpu, n_gpu=a.n_gpu,
                                  tp_size=a.n_gpu)
+    if a.ep:
+        sc = dataclasses.replace(sc, ep_size=a.ep)
+
+    problems = sc.validate()
+    if problems:
+        print("invalid config, not spawning:")
+        for p_ in problems:
+            print("  !", p_)
+        return 1
     sl = SLO(ttft_ms=a.ttft_ms, tpot_ms=a.tpot_ms)
     levels = [int(x) for x in a.levels.split(",") if x.strip()]
     # ServingConfig.n_gpu only sets SGLang's --tp-size; it does not allocate
@@ -173,6 +182,8 @@ def main() -> int:
     f.add_argument("--model", default="", help="override the model to serve")
     f.add_argument("--gpu", default="", help="override GPU type, e.g. H100")
     f.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
+    f.add_argument("--ep", type=int, default=0,
+                   help="expert-parallel size; MoE+FP8 constrains valid values")
     f.add_argument("--trace-scale", dest="trace_scale", type=float, default=0.0,
                    help="replay real TraceLab agent sessions, scaled by this "
                         "factor (0 = synthetic conversations)")

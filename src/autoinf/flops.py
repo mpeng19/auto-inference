@@ -42,6 +42,12 @@ class ModelSpec:
     vocab_size: int
     bytes_per_param: float = 1.0        # FP8
     tie_embeddings: bool = False
+    # Layers that actually hold a growing KV cache. Hybrid models interleave
+    # linear attention (constant state, no KV growth) with full attention, so
+    # this can be far below n_layers -- Qwen3.8-27B has 16 of 64. Assuming all
+    # layers cache is a 4x overestimate of memory, which changes what hardware
+    # a workload needs.
+    n_kv_layers: int | None = None
     # A dense model is the degenerate MoE: one "expert", always active. Keeping
     # one code path means the roofline maths does not fork by architecture.
     dense: bool = False
@@ -97,8 +103,13 @@ class ModelSpec:
         return per_layer * self.n_layers
 
     def kv_bytes_per_token(self, dtype_bytes: float = 2.0) -> float:
-        """KV cache written per token, per sequence. GQA makes this cheap."""
-        return 2 * self.n_layers * self.n_kv_heads * self.head_dim * dtype_bytes
+        """KV cache written per token, per sequence.
+
+        Counts only full-attention layers: linear-attention layers keep a fixed
+        -size state that does not grow with context.
+        """
+        layers = self.n_kv_layers if self.n_kv_layers is not None else self.n_layers
+        return 2 * layers * self.n_kv_heads * self.head_dim * dtype_bytes
 
     def experts_touched(self, batch: int) -> float:
         """Expected distinct experts activated by `batch` tokens in one step.
@@ -163,17 +174,31 @@ QWEN3_8B = ModelSpec(
     tie_embeddings=False, dense=True,
 )
 
-# THE TARGET. Dense 27B vision-language model, the one we would actually sell.
-# Note `head_dim=256` -- double the usual 128 -- with 64 layers and 4 KV heads,
-# giving 256 KiB/token of KV. That is 2.7x the 30B MoE, and it means a single
-# real agentic conversation (132k tokens, per TraceLab) needs 34.6 GB. An L40S
-# cannot hold one; an H100 holds 1.6; 8xH100 holds ~18. Serving this model on
-# coding-agent traffic is a KV-capacity problem before it is anything else.
+# THE TARGET. A *hybrid* MoE vision-language model, not the dense one an
+# earlier version of this file assumed:
+#
+#   * 64 layers, but only **16 use full attention** (`layer_types` interleaves
+#     three linear-attention layers per full one). Linear attention keeps a
+#     fixed-size state, so only those 16 contribute growing KV. Counting all 64
+#     overestimates memory 4x.
+#   * Mixture-of-experts with `moe_intermediate_size=512`. FP8 weights use a
+#     128x128 block, so SGLang requires
+#     `(512 / (tp_size/ep_size)) % 128 == 0` -- TP=8 needs EP of 2, 4 or 8.
+#   * `head_dim=256`, unusually large, which is why KV is still 64 KiB/token
+#     despite only a quarter of the layers caching.
+#
+# One real 132k-token agentic conversation is ~8.7 GB: an L40S holds two, an
+# H100 about six, 8xH100 about seventy.
+#
+# FLOPs figures for this model are approximate -- the published config does not
+# expose expert counts, so `total_params`/`active_params` here should not be
+# trusted the way the smaller models' are. KV and memory are exact.
 QWEN3_8_27B = ModelSpec(
     name="Qwen/Qwen3.8-27B-FP8",
-    hidden_size=5120, n_layers=64, n_heads=24, n_kv_heads=4, head_dim=256,
-    moe_intermediate=17408, n_experts=1, n_experts_active=1, vocab_size=248320,
-    tie_embeddings=False, dense=True,
+    hidden_size=5120, n_layers=64, n_kv_layers=16,
+    n_heads=24, n_kv_heads=4, head_dim=256,
+    moe_intermediate=512, n_experts=128, n_experts_active=8,
+    vocab_size=248320, tie_embeddings=False,
 )
 
 QWEN3_235B_A22B = ModelSpec(

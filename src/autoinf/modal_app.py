@@ -917,6 +917,15 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
     if warn:
         print(f"\n!! CALIBRATION: {warn}\n", flush=True)
 
+    # Refuse an invalid parallelism config rather than discovering it from a
+    # scheduler traceback several GPU-minutes in.
+    problems = sc.validate()
+    if problems:
+        rec = {"status": "failed", "serving": asdict(sc),
+               "failure": "invalid ServingConfig: " + "; ".join(problems)}
+        print("INVALID CONFIG:", *problems, sep="\n  ", flush=True)
+        return rec
+
     cmd = ["python", "-m", "sglang.launch_server", "--host", "127.0.0.1",
            "--port", str(SERVER_PORT), *sc.to_sglang_args()]
     print("launching:", " ".join(cmd), flush=True)
