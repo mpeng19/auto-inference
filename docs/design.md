@@ -119,9 +119,48 @@ One parameter. Leave-one-out:
     held out 8g: predicted 1.764e-03  measured 1.775e-03   -1%
                                           mean 5%, worst 9%
 
-**This is empirical, not derived.** 21.4ms has no first-principles
-justification and roofline says TP=8 should manage 6.2ms. It is calibrated for
-this model, this GPU, this workload shape; re-measure if any changes.
+### 3.3.1 How strong is this result, honestly
+
+Weaker than "5% error" makes it sound. Three qualifications, all of which
+should be read before quoting the number.
+
+**(a) The formula is an identity, not a physical law.** In wall time `T` at
+batch `B`, a configuration emits `B*T/step` output tokens and burns `n*T`
+GPU-seconds, so
+
+    cost = n*T / (B*T/step) = step * n / B
+
+`T` cancels. Given a stable batch and GPU time going to decode, `cost = step *
+n / batch` is **algebra**. Its entire empirical content is the separate claim
+that `step` is constant across configurations. The formula cannot be wrong; the
+constancy can.
+
+**(b) The "5% LOO error" is the coefficient of variation of four numbers.**
+Step times are 23.0 / 20.6 / 20.3 / 21.5 ms — mean 21.36, sd 1.18, **CV 5.5%**.
+For a constant-mean model, leave-one-out error *is* the CV; the two agreeing is
+arithmetic, not corroboration. It says the four step times are close together.
+It does not establish that the model extrapolates.
+
+Against a null of "cost is constant", the model does earn its keep — R² +0.963
+versus +0.000 — but that null is very weak, since cost varies 1.7x across the
+sweep and any downward function of batch would beat it.
+
+**(c) `n_gpu` and `batch` were not independently varied.**
+`corr(log n_gpu, log batch) = +0.965`. `sat_users` was derived from `N*`, which
+grows with GPU count, so batch rose with GPUs by construction. **These four
+points cannot distinguish a `1/batch` law from an `n_gpu` law** — only their
+ratio was observed. The functional form is assumed, not measured.
+
+**What would settle (c):** hold `n_gpu` fixed, hold mix composition fixed,
+and sweep concurrency so batch varies alone. If cost still tracks `1/batch`,
+the form is confirmed independently. The frontier levels cannot serve for this
+— at low concurrency the GPU idles, so wall-clock GPU-seconds charge idle time
+to the few tokens that flowed, which is failure mode (1) of §3.4. Only
+saturated windows are valid, i.e. the phase-B mixes.
+
+**Also unverified:** 21.4ms has no first-principles justification, and roofline
+says TP=8 should manage 6.2ms. It is calibrated for this model, this GPU, this
+workload shape. Re-measure if any changes, and treat a change as a finding.
 
 ### 3.4 How the inputs to the fit are measured
 
