@@ -197,10 +197,68 @@ and mix records `batch`. The phase-B mixes now hold context fixed at the
 marketplace's ~20k and vary only output length, so decode is measured in the
 regime the marketplace actually runs.
 
-**Next run must be: market-realistic workload (20.6k in / 2.1k out / 9.9:1) at
-a market-realistic SLO (p99 TTFT 4s), then re-attribute.** Every cost and rank
-in §3 was produced under a workload the market does not send and an SLO no
-competitor meets.
+### 3d. The market-realistic run — run `1788203369`, and it supersedes §3
+
+8xH100 TP8/EP8, 20,583 in / 2,076 out (9.9:1), p99 TTFT 4s, batch sampled.
+`--ep 8` is still required: SGLang runs its quantized-MoE block check on this
+dense model using a fallback `moe_intermediate_size=512` (see §6).
+
+    users  goodput  thruput  SLO%  TTFT p99  TPOT p99   hit   batch
+        8     0.29     0.29 100.0       684       8.1  0.87     3.9
+       16     0.55     0.55 100.0       649      10.2  0.86     8.8
+       32     0.88     0.89  99.2       778      21.1  0.84    16.1
+       64     1.58     1.60  99.1      1066      37.8  0.81    35.6   <- N*
+      128     2.15     2.20  97.8      1061      82.9  0.78    69.0   MISS
+
+**N\* = 64, not 4** — 16x the old figure, and goodput 1.58 rps against 0.79.
+The old N\*=4 was an artefact of the 132k replay and the 2s SLO, not the
+hardware.
+
+**TPOT binds, not TTFT.** At 128 users TTFT p99 is 1061ms — a quarter of the
+SLO — while TPOT p99 is 82.9ms against a 50ms limit. §3's "TTFT is the binding
+constraint, raising N\* by improving TTFT is the clearest optimisation target"
+was true only of the 132k replay. **At market context the binding constraint is
+decode speed.**
+
+**Attribution** (fit 0.932, condition 2.1, spans 23x / 688x / 129x, all
+identified):
+
+    |                | run 1 (132k/454) | run 2 (20.6k/2076) |
+    | uncached_in    |        1.403e-04 |          1.549e-04 |
+    | cached_in      |        4.487e-05 |          5.026e-05 |
+    | out            |        2.331e-03 |          1.775e-03 |
+    | cache discount |            0.320 |          **0.324** |
+
+**The cache discount replicates to 1% across two runs with different workload,
+context, SLO and mix design.** It is a real property of the serving stack, not
+an artefact — the strongest result we have.
+
+**Decode does batch — the batch-of-3 hypothesis is dead.** The decode mix ran
+at mean batch 96.7 (p50 111, max 130) with ~95 more queued. Measured against
+roofline at that batch and context:
+
+    roofline  4.739e-04 GPU-s/token
+    measured  1.775e-03      -> 3.7x off = **27% of memory bandwidth**
+
+So the gap is decode *efficiency*, not scheduling. 27% of HBM roofline is low
+but not absurd for a production stack; closing it toward 50-60% is the single
+highest-value optimisation, because output tokens are 70-81% of the bill on
+real traffic.
+
+**Economics on the whole bill** (20,583 in / 2,076 out, $2.50/GPU-hr, 25%
+margin), break-even utilisation against the best provider:
+
+    hit 0.394 (market-wide average)   52%
+    hit 0.874 (best provider today)   61%
+
+Better than the 60-73% of the previous section but still the number everything
+rests on, and still unmeasurable from inside the harness.
+
+**Instrument caveat.** The `cached` mix sampled batch 0.0 at 100% idle. That is
+aliasing, not idleness: its requests are a fully-cached prompt plus 8 output
+tokens, so they complete well inside the 2s sampling interval. `BatchSampler`
+undersamples short requests and its numbers should only be trusted for mixes
+with long generations.
 
 ### 3b. Hit rate may be driven by traffic, not only by the serving stack
 

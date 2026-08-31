@@ -144,3 +144,32 @@ def pull():
         (LOCAL / stamp).write_text(json.dumps(r, indent=2, default=str))
         n += 1
     print(f"pulled {n} run(s) -> {LOCAL}")
+
+
+@app.local_entrypoint()
+def batches(name: str):
+    """What decode batch did the scheduler actually run?
+
+    The output coefficient came out far worse than the memory-bandwidth
+    roofline at the nominal concurrency. Roofline and measurement only agree
+    at a much smaller batch, so the question is whether the scheduler held
+    decode batches together or the load never reached the requested level.
+    """
+    r = _get.remote(name)
+    print(f"{'phase':<12}{'users':>7}{'batch mean':>12}{'p50':>7}{'max':>7}"
+          f"{'idle':>7}{'queued':>8}")
+    print("-" * 60)
+    for lv in r.get("levels", []):
+        b = (lv.get("batch") or {}).get("running") or {}
+        q = (lv.get("batch") or {}).get("queued") or {}
+        print(f"{'level':<12}{lv['n_users']:>7}{b.get('mean', 0):>12.1f}"
+              f"{b.get('p50', 0):>7.0f}{b.get('max', 0):>7.0f}"
+              f"{b.get('frac_idle', 0):>7.2f}{q.get('mean', 0):>8.1f}")
+    for mx in r.get("mixes", []):
+        b = (mx.get("batch") or {}).get("running") or {}
+        q = (mx.get("batch") or {}).get("queued") or {}
+        g = max(mx.get("gpu_seconds", 1), 1e-9)
+        print(f"{mx['mix']:<12}{mx['n_users']:>7}{b.get('mean', 0):>12.1f}"
+              f"{b.get('p50', 0):>7.0f}{b.get('max', 0):>7.0f}"
+              f"{b.get('frac_idle', 0):>7.2f}{q.get('mean', 0):>8.1f}"
+              f"   out/s {mx['output_tokens']/g:>7.1f}")
