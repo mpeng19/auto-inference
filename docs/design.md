@@ -411,13 +411,53 @@ else on this list. Fitting `step = roofline + overhead` gives overhead of
 communication: all-reduce volume at TP=8 is ~111MB/step, which NVLink moves in
 0.12ms. Consistent with per-layer synchronisation across 64 layers. Unproven.
 
-### 8.2 What determines the sustainable batch
+### 8.2 What determines the sustainable batch — ANSWERED, and it is memory
 
-Cost reduces to `step * n_gpu / batch`, so the simulator's remaining job is
-predicting batch. At TP=8 the SLO would permit batch 251 and KV capacity ~380,
-yet the scheduler held 97 running with 95 queued. Neither
-`--max-running-requests` (256) nor memory is binding. Something else caps batch
-at ~40% of what latency allows — and cost falls with batch, so this is free.
+Read out of `schedule_policy.py` rather than guessed. SGLang admits requests
+until the KV pool is exhausted, charging each running request its prompt plus a
+reservation for future decode tokens:
+
+    _get_running_request_total_token_offset(req) =
+        min(max_new_tokens - len(output_ids), CLIP_MAX_NEW_TOKENS=4096)
+        * new_token_ratio
+
+`new_token_ratio` scales with `--schedule-conservativeness`. So **batch is the
+KV-pool ceiling**, and since the pool scales with GPU count, so does batch —
+which is the *mechanism* behind the §3.3.1(c) confound, not an artefact of how
+we chose `sat_users`. No load sweep can separate them.
+
+`predict_batch()` implements this. Against the sweep:
+
+    GPUs  predicted  measured  error
+       1         15      15.6    -4%
+       2         38      40.6    -6%
+       4         85      78.1    +9%
+       8        179      96.7   +85%
+
+**TP 1/2/4 sit at their memory ceiling within 9%. TP=8 reaches only ~54% of
+it.** The model is right and TP=8 is the anomaly.
+
+**This is the largest identified saving in the stack.** Cost is
+`step * n_gpu / batch`, so TP=8 running at 96.7 instead of ~179 costs nearly
+double what the hardware allows. It also revises §4.2: 8xH100 is not inherently
+worse than 2xH100 — it is *under-filled*. At its ceiling, TP=8 would reach
+`0.0214 * 8 / 179 = 9.6e-04` GPU-s per output token, comparable to 2 GPUs but
+with four times the capacity.
+
+What to try, in order: `--schedule-conservativeness` below 1.0 (raises
+admission directly), `SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION` below 4096
+(shrinks the per-request reservation), and `--mem-fraction-static` above 0.85.
+`tests/test_simulator.py::test_tp8_underfills_its_own_memory_ceiling` pins the
+gap; if it starts failing because the gap closed, that is the win.
+
+### 8.2b The 1.77x reservation factor
+
+`predict_batch` needs `RESERVATION_FACTOR = 1.77` to match: measured
+bytes-per-sequence is 2.9 GB against 1.64 GB modelled (KV at 22.7k context plus
+155 MB linear state). The gap is the decode reservation (4096 tokens ~ 268 MB)
+plus page rounding and fragmentation — which accounts for roughly half of it.
+The remainder is unexplained and the factor is fitted, so it should be
+re-derived rather than trusted across a change of model or context.
 
 ### 8.3 Smaller
 
