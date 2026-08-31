@@ -124,11 +124,45 @@ and in:out ratio, because full-size contexts often do not fit.
 - Sanity: market *listed* input ($0.35-$0.48/M) is 3.6-4.9x our raw cost,
   which is the plausible size of a utilisation-plus-margin gap.
 
-- **The result hinges entirely on utilisation.** At 60% we beat every provider
-  on effective input price; the break-even against the best (Chutes, $0.1310
-  at 69.5% hit) is **49% utilisation**. Below that we lose. Utilisation is not
-  measurable here — it is a property of the traffic a marketplace sends — so
-  no "we beat the market" claim should be made without stating it.
+- **The binding constraint is the cache discount, not utilisation.**
+  Scoring the buyer's whole bill (132k in / 454 out) against all 11 providers:
+
+      hit rate      util 50%      util 60%      util 70%      util 80%
+      0.695 (Chutes)  2/12          1/12          1/12          1/12
+      0.956 (real)    6/12          6/12          2/12          2/12
+
+  At 50% utilisation we are **never** first, and on real coding traffic
+  (TraceLab, 95.6% reuse) we cost **1.70x** the leader. Earlier drafts of this
+  doc claimed 60% utilisation beat every provider; that holds only at moderate
+  hit rates and is **retracted** for the high-hit regime that matters.
+
+  Cause: our cached/uncached cost ratio is **0.320**; Chutes prices cache reads
+  at **0.100** of listed. At 95.6% hit nearly every token is cached, so that
+  ratio dominates. Utilisation scales all three token classes equally and
+  cannot fix a ratio. **Therefore cached-token cost outranks TTFT as the
+  optimisation target** — TTFT work raises N*, which raises capacity, which
+  *lowers* utilisation when we are demand-limited (§3a).
+
+- Caveat both ways: $0.035 is Chutes' *price*, not their cost, and OpenRouter's
+  leaderboard sorts on effective input price, so pricing cache reads near zero
+  is the cheapest way to top the list. We must beat the price regardless.
+
+### 3a. Market size — we would be demand-limited, not capacity-limited
+
+    our capacity     9.0B input tokens/day per 8xH100 node
+    entire market   17.6B input tokens/day (OpenRouter activity, 1 day)
+    -> the whole market for this model is 2.0 nodes
+
+Capturing today's *largest* provider's share (Phala, 20.6%) yields only **40%
+utilisation** on one node. Routing is not greedy on price — correlation between
+effective price and token share is **-0.71**, the cheapest provider holds 9.5%
+while one at 1.74x the price holds 20.6%, and Venice/Cloudflare hold share at
+$0.45 with 0% cache hit. So share cannot be bought with price.
+
+Consequence: incumbents multiplex dozens of models over one fleet and stay busy;
+a single-model dedicated node cannot. If demand-limited, cost/token =
+node_cost / demand, so **the smallest SLO-meeting deployment beats the fastest
+one** — 4xH100 at half the cost would halve $/token at fixed demand. Untested.
 
 - Volume: 100B input tokens/week is 1.25 req/s, about 1.6 nodes of 8xH100,
   roughly $23k/month of compute at $2.50/GPU-hr.
