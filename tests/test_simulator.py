@@ -166,3 +166,31 @@ def test_batch_ceiling_shrinks_once_linear_state_is_counted():
     # memory ceiling with state counted must be below the KV-only ceiling
     usable = H.hbm_bytes * 8 * 0.85 - M.active_params
     assert (usable // M.bytes_per_seq(20_583)) < (usable // (20_583 * M.kv_bytes_per_token()))
+
+
+def test_batch_predictor_matches_where_memory_binds():
+    """Batch is the KV-pool ceiling -- at TP 1/2/4, within 9%.
+
+    SGLang admits requests until the pool is exhausted, charging each its
+    prompt plus a decode reservation. Since the pool scales with GPU count, so
+    does batch: that is the mechanism behind the n_gpu/batch confound, not a
+    coincidence of how we chose sat_users.
+    """
+    from autoinf.simulator import SWEEP_2026_08_31, validate_batch
+
+    v = validate_batch([o for o in SWEEP_2026_08_31 if o.n_gpu != 8])
+    assert v["worst_abs_error"] < 0.15, v
+
+
+def test_tp8_underfills_its_own_memory_ceiling():
+    """The single largest identified saving, pinned as a test.
+
+    TP 1/2/4 sit at their memory ceiling. TP=8 reaches ~54% of it, so cost per
+    token there is nearly double what the hardware allows. If this test starts
+    failing because the gap closed, that is the win -- update it deliberately.
+    """
+    from autoinf.simulator import SWEEP_2026_08_31, predict_batch
+
+    o = [x for x in SWEEP_2026_08_31 if x.n_gpu == 8][0]
+    ceiling = predict_batch(o.model, o.gpu, o.n_gpu, o.context)
+    assert ceiling > o.batch * 1.5, (ceiling, o.batch)

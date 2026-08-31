@@ -352,3 +352,55 @@ SWEEP_2026_08_31 = [
     Observation(n_gpu=4, batch=78.1, context=22_659, gpu_s_out=1.042e-03),
     Observation(n_gpu=8, batch=96.7, context=22_659, gpu_s_out=1.775e-03),
 ]
+
+
+# ── predicting the batch, which is what everything reduces to ────────────
+#
+# `schedule_policy.py` admits requests until the KV pool is exhausted, charging
+# each running request its prompt *plus* a reservation for future decode
+# tokens: `min(max_new_tokens, CLIP_MAX_NEW_TOKENS=4096) * new_token_ratio`,
+# where `new_token_ratio` scales with `--schedule-conservativeness`.
+#
+# That is why batch and GPU count were confounded (§3.3.1 of docs/design.md):
+# the KV pool scales with GPU count, so the ceiling does too. Backing out an
+# implied bytes-per-sequence from the sweep:
+#
+#     GPUs  usable GB  batch  implied GB/seq   modelled GB/seq
+#        1       44.9   15.6            2.88              1.64
+#        2      112.9   40.6            2.78              1.64
+#        4      248.9   78.1            3.19              1.64
+#        8      520.9   96.7            5.39              1.64
+#
+# TP 1/2/4 sit at a constant ~2.9 GB/sequence -- batch really is the memory
+# ceiling there, and the 1.77x over the modelled figure is the scheduler's
+# decode reservation plus page rounding. **TP=8 is the outlier**: it reaches
+# only ~54% of the same ceiling, so at TP=8 something other than memory caps
+# admission. Since cost falls with batch, that gap is the largest identified
+# saving in the stack -- see docs/design.md §8.2.
+
+RESERVATION_FACTOR = 1.77   # calibrated on TP 1/2/4; scheduler reserve + rounding
+
+
+def predict_batch(model: str, gpu: str, n_gpu: int, context: int,
+                  mem_fraction: float = 0.85,
+                  reservation: float = RESERVATION_FACTOR,
+                  max_running_requests: int = 256) -> int:
+    """Largest batch the KV pool admits, per SGLang's admission rule."""
+    m, hw = MODELS[model], HARDWARE[gpu]
+    usable = hw.hbm_bytes * n_gpu * mem_fraction - m.active_params * WEIGHT_BYTES
+    if usable <= 0:
+        return 0
+    per_seq = m.bytes_per_seq(context, KV_BYTES) * reservation
+    return int(min(max_running_requests, max(0.0, usable) // per_seq))
+
+
+def validate_batch(obs: list[Observation], **kw) -> dict:
+    """Predicted vs measured batch. TP=8 is expected to miss high."""
+    rows = []
+    for o in obs:
+        p = predict_batch(o.model, o.gpu, o.n_gpu, o.context, **kw)
+        rows.append({"n_gpu": o.n_gpu, "predicted": p, "measured": o.batch,
+                     "rel_error": round((p - o.batch) / o.batch, 3)})
+    errs = [abs(r["rel_error"]) for r in rows]
+    return {"rows": rows, "mean_abs_error": round(sum(errs) / len(errs), 3),
+            "worst_abs_error": round(max(errs), 3)}
