@@ -197,6 +197,66 @@ and mix records `batch`. The phase-B mixes now hold context fixed at the
 marketplace's ~20k and vary only output length, so decode is measured in the
 regime the marketplace actually runs.
 
+### 3e. GPU-count sweep — 8xH100 was the wrong deployment
+
+Same market workload and SLO at TP=2/4/8 (runs `1788206950`, `1788206719`,
+`1788203369`). **Fewer GPUs are cheaper per token, not more.**
+
+    GPUs  cache disc  goodput  rps/GPU  $/1k req @60% util  break-even util
+       2       0.127     0.57    0.285                4.55             27%
+       4       0.222     0.92    0.230                5.22             31%
+       8       0.324     1.58    0.198                8.72             52%
+
+**2xH100 is 1.9x cheaper per request than 8xH100** and 44% more efficient per
+GPU. Break-even utilisation falls from 52% to **27%**.
+
+And that reverses §3a's conclusion. Capacity vs the market's 17.9B tokens/day:
+
+    2 GPU  $5.00/hr   1.0B tok/day   break-even needs ~1.5% market share
+    8 GPU  $20.00/hr  2.8B tok/day   break-even needs ~8.2% market share
+
+§3a said we would be demand-limited because the market is only ~2 nodes of
+8xH100. At the right node size the market is ample: **1.5% share fills a 2-GPU
+node to break-even**, against a largest provider holding 15.9%.
+
+**The cache-discount problem largely dissolves too.** 0.127 at TP=2 against the
+market's ~0.10 — versus 0.324 at TP=8. An earlier section called the cache
+discount "the whole game" and "the strongest result we have, replicating to 1%".
+**That replication was across two 8xH100 runs only.** Across TP sizes it varies
+2.5x, so it is a property of the deployment, not of the serving stack alone.
+
+### 3f. The simulator, and its measured fidelity
+
+`src/autoinf/simulator.py` predicts decode cost from two parameters: the
+fraction of HBM bandwidth decode realises and the fraction of peak FLOPs
+prefill realises (calibrated 0.277 and 0.312 on the 8xH100 run). Two constants
+cannot memorise four configurations, so `validate_loo` -- calibrate on the
+others, predict the held-out one -- is a real test.
+
+**It fails, informatively. Mean absolute error 38%, worst 50%:**
+
+    held out   calibrated on   predicted    measured   error
+          2g          [4, 8]   1.521e-03   1.017e-03    +50%
+          4g          [2, 8]   1.201e-03   1.042e-03    +15%
+          8g          [2, 4]   9.248e-04   1.775e-03    -48%
+
+Cause: the model assumes tensor parallelism divides bytes and bandwidth
+equally, so cost per token is TP-invariant. Measured decode efficiency instead
+**falls by half** as TP grows -- 0.596 at TP=2, 0.510 at TP=4, 0.288 at TP=8.
+
+The stronger empirical regularity is that **decode step time is ~21ms
+regardless of batch or GPU count** (20.6 / 20.3 / 21.5ms at batches 40.6 / 78.1
+/ 96.7). We are not bandwidth-bound: at TP=8 roofline says 6.2ms and we take
+21.5ms. Fitting step = roofline + overhead gives overhead 8.2 / 9.9 / 15.3ms at
+TP 2/4/8 -- growing with TP, consistent with per-layer synchronisation across
+64 layers rather than bandwidth (all-reduce volume at TP=8 is ~111MB/step,
+which NVLink moves in 0.12ms).
+
+**Do not add a TP term yet.** Three configurations cannot identify a
+two-parameter correction without overfitting the thing LOO is meant to test.
+The TP=1 run is the point that matters, because TP=1 has no communication at
+all and isolates the overhead.
+
 ### 3d. The market-realistic run — run `1788203369`, and it supersedes §3
 
 8xH100 TP8/EP8, 20,583 in / 2,076 out (9.9:1), p99 TTFT 4s, batch sampled.
