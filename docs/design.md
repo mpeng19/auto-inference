@@ -164,11 +164,51 @@ points cannot distinguish a `1/batch` law from an `n_gpu` law** — only their
 ratio was observed. The functional form is assumed, not measured.
 
 **What would settle (c):** hold `n_gpu` fixed, hold mix composition fixed,
-and sweep concurrency so batch varies alone. If cost still tracks `1/batch`,
-the form is confirmed independently. The frontier levels cannot serve for this
-— at low concurrency the GPU idles, so wall-clock GPU-seconds charge idle time
-to the few tokens that flowed, which is failure mode (1) of §3.4. Only
-saturated windows are valid, i.e. the phase-B mixes.
+and sweep concurrency so batch varies alone. The frontier levels cannot serve
+for this — at low concurrency the GPU idles, so wall-clock GPU-seconds charge
+idle time to the few tokens that flowed, failure mode (1) of §3.4. Only
+saturated phase-B windows are valid.
+
+### 3.3.2 That experiment was run, and it did not settle it
+
+Three runs at n_gpu=2, identical mix composition, `sat_users` 24 / 64 / 192,
+plus the existing 128 (runs `1788210264`, `1788210446`, `1788210918`):
+
+    sat_users   batch   GPU-s/out    fit   implied step
+           24    21.8   1.478e-03  0.814        16.1ms   REJECTED by usable()
+           64    37.6   1.098e-03  0.883        20.6ms   REJECTED by usable()
+          128    40.6   1.017e-03  0.921        20.6ms
+          192    42.7   9.572e-04  0.944        20.4ms
+
+**It failed for a reason worth more than the experiment.** Offered load went up
+8x and the running batch went 21.8 -> 42.7, saturating near 42 while the
+*queue* grew 1.5 -> 14.9 -> 89.1. The two points that passed the fit gate span
+**1.05x in batch** — no leverage at all, so the `1/batch` form remains
+untested.
+
+**Batch is not a free variable: the scheduler pins it.** ~42 on 2 GPUs, ~97 on
+8, regardless of load, and in both cases far below what either the SLO or KV
+capacity permits (2 GPUs: memory allows ~76 at this context; 8 GPUs: the TPOT
+budget allows 251). So `batch` and `n_gpu` are **structurally** coupled in
+SGLang's default configuration, not merely correlated by our choice of
+`sat_users` — and no amount of load variation will separate them.
+
+Consequences:
+
+1. The confound of §3.3.1(c) **cannot** be broken by varying offered load. It
+   needs the batch cap itself moved — `--schedule-conservativeness` (1.0 here)
+   and the chunked-prefill interaction are the candidates, since neither
+   `--max-running-requests` (256) nor memory is binding.
+2. That is the same investigation as §8.2, and it is now the critical path for
+   *both* the simulator's validity and the largest known cost saving.
+3. Weak positive signal only: implied step time at fixed n_gpu=2 is 20.6 /
+   20.6 / 20.4 ms across three of the four points — tight, and close to the
+   21.4ms from the cross-TP sweep. But over a 1.05x batch range that is
+   consistency, not confirmation.
+
+**Two of four runs were rejected by `usable()`** (r2 0.814 and 0.883 against a
+0.9 gate). The guard behaving as designed: a bad fit still yields
+plausible-looking prices, and reporting nothing is better.
 
 **Also unverified:** 21.4ms has no first-principles justification, and roofline
 says TP=8 should manage 6.2ms. It is calibrated for this model, this GPU, this

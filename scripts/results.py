@@ -173,3 +173,21 @@ def batches(name: str):
               f"{b.get('p50', 0):>7.0f}{b.get('max', 0):>7.0f}"
               f"{b.get('frac_idle', 0):>7.2f}{q.get('mean', 0):>8.1f}"
               f"   out/s {mx['output_tokens']/g:>7.1f}")
+
+
+@app.local_entrypoint()
+def mixes(name: str):
+    """Raw phase-B rows, so attribution can be recomputed locally.
+
+    `report()` skips the attribution block when no level met the SLOs, but the
+    mixes still ran and their counters are in the record. The SLO frontier and
+    the cost attribution are separate questions measured at separate operating
+    points; a phase-A miss does not invalidate phase B.
+    """
+    r = _get.remote(name)
+    for m in r.get("mixes", []):
+        b = (m.get("batch") or {}).get("running") or {}
+        print(json.dumps({k: m.get(k) for k in
+                          ("mix", "n_users", "gpu_seconds", "uncached_tokens",
+                           "cached_tokens", "output_tokens", "cache_hit_rate")}
+                         | {"batch_mean": b.get("mean")}))
