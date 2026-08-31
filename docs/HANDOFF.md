@@ -132,6 +132,64 @@ and in:out ratio, because full-size contexts often do not fit.
   back-to-back, so it assumes traffic we do not yet have — real providers'
   hit rates track their traffic volume (§3b).
 
+### 3c. OUR WORKLOAD AND SLO DO NOT MATCH THE MARKET — read before trusting §3
+
+`scripts/market_pull.py` pulls OpenRouter's real numbers (they are streamed as
+a Next.js RSC payload; request the page with an `RSC: 1` header — no JSON API
+exposes them). Snapshot in `data/market-qwen-qwen3.8-27b.json`. Two findings
+invalidate the measurements above.
+
+**1. Our SLO is far stricter than any provider meets.**
+
+    market p99 TTFT   best 3844ms (Parasail)   median 13225ms   worst 62475ms
+    our SLO           2000ms
+
+Novita — *today's cheapest effective price* — runs p99 TTFT of 52-56s and p50
+of 3.8s. We capped N* at 4 using a 2s p99 that nobody on the board delivers.
+Our 16-user level measured p99 3294ms, which would beat 10 of 11 providers,
+at ~1.9x the throughput. **N* = 4 is an artefact of the SLO, not the hardware.**
+
+**2. Our replayed workload is wrong on every axis.**
+
+    |                    | our replay | real market | factor |
+    |--------------------|-----------:|------------:|-------:|
+    | cache hit rate     |      0.956 |       0.394 |   2.4x |
+    | input tokens/req   |    132,092 |      20,583 |   6.4x |
+    | output tokens/req  |        454 |       2,076 |   0.2x |
+    | input:output       |      291:1 |       9.9:1 |  29.3x |
+
+TraceLab is Claude Code traffic; OpenRouter's traffic for this model is a mix
+(pi, Hermes Agent, Claude Code, DeepSeek Harness, LangChain) with far more
+output. We over-corrected: the old synthetic workload was 250x too *short*,
+TraceLab is 6.4x too *long*.
+
+**Consequence — the optimisation target inverts again.** Share of modelled cost:
+
+    traffic model                    uncached in   cached in   output
+    our replay (132k/454, hit .88)          26%         61%      12%
+    real market (20.6k/2.1k, hit .87)        6%         13%      81%
+
+**Output tokens are 70-81% of the bill on real traffic, not 12%.** The cache
+discount — called "the whole game" one section above — is 5-13%. And the output
+coefficient is our *least identified* column (35x span vs 472x/348x).
+
+**3. The output coefficient was measured at the wrong context.** Decode
+re-reads each sequence's KV every step, so GPU-s per output token scales with
+context; the rate form fits it as a constant. Roofline on 8xH100:
+
+    context   batch   GPU-s/token
+    132,092      32      2.80e-03    <- our replay; we measured 2.331e-03
+     20,583      32      6.18e-04    <- market context, 3.8x cheaper
+
+If that holds, break-even utilisation drops from 73% to **~30%** and we rank
+1/12 at 50% utilisation at any hit rate. **Unverified — it is a roofline
+prediction, not a measurement.**
+
+**Next run must be: market-realistic workload (20.6k in / 2.1k out / 9.9:1) at
+a market-realistic SLO (p99 TTFT 4s), then re-attribute.** Every cost and rank
+in §3 was produced under a workload the market does not send and an SLO no
+competitor meets.
+
 ### 3b. Hit rate may be driven by traffic, not only by the serving stack
 
 Across the two snapshots 7 of 9 providers moved as price-driven routing would
