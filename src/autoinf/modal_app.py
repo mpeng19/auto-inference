@@ -1056,26 +1056,44 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
             print(f"\n-- attribution mixes at N={sat_users} "
                   f"(2x N*={n_star}), saturated on purpose --", flush=True)
 
+            # Mixes must span each token class, not merely look different. The
+            # previous set failed silently on 8xH100: "prefill_heavy" came out
+            # 53% cached because users loop a fixed session pool and revisit
+            # prompts inside the window, and output rates spanned only 1.5x, so
+            # the output coefficient was fitted to noise. Fit 0.95 and condition
+            # 5.4 both passed while the answer -- cached tokens costing *more*
+            # than uncached -- was an artefact.
+            #
+            # Two rules now:
+            #   * the uncached mix builds a FRESH prompt for every request, so
+            #     nothing can be cached by repetition;
+            #   * output lengths differ 250x across mixes, so the output column
+            #     genuinely moves.
+            import random as _rnd
+
+            from autoinf.prompts import SYSTEM_PROMPTS, _pad_to
+            from autoinf.workload import Session, Turn
+
+            _sys = _pad_to(SYSTEM_PROMPTS[2][1], 300, _rnd.Random(7))
+
+            def _fresh(uid, n, in_tok, out_tok, turns=1):
+                """A conversation nothing has seen before."""
+                r = _rnd.Random(hash((uid, n, in_tok, out_tok)) & 0xFFFFFFFF)
+                ts = tuple(Turn(_pad_to("", in_tok, r), out_tok, "mix")
+                           for _ in range(turns))
+                return Session(idx=uid, arrival_s=0.0, system=_sys,
+                               turns=ts, think_s=tuple([0.0] * turns))
+
+            # A tiny pool, deliberately revisited, to drive cache hits high.
+            _reuse = [_fresh(i, 0, 4000, 8, turns=8) for i in range(6)]
+
             mix_specs = {
-                "prefill_heavy": dict(turns_mu=1.0,
-                                      category_mix=("summarize", "rag")),
-                "decode_heavy": dict(turns_mu=1.0,
-                                     category_mix=("creative", "code_gen")),
-                "cache_heavy": dict(turns_mu=12.0,
-                                    category_mix=("explain", "chat")),
-                "balanced": dict(turns_mu=3.0,
-                                 category_mix=("code_debug", "analysis",
-                                               "chat", "explain")),
+                "uncached": lambda uid, n: _fresh(uid, n, 6000, 8),
+                "decode": lambda uid, n: _fresh(uid, n, 64, 2000),
+                "cached": lambda uid, n: _reuse[(uid + n) % len(_reuse)],
+                "balanced": lambda uid, n: _fresh(uid, n, 1500, 400, turns=3),
             }
-            for name, kw in mix_specs.items():
-                # think_mu very negative => effectively no think time, so the
-                # population stays saturated rather than idling between turns.
-                wc = WorkloadConfig(name=name, multi_turn=True, turns_max=20,
-                                    think_mu=-4.0, think_sigma=0.2,
-                                    shared_prefix_len=300, n_requests=600,
-                                    seed=1, **kw)
-                pool_m = build_sessions(wc).sessions
-                mk = lambda uid, n, _p=pool_m: _p[(uid * 7919 + n * 104729) % len(_p)]
+            for name, mk in mix_specs.items():
 
                 before = asyncio.run(server_metrics.scrape(SERVER_URL))
                 t0 = time.perf_counter()
@@ -1102,11 +1120,26 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                     "client_health": client_health(res)["verdict"],
                 }
                 rec.setdefault("mixes", []).append(row)
-                print(f"  {name:<15} uncached {row['uncached_tokens']:>9.0f}"
-                      f"  cached {row['cached_tokens']:>9.0f}"
-                      f"  out {row['output_tokens']:>9.0f}"
-                      f"  {row['gpu_seconds']:>6.1f} gpu-s"
+                g = max(row["gpu_seconds"], 1e-9)
+                print(f"  {name:<10} unc/s {row['uncached_tokens']/g:>8.1f}"
+                      f"  cach/s {row['cached_tokens']/g:>8.1f}"
+                      f"  out/s {row['output_tokens']/g:>7.1f}"
                       f"  hit {(row['cache_hit_rate'] or 0):.2f}", flush=True)
+
+            # Report identifiability in the run log, so a degenerate design is
+            # visible while the GPUs are still warm rather than at analysis time.
+            try:
+                from autoinf.pricing import Observation, identifiability
+                _id = identifiability([
+                    Observation(m["mix"], m["uncached_tokens"], m["cached_tokens"],
+                                m["output_tokens"], m["gpu_seconds"])
+                    for m in rec["mixes"]])
+                rec["identifiability"] = _id
+                print(f"  identifiable: {_id.get('identified')}"
+                      + (f"   WEAK: {_id['weak']}" if _id.get("weak") else ""),
+                      flush=True)
+            except Exception as e:
+                print(f"  identifiability check failed: {e}", flush=True)
 
             rec["status"] = "ok"
         except Exception as e:

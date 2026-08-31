@@ -76,8 +76,8 @@ def report(rec: dict) -> None:
     """Frontier curve -> N* -> cost attribution -> effective price -> rank."""
     from autoinf.modal_app import MARKET_QWEN38_27B
     from autoinf.pricing import (Observation, attribute_saturated, conditioning,
-                                 effective_in, fmt_prices, prices,
-                                 rank_vs_market, usable)
+                                 effective_in, fmt_prices, identifiability,
+                                 prices, rank_vs_market, usable)
 
     if rec.get("status") != "ok" or not rec.get("levels"):
         print(json.dumps({k: rec.get(k) for k in ("status", "failure")}, indent=2))
@@ -116,7 +116,8 @@ def report(rec: dict) -> None:
         print("\nno saturated mixes recorded; cannot attribute cost")
         return
 
-    cond, attr = conditioning(obs), attribute_saturated(obs)
+    cond, ident = conditioning(obs), identifiability(obs)
+    attr = attribute_saturated(obs)
     print(f"\nGPU-seconds/token  uncached_in {attr.per_uncached_in:.3e}"
           f"  cached_in {attr.per_cached_in:.3e}  out {attr.per_out:.3e}")
     print(f"  fit {attr.r2} (1.0 = perfect, worst residual {attr.residual})"
@@ -125,7 +126,14 @@ def report(rec: dict) -> None:
     if attr.cache_discount is not None:
         print(f"  cache discount {attr.cache_discount:.3f}   (market prices ~0.10)")
 
-    good, why = usable(attr, cond)
+    if ident.get("available"):
+        print("  per-class identifiability:")
+        for cname, v in ident["columns"].items():
+            print(f"    {cname:<13}{v['min_per_gpu_s']:>9.1f} ..{v['max_per_gpu_s']:>9.1f}"
+                  f"  span {v['span'] or 0:>6.2f}x  "
+                  f"{'ok' if v['identified'] else 'NOT IDENTIFIED'}")
+
+    good, why = usable(attr, cond, ident)
     if not good:
         print(f"\n  ATTRIBUTION REJECTED: {why}")
         print("  No price is reported: a bad fit still produces plausible "

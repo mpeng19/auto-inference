@@ -165,6 +165,56 @@ def attribute_saturated(obs: list[Observation]) -> Attribution:
                        round(quality, 4), len(obs), round(float(resid.max()), 4))
 
 
+def identifiability(obs: list[Observation]) -> dict:
+    """Is each token class's cost separately determined by these observations?
+
+    The condition number is not enough. An 8xH100 run passed it at 5.4 and
+    still produced `cache_discount = 1.52` -- cached tokens costing more than
+    uncached -- because its output rates spanned only 108 to 166 per
+    GPU-second. A column that barely moves leaves its coefficient free to
+    absorb whatever the fit needs, and the result looks fine: r2 0.95,
+    condition 5.4, a plausible number, and no signal that anything is wrong.
+
+    Overall conditioning asks whether the design matrix is invertible. This
+    asks the question that actually matters: does *each* token class vary
+    enough across the mixes for its own cost to be pinned down.
+    """
+    import numpy as np
+
+    if len(obs) < 3:
+        return {"available": False, "reason": "need >=3 observations"}
+
+    rates = np.array([[o.uncached_in / max(o.gpu_seconds, 1e-9),
+                       o.cached_in / max(o.gpu_seconds, 1e-9),
+                       o.out / max(o.gpu_seconds, 1e-9)] for o in obs])
+    names = ("uncached_in", "cached_in", "out")
+
+    cols, weak = {}, []
+    for j, name in enumerate(names):
+        c = rates[:, j]
+        lo, hi = float(c.min()), float(c.max())
+        span = hi / lo if lo > 0 else float("inf")
+        cv = float(c.std() / c.mean()) if c.mean() > 0 else 0.0
+        # A class needs a real dynamic range across mixes. 3x is modest; below
+        # it, the coefficient is being inferred from noise.
+        ok = span >= 3.0 and cv >= 0.4
+        cols[name] = {"min_per_gpu_s": round(lo, 1), "max_per_gpu_s": round(hi, 1),
+                      "span": round(span, 2) if span != float("inf") else None,
+                      "cv": round(cv, 3), "identified": ok}
+        if not ok:
+            weak.append(name)
+
+    return {
+        "available": True,
+        "columns": cols,
+        "weak": weak,
+        "identified": not weak,
+        "note": ("each token class must vary >=3x across mixes for its cost to "
+                 "be separable; a class that barely moves gets a coefficient "
+                 "fitted to noise while the overall fit still looks good"),
+    }
+
+
 def cross_validate(obs: list[Observation]) -> dict:
     """Leave-one-out: fit on the rest, predict the held-out workload.
 
@@ -227,7 +277,8 @@ def cross_validate(obs: list[Observation]) -> dict:
 MIN_R2 = 0.90
 
 
-def usable(attr: Attribution, cond: dict) -> tuple[bool, str]:
+def usable(attr: Attribution, cond: dict, ident: dict | None = None
+           ) -> tuple[bool, str]:
     """Is this fit good enough to price from?
 
     Learned the hard way: attributing against *wall* GPU-seconds instead of
@@ -243,6 +294,10 @@ def usable(attr: Attribution, cond: dict) -> tuple[bool, str]:
                        f"side (wall time rather than compute time).")
     if not cond["well_conditioned"]:
         return False, cond["note"]
+    if ident is not None and ident.get("available") and not ident["identified"]:
+        return False, (f"token class(es) {ident['weak']} do not vary enough "
+                       f"across the mixes for their cost to be separated. "
+                       f"{ident['note']}")
     return True, "ok"
 
 
