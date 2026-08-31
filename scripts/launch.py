@@ -62,7 +62,7 @@ def cmd_frontier(a) -> int:
         timeout=60 * 60 * (3 if n > 1 else 2),
     )
     call = fn.spawn(asdict(sc), levels, asdict(sl),
-                    a.seconds, a.repeats, a.note, a.trace_scale)
+                    a.seconds, a.repeats, a.note, a.trace_scale, a.sat_users)
     print(f"spawned  call_id={call.object_id}")
     print(f"  model   {sc.model.split('/')[-1]} on {sc.n_gpu}x{sc.gpu}")
     print(f"  levels  {levels}  x {a.seconds:.0f}s  x {a.repeats} repeat(s)")
@@ -190,6 +190,9 @@ def main() -> int:
     f.add_argument("--model", default="", help="override the model to serve")
     f.add_argument("--gpu", default="", help="override GPU type, e.g. H100")
     f.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
+    f.add_argument("--sat-users", dest="sat_users", type=int, default=0,
+                   help="concurrency for the cost-attribution mixes "
+                        "(0 = max(32, 4*N*)); must be enough to saturate decode")
     f.add_argument("--ep", type=int, default=0,
                    help="expert-parallel size; MoE+FP8 constrains valid values")
     f.add_argument("--trace-scale", dest="trace_scale", type=float, default=0.0,

@@ -877,7 +877,8 @@ def traces(name: str = ""):
     timeout=4 * 60 * 60,
 )
 def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: float = 90.0,
-             repeats: int = 1, note: str = "", trace_scale: float = 0.0) -> dict:
+             repeats: int = 1, note: str = "", trace_scale: float = 0.0,
+             sat_users: int = 0) -> dict:
     """Sweep concurrent users and find the largest population meeting SLOs.
 
     Two outputs, from one server launch:
@@ -1050,9 +1051,14 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
             # The mixes span the space the regression needs: input-dominated,
             # output-dominated, cache-dominated, balanced. The concurrency sweep
             # alone cannot do this -- it varies scale, not ratio.
+            # Saturation for the mixes is a separate question from N*. The
+            # decode mix in particular needs a large batch: 8 concurrent
+            # decodes across 8 GPUs leaves them mostly idle, which would
+            # understate decode throughput and inflate the per-output-token
+            # cost. Default well above N*, and allow an explicit override.
             ok_lv = [l["n_users"] for l in rec["levels"] if l["meets_slo"]]
             n_star = max(ok_lv) if ok_lv else max(levels)
-            sat_users = max(8, n_star * 2)
+            sat_users = sat_users or max(32, n_star * 4)
             print(f"\n-- attribution mixes at N={sat_users} "
                   f"(2x N*={n_star}), saturated on purpose --", flush=True)
 
