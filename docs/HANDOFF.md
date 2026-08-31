@@ -60,9 +60,13 @@ SLO-constrained GPU-seconds per token — and treat price as a reporting layer.*
 `modal_app.py`). Gives listed prices, realised effective prices, and each
 provider's actual cache hit rate.
 
-- Best realised effective input: **Chutes $0.1310** at 69.5% hit. That is the
-  number to beat.
-- Weighted average actually paid: $0.2149 in / $2.866 out.
+- Best realised effective input: **Novita $0.1272** at 87.4% hit (2026-08-31).
+  **This moves.** Two days earlier it was Chutes at $0.1310/69.5% hit; Chutes'
+  hit fell to 65.4% and Novita's rose to 87.4%, and the leader changed. Listed
+  prices did not move at all — verified against
+  `/api/v1/models/qwen/qwen3.8-27b/endpoints`. Both snapshots are kept in
+  `MARKET_SNAPSHOTS`; any rank claim needs its date.
+- Weighted average actually paid: $0.2116 in / $2.868 out.
 - **Hit rate is a serving-system property**: same model, same traffic, Novita
   realises 81.8% while Venice and Cloudflare realise **0.0%**. Failing to
   implement prompt caching costs them 3x on effective price.
@@ -117,9 +121,29 @@ and in:out ratio, because full-size contexts often do not fit.
 
   **cache_discount = 0.320** — a cached token costs ~a third of an uncached
   one. Cheaper, as the thesis requires, but less so than Qwen3-4B's 0.197 and
-  well above the ~0.10 the market prices cache reads at. Weak support for the
-  idea that this model's 48 linear-attention layers cache less effectively
-  than its 16 full-attention ones.
+  well above the ~0.10 the market prices cache reads at. The linear-attention layers keep fixed-size
+  state rather than a growing cache, so only 16 of 64 layers benefit from a
+  prefix hit at all — a plausible mechanism, still unverified.
+
+- **The cache discount is the whole objective.** To match the market at a
+  realistic 40% utilisation on real coding traffic we need ~**0.12**; we
+  measure **0.320**. Utilisation scales all token classes equally and cannot
+  fix a ratio. Caveat: our 0.88 hit rate came from replaying a trace
+  back-to-back, so it assumes traffic we do not yet have — real providers'
+  hit rates track their traffic volume (§3b).
+
+### 3b. Hit rate may be driven by traffic, not only by the serving stack
+
+Across the two snapshots 7 of 9 providers moved as price-driven routing would
+predict (cheaper -> more share; correlation -0.80). But listed prices never
+moved, so effective price moved *only* via hit rate — and the likelier causal
+direction is the reverse: more traffic keeps prefixes warm, which raises hit
+rate, which lowers effective price. The two are observationally identical here.
+
+If that is right, a new entrant starts cold: thin traffic -> cold cache -> high
+effective price -> less routing. **Measure hit rate as a function of arrival
+rate** rather than at one replay density; that turns 0.88 into a curve, which
+is what an entry-price estimate actually needs.
 
 - Sanity: market *listed* input ($0.35-$0.48/M) is 3.6-4.9x our raw cost,
   which is the plausible size of a utilisation-plus-margin gap.
@@ -255,12 +279,18 @@ per-token cost for the target model.
 
 Recorded because they were all presented as findings before being checked.
 
-- **Qwen3.8-27B is not dense.** It is a hybrid MoE. `layer_types` interleaves
-  three linear-attention layers per full-attention one, so **only 16 of 64
-  layers hold growing KV**. KV is **64 KiB/token, not 256** — a 4x
-  overestimate. One 132k conversation is 8.66 GB, not 34.6. An L40S holds ~2,
-  not "cannot hold one". It is the *most* memory-efficient of our three
-  models, not the least.
+- **Qwen3.8-27B is dense, and this entry previously said the opposite.** The
+  first version claimed dense-with-KV-on-all-64-layers; the correction claimed
+  hybrid MoE; the config says **`has_moe: false`, `intermediate_size: 17408`**
+  — dense FFN, hybrid *attention*. What survives from the correction is the KV
+  half: `layer_types` gives full attention every 4th layer, so **only 16 of 64
+  layers hold growing KV**, KV is **64 KiB/token not 256**, and one 132k
+  conversation is 8.66 GB. What was wrong: 128 experts x 512 implies a **64B**
+  model, more than twice the 27B on the tin, and it underestimated FFN FLOPs
+  ~4.3x. `--ep-size` is meaningless on this model and we passed `--ep 8`.
+  Empirical measurements are unaffected; `docs/capacity.md` roofline numbers
+  for this model are not. `tests/test_model_specs.py` now checks every spec
+  against the parameter count in its own name.
 - **`ServingConfig.n_gpu` allocates nothing** — it only sets SGLang's
   `--tp-size`. Modal resources must be overridden at call time
   (`.with_options`). Requesting TP=8 without it died with "invalid device
