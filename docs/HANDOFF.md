@@ -144,7 +144,7 @@ have produced a confident wrong number.
 
 ## 5. Open problems — start here
 
-### 5a. Phase-B mixes do not span the space (blocking the objective)
+### 5a. Phase-B mixes did not span the space — FIXED, needs re-running
 
 The 8xH100 attribution returned `cache_discount = 1.52` (cached tokens cost
 *more* than uncached) with fit 0.95 and condition 5.4 — passing every check.
@@ -166,11 +166,17 @@ Two defects:
   constant, so the output coefficient is unidentified — hence the absurd
   5.9e-3 GPU-s per output token.
 
-**The condition-number check (< 50) is too lenient.** It measures overall
-conditioning, not whether *each* coefficient is separately identified. Needed:
-a per-column check that every token class varies by (say) >=3x across mixes,
-and mixes built to guarantee it — unique prompts for the uncached observation,
-and genuinely different output lengths.
+**Fixed 2026-08-31.** `pricing.identifiability()` requires each token class to
+vary >=3x across mixes, and `usable()` refuses the result otherwise; it rejects
+the 8xH100 run and accepts the 4B one (`tests/test_identifiability.py`). The
+mixes are rebuilt to span: `uncached` generates a fresh prompt per request so
+nothing caches by repetition, and output lengths differ 250x across mixes.
+Reported in the run log too, so a degenerate design shows up while the GPUs are
+still warm.
+
+**Still to do: re-run the 8xH100 attribution with the new mixes (~$10).** The
+`cache_discount = 1.52` result is retracted; there is currently no trustworthy
+per-token cost for the target model.
 
 ### 5b. Known-wrong or unverified
 
