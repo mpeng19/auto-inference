@@ -210,3 +210,66 @@ def validate_loo(obs: list[Observation]) -> dict:
             "mean_abs_error": round(sum(errs) / len(errs), 4),
             "worst_abs_error": round(max(errs), 4),
             "decode_bw_all": round(calibrate_decode(obs), 4)}
+
+
+@dataclass(frozen=True)
+class PrefillObservation:
+    n_gpu: int
+    chunk_tokens: int         # tokens prefilled per scheduler chunk
+    gpu_s_in: float           # measured GPU-seconds per uncached input token
+    model: str = "Qwen/Qwen3.8-27B-FP8"
+    gpu: str = "H100"
+
+
+def calibrate_prefill(obs: list[PrefillObservation]) -> float:
+    fs = []
+    for o in obs:
+        m, hw = MODELS[o.model], HARDWARE[o.gpu]
+        ideal = (prefill_flops(m, o.chunk_tokens)
+                 / (hw.peak_flops_dense * o.n_gpu)) / o.chunk_tokens * o.n_gpu
+        fs.append(ideal / o.gpu_s_in)
+    return sum(fs) / len(fs)
+
+
+# ── inverting a competitor's published latency ───────────────────────────
+
+def infer_operating_point(tokens_per_s: float, context: int,
+                          eff: Efficiency | None = None,
+                          model: str = "Qwen/Qwen3.8-27B-FP8",
+                          gpu: str = "H100",
+                          gpu_counts: tuple[int, ...] = (1, 2, 4, 8),
+                          ) -> list[dict]:
+    """What batch would produce this per-stream decode rate?
+
+    This is the move that makes a *fair* comparison possible. A competitor's
+    cost is unobservable, but OpenRouter publishes their throughput, and
+    per-stream decode rate is 1/TPOT -- which our model ties to (GPUs, batch,
+    context). Solving for batch gives their implied GPU-seconds per output
+    token, so we can compare cost against cost rather than our cost against
+    their price.
+
+    Underdetermined on its own: 83 tok/s is consistent with 8 GPUs at a large
+    batch or 4 at a small one. It returns every consistent (GPUs, batch) pair
+    and the cost each implies, which brackets them rather than pinning them.
+
+    Assumes the competitor runs the same model on the same hardware at the same
+    efficiency we do. The first is true by construction; the others are not, so
+    treat the output as a bracket, not a measurement.
+    """
+    m, hw, e = MODELS[model], HARDWARE[gpu], eff or Efficiency()
+    step_s = 1.0 / tokens_per_s
+    kv_per_seq = context * m.kv_bytes_per_token(KV_BYTES)
+    out = []
+    for n in gpu_counts:
+        budget = step_s * hw.hbm_bandwidth * n * e.decode_bw
+        spare = budget - m.active_params * WEIGHT_BYTES
+        if spare <= 0:
+            continue                       # cannot even stream the weights
+        batch = spare / kv_per_seq
+        if batch < 1:
+            continue
+        out.append({"n_gpu": n, "implied_batch": round(batch, 1),
+                    "gpu_s_out": gpu_s_per_output_token(
+                        m, hw, n, max(1, int(batch)), context, e),
+                    "tpot_ms": round(step_s * 1e3, 2)})
+    return out
