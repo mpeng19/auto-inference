@@ -46,6 +46,17 @@ def cmd_frontier(a) -> int:
                                  tp_size=a.n_gpu)
     if a.ep:
         sc = dataclasses.replace(sc, ep_size=a.ep)
+    # The lever that moves the running batch without touching context, model or
+    # GPU count. SGLang reserves KV for each running request's *future* decode
+    # tokens -- `min(max_new_tokens, CLIP_MAX_NEW_TOKENS) * new_token_ratio` in
+    # `schedule_policy.py` -- and admission stops when that reservation exhausts
+    # the pool. Conservativeness scales the reservation, so it is the only knob
+    # that varies batch while holding everything the cost model depends on
+    # fixed. Needed because batch and n_gpu are otherwise confounded: the KV
+    # pool scales with GPU count, so batch does too.
+    if a.conservativeness:
+        sc = dataclasses.replace(sc,
+                                 schedule_conservativeness=a.conservativeness)
 
     problems = sc.validate()
     if problems:
@@ -72,6 +83,8 @@ def cmd_frontier(a) -> int:
     print(f"  model   {sc.model.split('/')[-1]} on {sc.n_gpu}x{sc.gpu}")
     print(f"  levels  {levels}  x {a.seconds:.0f}s  x {a.repeats} repeat(s)")
     print(f"  SLOs    TTFT p99 < {a.ttft_ms:.0f}ms, TPOT p99 < {a.tpot_ms:.0f}ms")
+    if a.conservativeness:
+        print(f"  sched   conservativeness {a.conservativeness}")
     if a.target_in:
         print(f"  traffic  marketplace-scaled replay: {a.target_in} in / "
               f"{a.target_out} out per request "
@@ -214,6 +227,9 @@ def main() -> int:
                         "(0 = max(32, 4*N*)); must be enough to saturate decode")
     f.add_argument("--ep", type=int, default=0,
                    help="expert-parallel size; MoE+FP8 constrains valid values")
+    f.add_argument("--conservativeness", type=float, default=0.0,
+                   help="SGLang --schedule-conservativeness; lower admits more "
+                        "requests, raising the running batch")
     f.add_argument("--market", action="store_true",
                    help="rescale the replay to OpenRouter's observed traffic "
                         "(20583 in / 2076 out per request, 9.9:1) instead of "
