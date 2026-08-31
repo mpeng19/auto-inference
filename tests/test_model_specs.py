@@ -51,10 +51,35 @@ def test_active_params_match_the_name(name):
 
 
 def test_the_target_is_dense():
-    """The specific error, pinned: EP is meaningless on this model."""
+    """Confirmed against the authoritative config, not a summary of it.
+
+    `Qwen/Qwen3.8-27B-FP8/config.json` has no moe/expert field anywhere:
+    `text_config.intermediate_size` is 17408 and `layer_types` is 48
+    linear_attention + 16 full_attention. (`weight_block_size` [128,128] is
+    real; the `moe_intermediate_size=512` SGLang reports is its own fallback.)
+    """
     m = MODELS["Qwen/Qwen3.8-27B-FP8"]
     assert m.dense and m.n_experts == 1
-    assert m.n_kv_layers == 16 and m.n_layers == 64   # this part was right
+    assert m.moe_intermediate == 17408
+    assert m.n_kv_layers == 16 and m.n_layers == 64
+
+
+def test_dense_target_still_needs_ep_for_sglang():
+    """Dense, yet SGLang refuses tp=8/ep=1 -- and that cost a run.
+
+    The MoE block guard was gated on `n_experts > 1`, so correcting the spec to
+    dense silently disabled it, and the next launch died 128s in on exactly the
+    constraint the guard existed to catch.
+    """
+    from autoinf.config import ServingConfig
+
+    def probs(ep):
+        return ServingConfig(model="Qwen/Qwen3.8-27B-FP8", gpu="H100",
+                             n_gpu=8, tp_size=8, ep_size=ep).validate()
+
+    assert probs(0) and "512" in probs(0)[0]
+    assert probs(1)
+    assert not probs(2) and not probs(4) and not probs(8)
 
 
 def test_the_old_moe_spec_would_fail():

@@ -128,6 +128,23 @@ class ServingConfig:
             problems.append(f"ep_size={self.ep_size} exceeds n_gpu={self.n_gpu}")
 
         spec = MODELS.get(self.model)
+        # SGLang applies its quantized-MoE block check to some dense models
+        # too, with a fallback intermediate size of its own. Qwen3.8-27B-FP8
+        # died 128s into a run this way: the model has no experts, so the
+        # `n_experts > 1` gate below skipped the check entirely, and SGLang
+        # then rejected `tp=8, ep=1` because (512 / 8) % 128 != 0.
+        if spec is not None and spec.sglang_moe_check_intermediate:
+            block, sg = 128, spec.sglang_moe_check_intermediate
+            moe_tp = max(1, self.tp_size // max(1, self.ep_size or 1))
+            if (sg / moe_tp) % block != 0:
+                ok = [e for e in (1, 2, 4, 8, 16)
+                      if e <= self.n_gpu
+                      and (sg / max(1, self.tp_size // e)) % block == 0]
+                problems.append(
+                    f"SGLang runs its quantized-MoE block check on this model "
+                    f"even though it is dense: {sg} / moe_tp={moe_tp} = "
+                    f"{sg / moe_tp:.0f}, not a multiple of {block}. "
+                    f"Set ep_size to one of {ok or 'none -- change tp_size'}.")
         if spec is not None and spec.n_experts > 1:
             # FP8 weights are stored in 128x128 blocks, so each rank's slice of
             # an expert must be a whole number of blocks.

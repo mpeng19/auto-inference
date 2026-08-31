@@ -52,6 +52,15 @@ class ModelSpec:
     # one code path means the roofline maths does not fork by architecture.
     dense: bool = False
 
+    # SGLang runs `check_quantized_moe_compatibility` on some models that have
+    # no MoE at all, using its own fallback `moe_intermediate_size` rather than
+    # anything in the config. Qwen3.8-27B-FP8 is dense -- its config has no
+    # moe/expert field whatsoever -- yet SGLang refuses to load it at tp=8
+    # unless `--ep-size` makes (512 / (tp/ep)) % 128 == 0. Set this to the
+    # value SGLang uses so `ServingConfig.validate()` can catch the mismatch
+    # locally instead of 128 GPU-seconds into a run.
+    sglang_moe_check_intermediate: int | None = None
+
     # ── parameter counts ─────────────────────────────────────────
     @property
     def attn_params_per_layer(self) -> int:
@@ -198,6 +207,7 @@ QWEN3_8_27B = ModelSpec(
     n_heads=24, n_kv_heads=4, head_dim=256,
     moe_intermediate=17408, n_experts=1, n_experts_active=1,
     vocab_size=248320, tie_embeddings=False, dense=True,
+    sglang_moe_check_intermediate=512,
 )
 
 QWEN3_235B_A22B = ModelSpec(
