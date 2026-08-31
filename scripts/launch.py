@@ -57,6 +57,13 @@ def cmd_frontier(a) -> int:
     if a.conservativeness:
         sc = dataclasses.replace(sc,
                                  schedule_conservativeness=a.conservativeness)
+    # The strongest clean lever on batch. It resizes the KV pool and nothing
+    # else -- same model, hardware, GPU count, context, workload -- so it is
+    # the only way to test whether cost really scales as 1/batch without the
+    # n_gpu confound. Conservativeness is weaker whenever the prompt dwarfs
+    # the decode reservation, which is the case for marketplace traffic.
+    if a.mem_fraction:
+        sc = dataclasses.replace(sc, mem_fraction_static=a.mem_fraction)
 
     problems = sc.validate()
     if problems:
@@ -85,6 +92,8 @@ def cmd_frontier(a) -> int:
     print(f"  SLOs    TTFT p99 < {a.ttft_ms:.0f}ms, TPOT p99 < {a.tpot_ms:.0f}ms")
     if a.conservativeness:
         print(f"  sched   conservativeness {a.conservativeness}")
+    if a.mem_fraction:
+        print(f"  mem     fraction-static {a.mem_fraction}")
     if a.target_in:
         print(f"  traffic  marketplace-scaled replay: {a.target_in} in / "
               f"{a.target_out} out per request "
@@ -227,6 +236,9 @@ def main() -> int:
                         "(0 = max(32, 4*N*)); must be enough to saturate decode")
     f.add_argument("--ep", type=int, default=0,
                    help="expert-parallel size; MoE+FP8 constrains valid values")
+    f.add_argument("--mem-fraction", dest="mem_fraction", type=float,
+                   default=0.0, help="SGLang --mem-fraction-static; resizes the "
+                                     "KV pool, hence the batch ceiling")
     f.add_argument("--conservativeness", type=float, default=0.0,
                    help="SGLang --schedule-conservativeness; lower admits more "
                         "requests, raising the running batch")
