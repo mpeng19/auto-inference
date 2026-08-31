@@ -65,8 +65,11 @@ def decode_bytes_per_step(m: ModelSpec, batch: int, context: int) -> float:
     divides both the bytes and the bandwidth by the same factor.
     """
     weights = m.active_params * WEIGHT_BYTES
-    kv = batch * context * m.kv_bytes_per_token(KV_BYTES)
-    return weights + kv
+    # Per sequence: growing KV *and* the fixed linear-attention state, which
+    # is re-read every step just like KV. 48 of this model's 64 layers are
+    # linear, contributing 155 MB/sequence that a KV-only count misses.
+    per_seq = m.bytes_per_seq(context, KV_BYTES)
+    return weights + batch * per_seq
 
 
 def decode_step_s(m: ModelSpec, hw: HardwareSpec, n_gpu: int, batch: int,
@@ -111,8 +114,7 @@ def max_batch_at_tpot(m: ModelSpec, hw: HardwareSpec, n_gpu: int, context: int,
     Also bounded by KV capacity: weights and cache share the same HBM.
     """
     usable = hw.hbm_bytes * n_gpu * 0.85 - m.active_params * WEIGHT_BYTES
-    kv_per_seq = context * m.kv_bytes_per_token(KV_BYTES)
-    mem_cap = int(max(0, usable) // max(1, kv_per_seq))
+    mem_cap = int(max(0, usable) // max(1.0, m.bytes_per_seq(context, KV_BYTES)))
     best = 0
     for b in range(1, min(cap, max(1, mem_cap)) + 1):
         if decode_step_s(m, hw, n_gpu, b, context, eff) * 1e3 <= tpot_ms:
@@ -196,9 +198,11 @@ def validate_loo(obs: list[Observation]) -> dict:
         rest = obs[:i] + obs[i + 1:]
         f = calibrate_decode(rest)
         m, hw = MODELS[held.model], HARDWARE[held.gpu]
-        pred = (m.active_params * WEIGHT_BYTES
-                + int(held.batch) * held.context * m.kv_bytes_per_token(KV_BYTES))
-        pred = pred / (hw.hbm_bandwidth * held.n_gpu * f) / held.batch * held.n_gpu
+        # Call the shared byte count rather than restating it: an inlined copy
+        # here silently kept a KV-only formula when linear-attention state was
+        # added, and the round-trip test caught the drift.
+        pred = (decode_bytes_per_step(m, int(held.batch), held.context)
+                / (hw.hbm_bandwidth * held.n_gpu * f) / held.batch * held.n_gpu)
         err = (pred - held.gpu_s_out) / held.gpu_s_out
         rows.append({"n_gpu": held.n_gpu, "batch": round(held.batch, 1),
                      "calibrated_on": [o.n_gpu for o in rest],

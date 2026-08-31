@@ -61,6 +61,19 @@ class ModelSpec:
     # locally instead of 128 GPU-seconds into a run.
     sglang_moe_check_intermediate: int | None = None
 
+    # Gated-DeltaNet / Mamba-style layers keep a fixed-size recurrent state per
+    # *sequence* instead of a cache that grows with context. That state is
+    # invisible to `kv_bytes_per_token` -- which counts only the full-attention
+    # layers -- yet it occupies memory and is re-read every decode step. On
+    # Qwen3.8-27B it is 155 MB/sequence: 10% of per-sequence memory at the
+    # marketplace's 20.6k context, 2% at 132k. Omitting it overstates how many
+    # sequences fit, worst at short contexts, which is where the market lives.
+    linear_num_value_heads: int | None = None
+    linear_value_head_dim: int | None = None
+    linear_key_head_dim: int | None = None
+    linear_conv_kernel_dim: int | None = None
+    linear_state_dtype_bytes: float = 4.0        # config: mamba_ssm_dtype float32
+
     # ── parameter counts ─────────────────────────────────────────
     @property
     def attn_params_per_layer(self) -> int:
@@ -119,6 +132,27 @@ class ModelSpec:
         """
         layers = self.n_kv_layers if self.n_kv_layers is not None else self.n_layers
         return 2 * layers * self.n_kv_heads * self.head_dim * dtype_bytes
+
+    @property
+    def n_linear_layers(self) -> int:
+        if self.n_kv_layers is None:
+            return 0
+        return self.n_layers - self.n_kv_layers
+
+    @property
+    def linear_state_bytes_per_seq(self) -> float:
+        """Fixed per-sequence recurrent state, independent of context length."""
+        if not self.linear_num_value_heads or not self.n_linear_layers:
+            return 0.0
+        recurrent = (self.linear_num_value_heads * (self.linear_value_head_dim or 0)
+                     * (self.linear_key_head_dim or 0))
+        conv = (self.linear_conv_kernel_dim or 0) * self.hidden_size
+        return (recurrent + conv) * self.linear_state_dtype_bytes * self.n_linear_layers
+
+    def bytes_per_seq(self, context: int, kv_dtype_bytes: float = 2.0) -> float:
+        """All per-sequence memory: growing KV plus fixed linear state."""
+        return (context * self.kv_bytes_per_token(kv_dtype_bytes)
+                + self.linear_state_bytes_per_seq)
 
     def experts_touched(self, batch: int) -> float:
         """Expected distinct experts activated by `batch` tokens in one step.
@@ -208,6 +242,8 @@ QWEN3_8_27B = ModelSpec(
     moe_intermediate=17408, n_experts=1, n_experts_active=1,
     vocab_size=248320, tie_embeddings=False, dense=True,
     sglang_moe_check_intermediate=512,
+    linear_num_value_heads=48, linear_value_head_dim=128,
+    linear_key_head_dim=128, linear_conv_kernel_dim=4,
 )
 
 QWEN3_235B_A22B = ModelSpec(

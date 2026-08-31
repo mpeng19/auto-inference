@@ -137,3 +137,32 @@ def test_roofline_still_fails_the_held_out_test():
 
     v = validate_loo(SWEEP_2026_08_31)
     assert v["mean_abs_error"] > 0.20, v
+
+
+def test_linear_attention_state_is_counted():
+    """48 of 64 layers keep a fixed per-sequence state, not a growing cache.
+
+    `kv_bytes_per_token` counts only the 16 full-attention layers, which is
+    correct for KV but silently omits 155 MB/sequence of recurrent state. That
+    is 10% of per-sequence memory at the marketplace's 20.6k context, so
+    ignoring it overstates how many sequences fit -- worst exactly where the
+    market operates.
+    """
+    assert M.n_linear_layers == 48
+    assert 150e6 < M.linear_state_bytes_per_seq < 160e6
+    kv_only = 20_583 * M.kv_bytes_per_token()
+    assert M.bytes_per_seq(20_583) > kv_only * 1.09
+
+
+def test_dense_models_without_linear_layers_have_no_state():
+    from autoinf.flops import MODELS
+    assert MODELS["Qwen/Qwen3-4B-Instruct-2507-FP8"].linear_state_bytes_per_seq == 0.0
+
+
+def test_batch_ceiling_shrinks_once_linear_state_is_counted():
+    """The correction bites hardest at short context, where the market is."""
+    b = max_batch_at_tpot(M, H, 8, 20_583, 50.0, E)
+    assert b > 0
+    # memory ceiling with state counted must be below the KV-only ceiling
+    usable = H.hbm_bytes * 8 * 0.85 - M.active_params
+    assert (usable // M.bytes_per_seq(20_583)) < (usable // (20_583 * M.kv_bytes_per_token()))
