@@ -66,7 +66,7 @@ We have four measured configurations (TP = 1, 2, 4, 8). The roofline model has
 two parameters. Leave-one-out — calibrate on three, predict the fourth — is
 therefore a real out-of-sample test, and its error is the fidelity number.
 
-### 3.2 Attempt 1: memory-bandwidth roofline (rejected, 38% error)
+### 3.2 Attempt 1: memory-bandwidth roofline (rejected, 27% error)
 
 Decode is memory-bound: each step re-reads all weights, plus the KV cache of
 every sequence in the batch.
@@ -349,7 +349,7 @@ Recorded because each was stated confidently before being checked.
 | Cache discount replicates to 1% | Only across 8xH100 runs; varies 2.5x with TP | the sweep |
 | Output coefficient measured at wrong context | Coincidence; the decode mix used a 64-token prompt | checking the mix definition |
 | Decode is not batching (effective batch ~3) | It batches at 96.7 | `BatchSampler` |
-| Roofline predicts cost | 38% out-of-sample error | `validate_loo` |
+| Roofline predicts cost | 27% out-of-sample error, barely beating a 31% null | `validate_loo` |
 
 **Two methodological lessons.** WebFetch's summariser is not a source for
 config data — it returned invented fields (`has_moe: false`) that read as

@@ -277,9 +277,11 @@ def infer_operating_point(tokens_per_s: float, context: int,
 
 # ── the model that actually predicts: constant step time ─────────────────
 #
-# The roofline model above scores 38% mean leave-one-out error across TP
-# 1/2/4/8 because it assumes tensor parallelism is free. It is not: measured
-# decode efficiency falls from 0.60 at TP=2 to 0.29 at TP=8.
+# The roofline model above scores 27% mean leave-one-out error across TP
+# 1/2/4/8 -- against 31% for a zero-parameter null that just predicts the mean
+# cost. Its two parameters buy essentially nothing, and it is worse in the
+# tail (49% vs 41%). The cause: it assumes tensor parallelism is free. It is
+# not -- measured decode efficiency falls from 0.60 at TP=2 to 0.29 at TP=8.
 #
 # What the data shows instead is that the time to advance one decode step is
 # ~constant, across 8x the GPUs and 6x the batch:
