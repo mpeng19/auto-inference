@@ -896,6 +896,7 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
     from autoinf import overlay, server_metrics
     from autoinf.bench import wait_until_ready, warmup
     from autoinf.config import SLO, ServingConfig, WorkloadConfig
+    from autoinf.gpuwatch import GpuWatch
     from autoinf.loadgen import client_health, install_fast_loop, run_concurrent_users
     from autoinf.metrics import detect_collapse, percentile, summarize
     from autoinf.workload import build_sessions
@@ -942,11 +943,14 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
             for n_users in levels:
                 for rep in range(repeats):
                     before = asyncio.run(server_metrics.scrape(SERVER_URL))
+                    watch = GpuWatch().start()
                     t0 = time.perf_counter()
                     res = asyncio.run(run_concurrent_users(
                         make_session, SERVER_URL, sc.model, n_users,
                         seconds_per_level))
                     wall = time.perf_counter() - t0
+                    watch.stop()
+                    gw = watch.summary(wall, sc.n_gpu)
                     after = asyncio.run(server_metrics.scrape(SERVER_URL))
 
                     warm = min(20.0, 0.2 * seconds_per_level)
@@ -957,18 +961,19 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                     c_tok = ctr.get("sglang:cached_tokens_total", 0.0)
                     g_tok = ctr.get("sglang:generation_tokens_total", 0.0)
 
-                    # Wall time charges idle GPU to whatever few tokens were
-                    # processed. `forward_execution_seconds_total` is the
-                    # server's own count of time actually spent computing, and
-                    # is what cost must be attributed against.
-                    fwd = ctr.get("sglang:forward_execution_seconds_total", 0.0)
+                    # GPU-seconds come from sampled utilisation, not wall time
+                    # and not from SGLang: `forward_execution_seconds_total` is
+                    # defined but never emitted outside DP-cooperation mode
+                    # (verified on a live server). Charging idle GPU time to the
+                    # few tokens processed at low load is what made the first
+                    # attribution unfittable.
                     lvl = {
                         "n_users": n_users, "repeat": rep,
                         "wall_s": round(wall, 1),
-                        "wall_gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
-                        "compute_seconds": round(fwd, 3),
-                        "gpu_seconds": round(fwd * max(1, sc.n_gpu), 3),
-                        "gpu_busy_frac": round(fwd / wall, 3) if wall else None,
+                        "wall_gpu_seconds": gw.get("wall_gpu_seconds"),
+                        "gpu_seconds": gw.get("gpu_seconds"),
+                        "gpu_busy_frac": gw.get("busy_frac"),
+                        "gpu_watch": gw,
                         "goodput_rps": m["goodput_rps"],
                         "throughput_rps": m["throughput_rps"],
                         "good_frac": m["good_frac"],
@@ -989,6 +994,7 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                           f"  SLO {lvl['good_frac'] * 100:>5.1f}%"
                           f"  TTFT p99 {(lvl['ttft_p99_ms'] or 0):>7.0f}ms"
                           f"  hit {(lvl['cache_hit_rate'] or 0):.2f}"
+                          f"  busy {(lvl['gpu_busy_frac'] or 0):.2f}"
                           f"  {'OK' if lvl['meets_slo'] else 'MISS'}", flush=True)
 
             # ── phase B: mixes for cost attribution ──────────────
@@ -1007,9 +1013,12 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                 wc = suite(seed=0)[name]
                 trace = build_trace(wc)
                 before = asyncio.run(server_metrics.scrape(SERVER_URL))
+                watch = GpuWatch().start()
                 t0 = time.perf_counter()
                 res = asyncio.run(run_trace_sp(trace, SERVER_URL, sc.model))
                 wall = time.perf_counter() - t0
+                watch.stop()
+                gw = watch.summary(wall, sc.n_gpu)
                 after = asyncio.run(server_metrics.scrape(SERVER_URL))
                 ctr = (server_metrics.diff(before, after) if (before and after)
                        else {}).get("counters", {})
@@ -1017,13 +1026,12 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                 c_tok = ctr.get("sglang:cached_tokens_total", 0.0)
                 g_tok = ctr.get("sglang:generation_tokens_total", 0.0)
                 m = summarize(res, sl, warmup_s=min(15.0, 0.15 * trace.duration_s))
-                fwd = ctr.get("sglang:forward_execution_seconds_total", 0.0)
                 row = {
                     "mix": name, "wall_s": round(wall, 1),
-                    "wall_gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
-                    "compute_seconds": round(fwd, 3),
-                    "gpu_seconds": round(fwd * max(1, sc.n_gpu), 3),
-                    "gpu_busy_frac": round(fwd / wall, 3) if wall else None,
+                    "wall_gpu_seconds": gw.get("wall_gpu_seconds"),
+                    "gpu_seconds": gw.get("gpu_seconds"),
+                    "gpu_busy_frac": gw.get("busy_frac"),
+                    "gpu_watch": gw,
                     "prompt_tokens": p_tok, "cached_tokens": c_tok,
                     "uncached_tokens": max(0.0, p_tok - c_tok),
                     "output_tokens": g_tok,
