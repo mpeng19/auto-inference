@@ -63,3 +63,14 @@ def test_the_old_moe_spec_would_fail():
                   moe_intermediate=512, n_experts=128, n_experts_active=8,
                   dense=False)
     assert bad.total_params > 2 * 27e9
+
+
+def test_ep_size_zero_is_omitted_not_passed_as_zero():
+    """launch.py defaults --ep to 0; `--ep-size 0` is not a no-op to SGLang."""
+    from autoinf.config import ServingConfig
+    args = ServingConfig(model="m", gpu="H100", n_gpu=8, tp_size=8,
+                         ep_size=0).to_sglang_args()
+    assert "--ep-size" not in args
+    args8 = ServingConfig(model="m", gpu="H100", n_gpu=8, tp_size=8,
+                          ep_size=8).to_sglang_args()
+    assert args8[args8.index("--ep-size") + 1] == "8"

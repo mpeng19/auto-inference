@@ -92,7 +92,11 @@ class ServingConfig:
             "--schedule-policy", self.schedule_policy,
             "--schedule-conservativeness", str(self.schedule_conservativeness),
         ]
-        if self.ep_size is not None:
+        # 0 means "not requested". Emitting `--ep-size 0` is not the same as
+        # omitting the flag -- SGLang rejects it -- and launch.py passes 0 as
+        # its default. Expert parallelism is meaningless on a dense model
+        # anyway (Qwen3.8-27B has `has_moe: false`).
+        if self.ep_size:
             a += ["--ep-size", str(self.ep_size)]
         if self.max_total_tokens is not None:
             a += ["--max-total-tokens", str(self.max_total_tokens)]
