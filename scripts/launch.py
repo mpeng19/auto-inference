@@ -49,7 +49,8 @@ def report(rec: dict) -> None:
     """Frontier curve -> N* -> cost attribution -> effective price -> rank."""
     from autoinf.modal_app import MARKET_QWEN38_27B
     from autoinf.pricing import (Observation, attribute, conditioning,
-                                 effective_in, fmt_prices, prices, rank_vs_market)
+                                 effective_in, fmt_prices, prices,
+                                 rank_vs_market, usable)
 
     if rec.get("status") != "ok" or not rec.get("levels"):
         print(json.dumps({k: rec.get(k) for k in ("status", "failure")}, indent=2))
@@ -97,8 +98,13 @@ def report(rec: dict) -> None:
           f"   {'ok' if cond['well_conditioned'] else 'ILL-CONDITIONED'}")
     if attr.cache_discount is not None:
         print(f"  cache discount {attr.cache_discount:.3f}   (market prices ~0.10)")
-    if not cond["well_conditioned"]:
-        print(f"  !! {cond['note']}")
+
+    good, why = usable(attr, cond)
+    if not good:
+        print(f"\n  ATTRIBUTION REJECTED: {why}")
+        print("  No price is reported: a bad fit still produces plausible "
+              "numbers, which is worse than reporting nothing.")
+        return
 
     p = prices(attr, basis="nebius-h100-committed",
                n_gpu=rec["serving"].get("n_gpu", 1), utilization=0.6, margin=0.25)

@@ -957,10 +957,18 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                     c_tok = ctr.get("sglang:cached_tokens_total", 0.0)
                     g_tok = ctr.get("sglang:generation_tokens_total", 0.0)
 
+                    # Wall time charges idle GPU to whatever few tokens were
+                    # processed. `forward_execution_seconds_total` is the
+                    # server's own count of time actually spent computing, and
+                    # is what cost must be attributed against.
+                    fwd = ctr.get("sglang:forward_execution_seconds_total", 0.0)
                     lvl = {
                         "n_users": n_users, "repeat": rep,
                         "wall_s": round(wall, 1),
-                        "gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
+                        "wall_gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
+                        "compute_seconds": round(fwd, 3),
+                        "gpu_seconds": round(fwd * max(1, sc.n_gpu), 3),
+                        "gpu_busy_frac": round(fwd / wall, 3) if wall else None,
                         "goodput_rps": m["goodput_rps"],
                         "throughput_rps": m["throughput_rps"],
                         "good_frac": m["good_frac"],
@@ -1009,9 +1017,13 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                 c_tok = ctr.get("sglang:cached_tokens_total", 0.0)
                 g_tok = ctr.get("sglang:generation_tokens_total", 0.0)
                 m = summarize(res, sl, warmup_s=min(15.0, 0.15 * trace.duration_s))
+                fwd = ctr.get("sglang:forward_execution_seconds_total", 0.0)
                 row = {
                     "mix": name, "wall_s": round(wall, 1),
-                    "gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
+                    "wall_gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
+                    "compute_seconds": round(fwd, 3),
+                    "gpu_seconds": round(fwd * max(1, sc.n_gpu), 3),
+                    "gpu_busy_frac": round(fwd / wall, 3) if wall else None,
                     "prompt_tokens": p_tok, "cached_tokens": c_tok,
                     "uncached_tokens": max(0.0, p_tok - c_tok),
                     "output_tokens": g_tok,
@@ -1022,7 +1034,8 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                 print(f"  {name:<15} in {row['uncached_tokens']:>9.0f} uncached"
                       f" {row['cached_tokens']:>9.0f} cached"
                       f"  out {row['output_tokens']:>9.0f}"
-                      f"  {row['gpu_seconds']:>6.1f} gpu-s", flush=True)
+                      f"  {row['gpu_seconds']:>7.1f} gpu-s"
+                      f"  busy {(row['gpu_busy_frac'] or 0):.2f}", flush=True)
 
             rec["status"] = "ok"
         except Exception as e:

@@ -34,6 +34,11 @@ INTERESTING = (
     "sglang:num_queue_reqs",
     "sglang:num_running_reqs",
     "sglang:gen_throughput",
+    # Actual GPU compute time, as opposed to wall clock. Cost attribution must
+    # use this: a level held for 90s with an idle GPU consumes 90 wall-seconds
+    # but very little compute, and charging the idle time to the few tokens
+    # processed makes them look enormously expensive.
+    "sglang:forward_execution_seconds_total",
     "sglang:estimated_flops_per_gpu_total",
     "sglang:estimated_read_bytes_per_gpu_total",
     "sglang:prompt_tokens_total",

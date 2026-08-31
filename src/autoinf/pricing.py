@@ -121,6 +121,28 @@ def attribute(obs: list[Observation]) -> Attribution:
                        round(r2, 4), len(obs), round(ss_res ** 0.5, 3))
 
 
+MIN_R2 = 0.90
+
+
+def usable(attr: Attribution, cond: dict) -> tuple[bool, str]:
+    """Is this fit good enough to price from?
+
+    Learned the hard way: attributing against *wall* GPU-seconds instead of
+    compute-seconds produced r2 = -2.9 — worse than predicting the mean — and
+    still yielded entirely plausible-looking prices ($0.11/M in, $0.31/M out).
+    Plausible output from an invalid model is the failure mode that matters, so
+    the gate is enforced rather than reported.
+    """
+    if attr.r2 < MIN_R2:
+        return False, (f"r2 {attr.r2} < {MIN_R2}: the cost model does not "
+                       f"describe these observations. A negative r2 means worse "
+                       f"than predicting the mean — usually the wrong left-hand "
+                       f"side (wall time rather than compute time).")
+    if not cond["well_conditioned"]:
+        return False, cond["note"]
+    return True, "ok"
+
+
 def conditioning(obs: list[Observation]) -> dict:
     """Are these workloads actually different enough to identify three costs?
 
