@@ -84,7 +84,19 @@ Leave-one-out result:
           2g          [4, 8]   1.521e-03   1.017e-03    +50%
           4g          [2, 8]   1.201e-03   1.042e-03    +15%
           8g          [2, 4]   9.248e-04   1.775e-03    -48%
-                                        mean 38%, worst 50%
+                                        mean 27%, worst 49%
+
+(An earlier version of this table quoted 38%/50%; that was computed on three
+configurations, before the TP=1 run landed. With all four it is 27%/49%.)
+
+**Against a null.** A zero-parameter model that ignores everything and predicts
+the mean cost scores **31% mean / 41% worst**. Roofline's two parameters buy
+essentially nothing over guessing — and it is *worse* in the tail. That, not
+the absolute number, is the verdict.
+
+**Why 27% is disqualifying here.** Our margin over the market leader runs
+20-50% (§4.2), so an error of this size cannot tell us whether we beat the
+market or lose to it. The error is larger than the effect being measured.
 
 **Why it fails:** it treats tensor parallelism as free — TP divides both the
 bytes and the bandwidth by `n`, so cost per token should be TP-invariant.

@@ -235,7 +235,7 @@ prefill realises (calibrated 0.277 and 0.312 on the 8xH100 run). Two constants
 cannot memorise four configurations, so `validate_loo` -- calibrate on the
 others, predict the held-out one -- is a real test.
 
-**It fails, informatively. Mean absolute error 38%, worst 50%:**
+**It fails, informatively. Mean absolute error 27%, worst 49%:**
 
     held out   calibrated on   predicted    measured   error
           2g          [4, 8]   1.521e-03   1.017e-03    +50%
@@ -267,8 +267,13 @@ across the whole sweep:
 
 So cost per output token is **`step * n_gpu / batch`**. One parameter:
 
-    LOO, constant-step model    5% mean error,  9% worst
-    LOO, roofline model        38% mean error, 50% worst
+    LOO, null (predict the average)   31% mean, 41% worst   0 parameters
+    LOO, roofline model               27% mean, 49% worst   2 parameters
+    LOO, constant-step model           5% mean,  9% worst   1 parameter
+
+Roofline's two parameters buy essentially nothing over guessing the average,
+and it is worse in the tail. 27% also exceeds our 20-50% margin over the
+market leader, so it cannot answer the question we need answered.
 
 **The simulator's job therefore reduces to predicting the batch a
 configuration sustains** -- given batch, cost follows. `StepModel`,
