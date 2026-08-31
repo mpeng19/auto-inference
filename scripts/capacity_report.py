@@ -17,7 +17,7 @@ from autoinf.prompts import CATEGORIES
 
 OUT = pathlib.Path(__file__).resolve().parents[1] / "docs" / "capacity.md"
 
-# Measured on 1xH100, 2026-08-29 (see handoff.md).
+# Measured on 1xH100, 2026-08-29 (see docs/HANDOFF.md).
 MEASURED_MAX_RPS = 34.3
 MEASURED_KNEE_LO, MEASURED_KNEE_HI = 35.6, 49.1
 MEASURED_TPOT_MS = 24.0

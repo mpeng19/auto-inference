@@ -34,7 +34,7 @@ measured on this stack —
 
 > A full prefix-cache hit is **1.57x slower** than a cold prefill
 > (115ms vs 73ms on a 1000-token prompt, CV ~1%). A partial hit is 1.76x
-> *faster*. See handoff.md, 2026-08-29.
+> *faster*. See docs/HANDOFF.md appendix, 2026-08-29.
 
 If serving a cached token costs nearly what an uncached one costs, we cannot
 price cache reads at a tenth of input. That anomaly is now the highest-value

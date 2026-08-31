@@ -393,7 +393,7 @@ def suite(seed: int = 0, scale: float = 1.0,
     """Named workloads. `scale` multiplies request counts for longer runs.
 
     Rates are calibrated against the **measured** behaviour of
-    Qwen3-30B-A3B-FP8 on one H100 (see handoff.md):
+    Qwen3-30B-A3B-FP8 on one H100 (see docs/HANDOFF.md):
 
         offered 35.6 rps -> 100% met SLO       max throughput 34.3 rps
         offered 49.1 rps ->  24% met SLO
