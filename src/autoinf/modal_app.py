@@ -1194,22 +1194,46 @@ MARKET_QWEN38_27B = [
 #      same marketplace traffic. Failing to implement prompt caching costs them
 #      3x on effective input price.
 #
+# Dated snapshots of what providers *realise*, which OpenRouter publishes but
+# does not expose through the public API (`/api/v1/models/.../endpoints` gives
+# listed prices and uptime only). Captured by hand from the model page.
+#
+# Two snapshots are kept because the comparison is evidence in its own right:
+# listed prices did not move at all between them, so every change in effective
+# price is a change in *cache hit rate*. The "price history" chart on the model
+# page is therefore a cache-hit-rate history in disguise.
+#
 # (provider, effective in $/M, realised cache hit rate, share of 1d tokens)
-MARKET_REALISED = [
-    ("Chutes", 0.1310, 0.695, 0.095), ("Novita", 0.1459, 0.818, 0.143),
-    ("Alibaba", 0.1961, 0.662, 0.132), ("Parasail", 0.2263, 0.412, 0.053),
-    ("Phala", 0.2281, 0.688, 0.206), ("AkashML", 0.2285, 0.405, 0.104),
-    ("CoreWeave", 0.2336, 0.665, 0.067), ("Reka", 0.2622, 0.293, 0.167),
-    ("Venice", 0.4500, 0.000, 0.017), ("Cloudflare", 0.4500, 0.000, 0.009),
-    ("Io Net", 0.4624, 0.076, 0.006),
-]
+MARKET_SNAPSHOTS = {
+    "2026-08-29": [
+        ("Chutes", 0.1310, 0.695, 0.095), ("Novita", 0.1459, 0.818, 0.143),
+        ("Alibaba", 0.1961, 0.662, 0.132), ("Parasail", 0.2263, 0.412, 0.053),
+        ("Phala", 0.2281, 0.688, 0.206), ("AkashML", 0.2285, 0.405, 0.104),
+        ("CoreWeave", 0.2336, 0.665, 0.067), ("Reka", 0.2622, 0.293, 0.167),
+        ("Venice", 0.4500, 0.000, 0.017), ("Cloudflare", 0.4500, 0.000, 0.009),
+        ("Io Net", 0.4624, 0.076, 0.006),
+    ],
+    "2026-08-31": [
+        ("Novita", 0.1272, 0.874, 0.157), ("Chutes", 0.1439, 0.654, 0.075),
+        ("Parasail", 0.1773, 0.575, 0.101), ("CoreWeave", 0.1988, 0.805, 0.101),
+        ("Alibaba", 0.2160, 0.613, 0.122), ("Reka", 0.2257, 0.414, 0.130),
+        ("Phala", 0.2526, 0.589, 0.126), ("AkashML", 0.2725, 0.258, 0.159),
+        ("Venice", 0.4499, 0.000, 0.022), ("Cloudflare", 0.4499, 0.000, 0.004),
+        ("Io Net", 0.4645, 0.067, 0.005),
+    ],
+}
+MARKET_AS_OF = "2026-08-31"
+MARKET_REALISED = MARKET_SNAPSHOTS[MARKET_AS_OF]
 
 # Weighted average price actually paid across the market.
-MARKET_WEIGHTED_IN = 0.2149
-MARKET_WEIGHTED_OUT = 2.866
+MARKET_WEIGHTED_IN = 0.2116
+MARKET_WEIGHTED_OUT = 2.868
 
-# The target: beat the best realised effective input price.
-MARKET_BEST_EFF_IN = 0.1310          # Chutes
+# The target: beat the best realised effective input price. This MOVES -- it was
+# Chutes at $0.1310 two days earlier, and the leader changed because Chutes' hit
+# rate fell 69.5%->65.4% while Novita's rose 81.8%->87.4%. Nobody changed a
+# posted price. Any "we beat the market" claim is against a moving target.
+MARKET_BEST_EFF_IN = 0.1272          # Novita, 87.4% hit
 
 # Real traffic for this model is overwhelmingly input-dominated: 17.6B prompt
 # tokens against 448M completion + 508M reasoning in one day, so roughly 18:1

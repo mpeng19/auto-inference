@@ -7,6 +7,7 @@ rates. Both were assumptions until this data existed.
 import pytest
 
 from autoinf.modal_app import (MARKET_BEST_EFF_IN, MARKET_INPUT_OUTPUT_RATIO,
+                               MARKET_SNAPSHOTS,
                                MARKET_QWEN38_27B, MARKET_REALISED,
                                MARKET_WEIGHTED_IN)
 from autoinf.pricing import effective_in
@@ -33,15 +34,31 @@ def test_effective_price_formula_matches_published_values():
     assert near >= 9, [(n, round(e, 4)) for n, e in errs]
 
 
-def test_realised_hit_rates_are_far_below_our_synthetic_assumption():
-    """Our workloads hit 96%. Real providers manage 0-82%.
+def test_realised_hit_rates_stay_below_our_synthetic_assumption():
+    """Our workloads hit 96%. The best real provider reaches 87%.
 
-    Sizing a business case on 95% would overstate the cache discount's benefit
-    substantially.
+    The ceiling moves: on 2026-08-29 the best was Novita at 81.8%, and two days
+    later the same provider realised 87.4%, which broke an earlier version of
+    this test that hard-coded 85%. So assert the *relationship* that matters --
+    no provider reaches the 95.6% our replayed traces achieve -- rather than a
+    level that drifts. Sizing a business case on 95% would overstate the cache
+    discount's benefit.
     """
-    hits = [h for _n, _e, h, _s in MARKET_REALISED]
-    assert max(hits) < 0.85, max(hits)
-    assert max(hits) > 0.75          # the best do achieve a lot
+    for date, snap in MARKET_SNAPSHOTS.items():
+        hits = [h for _n, _e, h, _s in snap]
+        assert max(hits) < 0.90, (date, max(hits))
+        assert max(hits) > 0.75, (date, max(hits))   # the best do achieve a lot
+
+
+def test_the_cheapest_provider_changes_between_snapshots():
+    """The target moves, and not because anyone repriced.
+
+    Listed prices were identical across both snapshots; the leader changed from
+    Chutes to Novita purely because their cache hit rates moved. Any
+    "we rank Nth" claim is against a moving target and needs its date.
+    """
+    best = [min(s, key=lambda r: r[1])[0] for s in MARKET_SNAPSHOTS.values()]
+    assert len(set(best)) > 1, best
 
 
 def test_hit_rate_is_provider_controlled_not_workload_luck():
