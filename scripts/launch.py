@@ -42,8 +42,18 @@ def cmd_frontier(a) -> int:
                                  tp_size=a.n_gpu)
     sl = SLO(ttft_ms=a.ttft_ms, tpot_ms=a.tpot_ms)
     levels = [int(x) for x in a.levels.split(",") if x.strip()]
-    call = _fn("frontier").spawn(asdict(sc), levels, asdict(sl),
-                                 a.seconds, a.repeats, a.note, a.trace_scale)
+    # ServingConfig.n_gpu only sets SGLang's --tp-size; it does not allocate
+    # anything. The deployed frontier is declared with one L40S, so asking for
+    # TP=8 without this produced "CUDA error: invalid device ordinal" 48
+    # seconds in. Resources have to be overridden at call time.
+    n = max(1, sc.n_gpu)
+    fn = _fn("frontier").with_options(
+        gpu=f"{sc.gpu}:{n}" if n > 1 else sc.gpu,
+        cpu=float(max(16, 4 * n)),
+        timeout=60 * 60 * (3 if n > 1 else 2),
+    )
+    call = fn.spawn(asdict(sc), levels, asdict(sl),
+                    a.seconds, a.repeats, a.note, a.trace_scale)
     print(f"spawned  call_id={call.object_id}")
     print(f"  model   {sc.model.split('/')[-1]} on {sc.n_gpu}x{sc.gpu}")
     print(f"  levels  {levels}  x {a.seconds:.0f}s  x {a.repeats} repeat(s)")
