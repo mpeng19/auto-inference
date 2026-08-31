@@ -163,6 +163,19 @@ QWEN3_8B = ModelSpec(
     tie_embeddings=False, dense=True,
 )
 
+# THE TARGET. Dense 27B vision-language model, the one we would actually sell.
+# Note `head_dim=256` -- double the usual 128 -- with 64 layers and 4 KV heads,
+# giving 256 KiB/token of KV. That is 2.7x the 30B MoE, and it means a single
+# real agentic conversation (132k tokens, per TraceLab) needs 34.6 GB. An L40S
+# cannot hold one; an H100 holds 1.6; 8xH100 holds ~18. Serving this model on
+# coding-agent traffic is a KV-capacity problem before it is anything else.
+QWEN3_8_27B = ModelSpec(
+    name="Qwen/Qwen3.8-27B-FP8",
+    hidden_size=5120, n_layers=64, n_heads=24, n_kv_heads=4, head_dim=256,
+    moe_intermediate=17408, n_experts=1, n_experts_active=1, vocab_size=248320,
+    tie_embeddings=False, dense=True,
+)
+
 QWEN3_235B_A22B = ModelSpec(
     name="Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
     hidden_size=4096, n_layers=94, n_heads=64, n_kv_heads=4, head_dim=128,
@@ -180,7 +193,8 @@ L40S = HardwareSpec("L40S", 1, 362e12, 864e9, 48e9)
 A10G = HardwareSpec("A10G", 1, 125e12, 600e9, 24e9)
 L4 = HardwareSpec("L4", 1, 121e12, 300e9, 24e9)
 
-MODELS = {m.name: m for m in (QWEN3_4B, QWEN3_8B, QWEN3_30B_A3B, QWEN3_235B_A22B)}
+MODELS = {m.name: m for m in (QWEN3_4B, QWEN3_8B, QWEN3_30B_A3B,
+                              QWEN3_8_27B, QWEN3_235B_A22B)}
 HARDWARE = {"H100": H100, "L40S": L40S, "A10G": A10G, "L4": L4}
 
 # Modal per-hour rates, for cost-per-token comparisons.

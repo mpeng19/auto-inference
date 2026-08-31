@@ -339,7 +339,7 @@ def _run_multiturn(wc, sc, sl, server_url: str) -> dict:
     from autoinf import server_metrics
     from autoinf.loadgen import client_health, run_sessions, summarize_turns
     from autoinf.metrics import detect_collapse, summarize
-    from autoinf.workload import build_sessions
+    from autoinf.workload import build_sessions, check_calibration
 
     tr = build_sessions(wc)
     print(f"-- workload {wc.name}: {len(tr.sessions)} sessions, "
@@ -877,7 +877,7 @@ def traces(name: str = ""):
     timeout=4 * 60 * 60,
 )
 def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: float = 90.0,
-             repeats: int = 1, note: str = "") -> dict:
+             repeats: int = 1, note: str = "", trace_scale: float = 0.0) -> dict:
     """Sweep concurrent users and find the largest population meeting SLOs.
 
     Two outputs, from one server launch:
@@ -898,7 +898,7 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
     from autoinf.config import SLO, ServingConfig, WorkloadConfig
     from autoinf.loadgen import client_health, install_fast_loop, run_concurrent_users
     from autoinf.metrics import detect_collapse, percentile, summarize
-    from autoinf.workload import build_sessions
+    from autoinf.workload import build_sessions, check_calibration
 
     try:
         import resource
@@ -911,12 +911,19 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
     ov = overlay.apply("/overlays")
     install_fast_loop()
 
+    # The guard was only wired into bench(), but frontier is now the primary
+    # measurement path and produces the number the objective depends on.
+    warn = check_calibration(sc)
+    if warn:
+        print(f"\n!! CALIBRATION: {warn}\n", flush=True)
+
     cmd = ["python", "-m", "sglang.launch_server", "--host", "127.0.0.1",
            "--port", str(SERVER_PORT), *sc.to_sglang_args()]
     print("launching:", " ".join(cmd), flush=True)
 
     rec: dict = {"note": note, "serving": asdict(sc), "serving_digest": sc.digest(),
                  "slo": asdict(sl), "overlay": ov, "provenance": _provenance(),
+                 "calibration_warning": warn,
                  "levels": [], "seconds_per_level": seconds_per_level,
                  "repeats": repeats}
     log_path = "/tmp/sglang-frontier.log"
@@ -930,14 +937,36 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
             asyncio.run(warmup(SERVER_URL, sc.model, 20))
 
             # A pool of conversations; each simulated user pulls a fresh one.
+            #
+            # `trace_scale > 0` replays real Claude Code / Codex sessions from
+            # TraceLab instead of synthetic ones. Worth preferring: our
+            # synthetic conversations are ~500 tokens where the real ones are
+            # ~132k, and the whole objective turns on cache behaviour at that
+            # scale. The scale factor exists because full-size contexts do not
+            # fit -- one is 34.6 GB of KV on the target model.
+            if trace_scale > 0:
+                from autoinf.tracelab import (describe, load_sessions,
+                                              scale_sessions, to_sessions)
+                raw = load_sessions(min_rounds=4, max_rounds=40,
+                                    max_sessions=300, seed=0)
+                scaled = scale_sessions(raw, trace_scale)
+                pool = to_sessions(scaled, seed=0)
+                rec["trace_source"] = describe(scaled)
+                print(f"replaying TraceLab at {trace_scale:g}x: "
+                      f"{rec['trace_source']['n_sessions']} sessions, "
+                      f"input p50 {rec['trace_source']['input_tokens_p50']} tok, "
+                      f"hit {rec['trace_source']['aggregate_hit_rate']}", flush=True)
+                make_session = lambda uid, n: pool[(uid * 7919 + n * 104729) % len(pool)]
+
             base = WorkloadConfig(name="frontier", multi_turn=True,
                                   turns_mu=6.0, turns_max=20,
                                   think_mu=0.4, think_sigma=0.5,
                                   category_mix=("code_debug", "code_gen",
                                                 "analysis", "explain"),
                                   shared_prefix_len=300, n_requests=400, seed=0)
-            pool = build_sessions(base).sessions
-            make_session = lambda uid, n: pool[(uid * 7919 + n * 104729) % len(pool)]
+            if trace_scale <= 0:
+                pool = build_sessions(base).sessions
+                make_session = lambda uid, n: pool[(uid * 7919 + n * 104729) % len(pool)]
 
             for n_users in levels:
                 for rep in range(repeats):

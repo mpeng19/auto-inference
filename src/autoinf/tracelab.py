@@ -136,6 +136,44 @@ def describe(sessions: list[list[TraceRound]]) -> dict:
     }
 
 
+def to_sessions(traces: list[list[TraceRound]], system_tokens: int = 400,
+                think_mu: float = 0.3, think_sigma: float = 0.6,
+                seed: int = 0):
+    """Convert trace rounds into replayable Sessions.
+
+    The trace is sanitised, so there is no message text -- only the shape. That
+    is what we need: token counts, prefix reuse and turn structure drive cache
+    and KV behaviour, not the words. Filler is generated to match each round's
+    `new_tokens`, and because the client resends the full conversation each
+    turn, the server sees the same growing-prefix pattern the real agent
+    produced.
+
+    Returns `autoinf.workload.Session` objects so the existing multi-turn
+    runner replays them unchanged.
+    """
+    import random as _r
+
+    from . import prompts as _p
+    from .workload import Session, Turn
+
+    rng = _r.Random(seed)
+    system = _p._pad_to(_p.SYSTEM_PROMPTS[2][1], system_tokens, _r.Random(seed * 31))
+
+    out = []
+    for i, rounds in enumerate(traces):
+        turns, think = [], []
+        for r in rounds:
+            # Only the *new* tokens are authored each turn; the rest of the
+            # prompt is the conversation the client resends, which the runner
+            # rebuilds from prior replies.
+            turns.append(Turn(_p._pad_to("", max(1, r.new_tokens), rng),
+                              max(1, r.output_tokens), "agentic"))
+            think.append(min(60.0, rng.lognormvariate(think_mu, think_sigma)))
+        out.append(Session(idx=i, arrival_s=0.0, system=system,
+                           turns=tuple(turns), think_s=tuple(think)))
+    return out
+
+
 def scale_sessions(sessions: list[list[TraceRound]], factor: float
                    ) -> list[list[TraceRound]]:
     """Shrink every context by `factor`, preserving cache structure.

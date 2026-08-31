@@ -30,17 +30,25 @@ def _fn(name: str):
 
 
 def cmd_frontier(a) -> int:
+    import dataclasses
+
     from autoinf.config import SLO, ServingConfig
 
     sc = ServingConfig()
+    if a.model:
+        sc = dataclasses.replace(sc, model=a.model)
+    if a.gpu:
+        sc = dataclasses.replace(sc, gpu=a.gpu, n_gpu=a.n_gpu,
+                                 tp_size=a.n_gpu)
     sl = SLO(ttft_ms=a.ttft_ms, tpot_ms=a.tpot_ms)
     levels = [int(x) for x in a.levels.split(",") if x.strip()]
     call = _fn("frontier").spawn(asdict(sc), levels, asdict(sl),
-                                 a.seconds, a.repeats, a.note)
+                                 a.seconds, a.repeats, a.note, a.trace_scale)
     print(f"spawned  call_id={call.object_id}")
     print(f"  model   {sc.model.split('/')[-1]} on {sc.n_gpu}x{sc.gpu}")
     print(f"  levels  {levels}  x {a.seconds:.0f}s  x {a.repeats} repeat(s)")
     print(f"  SLOs    TTFT p99 < {a.ttft_ms:.0f}ms, TPOT p99 < {a.tpot_ms:.0f}ms")
+    print(f"  traffic {'TraceLab replay at %gx' % a.trace_scale if a.trace_scale > 0 else 'synthetic conversations'}")
     print(f"\ncollect:  uv run python scripts/launch.py collect {call.object_id}")
     return 0
 
@@ -152,6 +160,12 @@ def main() -> int:
     f.add_argument("--ttft-ms", dest="ttft_ms", type=float, default=1000.0)
     f.add_argument("--tpot-ms", dest="tpot_ms", type=float, default=50.0)
     f.add_argument("--note", default="frontier")
+    f.add_argument("--model", default="", help="override the model to serve")
+    f.add_argument("--gpu", default="", help="override GPU type, e.g. H100")
+    f.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
+    f.add_argument("--trace-scale", dest="trace_scale", type=float, default=0.0,
+                   help="replay real TraceLab agent sessions, scaled by this "
+                        "factor (0 = synthetic conversations)")
     f.set_defaults(fn=cmd_frontier)
 
     c = sub.add_parser("collect")
