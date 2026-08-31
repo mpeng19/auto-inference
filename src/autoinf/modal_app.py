@@ -982,6 +982,48 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                           f"  TTFT p99 {(lvl['ttft_p99_ms'] or 0):>7.0f}ms"
                           f"  hit {(lvl['cache_hit_rate'] or 0):.2f}"
                           f"  {'OK' if lvl['meets_slo'] else 'MISS'}", flush=True)
+
+            # ── phase B: mixes for cost attribution ──────────────
+            # The sweep above varies *scale*, not *mix*: every level runs the
+            # same conversations, so its token-class ratios barely move and the
+            # three per-token costs are not separable from it alone (the design
+            # matrix is near rank-1 in ratio terms). These four workloads exist
+            # to span the space -- input-dominated, output-dominated,
+            # cache-dominated, balanced -- at one fixed sub-saturation load.
+            from autoinf.loadgen import run_trace_sp
+            from autoinf.workload import build_trace, suite
+
+            attr_users = max(4, (max(levels) // 4) or 4)
+            print(f"\n-- attribution mixes at ~{attr_users} concurrent --", flush=True)
+            for name in ("prefill_heavy", "decode_heavy", "prefix_heavy", "short_chat"):
+                wc = suite(seed=0)[name]
+                trace = build_trace(wc)
+                before = asyncio.run(server_metrics.scrape(SERVER_URL))
+                t0 = time.perf_counter()
+                res = asyncio.run(run_trace_sp(trace, SERVER_URL, sc.model))
+                wall = time.perf_counter() - t0
+                after = asyncio.run(server_metrics.scrape(SERVER_URL))
+                ctr = (server_metrics.diff(before, after) if (before and after)
+                       else {}).get("counters", {})
+                p_tok = ctr.get("sglang:prompt_tokens_total", 0.0)
+                c_tok = ctr.get("sglang:cached_tokens_total", 0.0)
+                g_tok = ctr.get("sglang:generation_tokens_total", 0.0)
+                m = summarize(res, sl, warmup_s=min(15.0, 0.15 * trace.duration_s))
+                row = {
+                    "mix": name, "wall_s": round(wall, 1),
+                    "gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
+                    "prompt_tokens": p_tok, "cached_tokens": c_tok,
+                    "uncached_tokens": max(0.0, p_tok - c_tok),
+                    "output_tokens": g_tok,
+                    "cache_hit_rate": round(c_tok / p_tok, 4) if p_tok else None,
+                    "goodput_rps": m["goodput_rps"], "n_failed": m["n_failed"],
+                }
+                rec.setdefault("mixes", []).append(row)
+                print(f"  {name:<15} in {row['uncached_tokens']:>9.0f} uncached"
+                      f" {row['cached_tokens']:>9.0f} cached"
+                      f"  out {row['output_tokens']:>9.0f}"
+                      f"  {row['gpu_seconds']:>6.1f} gpu-s", flush=True)
+
             rec["status"] = "ok"
         except Exception as e:
             rec["status"] = "failed"
