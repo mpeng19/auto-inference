@@ -114,3 +114,12 @@ def test_ranking_shifts_with_hit_rate():
     lo = rank_vs_market(0.20, MARKET, hit_rate=0.1)["rank"]
     hi = rank_vs_market(0.20, MARKET, hit_rate=0.95)["rank"]
     assert hi > lo, (lo, hi)      # same price ranks worse when caching matters
+
+
+def test_multi_gpu_price_does_not_double_count():
+    """`gpu_seconds` already aggregates the node, so n_gpu must not scale the
+    rate again. This bug made every 8xH100 price 8x too high."""
+    a = attribute(_spanning())
+    one = prices(a, n_gpu=1, utilization=0.6, margin=0.25)
+    eight = prices(a, n_gpu=8, utilization=0.6, margin=0.25)
+    assert one["price_in_per_mtok"] == pytest.approx(eight["price_in_per_mtok"])

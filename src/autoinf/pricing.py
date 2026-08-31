@@ -280,10 +280,12 @@ def prices(attr: Attribution, basis: str = DEFAULT_BASIS, n_gpu: int = 1,
     if basis not in COST_BASES:
         raise KeyError(f"unknown cost basis {basis!r}; have {sorted(COST_BASES)}")
     usd_hr, note = COST_BASES[basis]
-    usd_per_gpu_second = usd_hr / 3600.0
-    # Attribution is measured in GPU-seconds already aggregated over the node,
-    # so n_gpu multiplies the dollar rate, not the token cost.
-    rate = usd_per_gpu_second * n_gpu
+    # `gpu_seconds` in an Observation is already wall_time * n_gpu -- aggregated
+    # over the node -- so the per-GPU-hour rate applies directly. Multiplying by
+    # n_gpu here as well double-counted the GPU count and made every 8xH100
+    # price 8x too high ($1.68/M input instead of $0.21/M). The comment that
+    # used to sit here asserted the opposite of what the code did.
+    rate = usd_hr / 3600.0
 
     def to_price(gpu_s_per_token: float) -> float:
         cost = gpu_s_per_token * rate / max(utilization, 1e-9)
