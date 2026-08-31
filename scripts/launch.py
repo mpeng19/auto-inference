@@ -48,7 +48,7 @@ def cmd_frontier(a) -> int:
 def report(rec: dict) -> None:
     """Frontier curve -> N* -> cost attribution -> effective price -> rank."""
     from autoinf.modal_app import MARKET_QWEN38_27B
-    from autoinf.pricing import (Observation, attribute, conditioning,
+    from autoinf.pricing import (Observation, attribute_saturated, conditioning,
                                  effective_in, fmt_prices, prices,
                                  rank_vs_market, usable)
 
@@ -78,23 +78,22 @@ def report(rec: dict) -> None:
     print(f"\nN* = {n_star} concurrent users   goodput {best['goodput_rps']:.2f} rps"
           f"   cache hit {best['cache_hit_rate']:.2f}")
 
-    # Attribution uses the phase-B *mixes* first. The concurrency levels vary
-    # scale but not ratio, so on their own they are near-collinear and the three
-    # per-token costs come out arbitrary however good the r2 looks.
+    # ONLY the saturated phase-B mixes. The concurrency levels must not be
+    # mixed in: they run below saturation, where the GPU idles and wall time
+    # overstates work, and they vary scale rather than composition. Including
+    # them is what produced r2 = -36.7.
     obs = [Observation(m["mix"], m["uncached_tokens"], m["cached_tokens"],
                        m["output_tokens"], m["gpu_seconds"])
            for m in rec.get("mixes", []) if m["output_tokens"] > 0]
-    obs += [Observation(f"N{l['n_users']}r{l['repeat']}", l["uncached_tokens"],
-                        l["cached_tokens"], l["output_tokens"], l["gpu_seconds"])
-            for l in rec["levels"] if l["output_tokens"] > 0]
     if len(obs) < 3:
-        print("\nnot enough observations for cost attribution")
+        print("\nno saturated mixes recorded; cannot attribute cost")
         return
 
-    cond, attr = conditioning(obs), attribute(obs)
+    cond, attr = conditioning(obs), attribute_saturated(obs)
     print(f"\nGPU-seconds/token  uncached_in {attr.per_uncached_in:.3e}"
           f"  cached_in {attr.per_cached_in:.3e}  out {attr.per_out:.3e}")
-    print(f"  r2 {attr.r2}   condition {cond['condition_number']}"
+    print(f"  fit {attr.r2} (1.0 = perfect, worst residual {attr.residual})"
+          f"   condition {cond['condition_number']}"
           f"   {'ok' if cond['well_conditioned'] else 'ILL-CONDITIONED'}")
     if attr.cache_discount is not None:
         print(f"  cache discount {attr.cache_discount:.3f}   (market prices ~0.10)")
@@ -113,12 +112,21 @@ def report(rec: dict) -> None:
     print(f"  in ${f['price_in_per_mtok']}/M   cached ${f['price_cached_in_per_mtok']}/M"
           f"   out ${f['price_out_per_mtok']}/M")
 
-    print(f"\n{'hit':>6}{'eff in $/M':>13}{'rank':>10}")
-    print("-" * 31)
-    for h in (0.5, 0.9, 0.95):
+    # Hit rates chosen from reality: 0.70 is a typical OpenRouter provider,
+    # 0.82 the best of them, 0.956 what TraceLab shows Anthropic/OpenAI achieve
+    # on coding-agent traffic.
+    print(f"\n{'hit':>7}{'eff in $/M':>13}{'rank':>10}")
+    print("-" * 32)
+    for h in (0.70, 0.82, 0.956):
         e = effective_in(p["price_in_per_mtok"], p["price_cached_in_per_mtok"], h)
         r = rank_vs_market(e, MARKET_QWEN38_27B, h)
-        print(f"{h:>6.2f}{e:>13.4f}{r['rank']:>6}/{r['of']:<3}")
+        print(f"{h:>7.3f}{e:>13.4f}{r['rank']:>6}/{r['of']:<3}")
+
+    if rec["serving"].get("model", "") != "Qwen/Qwen3.8-27B":
+        print(f"\n  !! RANK IS NOT A COMPETITIVE RESULT: measured "
+              f"{rec['serving'].get('model','?').split('/')[-1]}, but the market "
+              f"table is Qwen3.8-27B. A smaller model serves cheaper for reasons "
+              f"that have nothing to do with the serving stack.")
 
 
 def cmd_collect(a) -> int:

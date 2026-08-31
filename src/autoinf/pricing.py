@@ -121,6 +121,50 @@ def attribute(obs: list[Observation]) -> Attribution:
                        round(r2, 4), len(obs), round(ss_res ** 0.5, 3))
 
 
+def attribute_saturated(obs: list[Observation]) -> Attribution:
+    """Solve for per-token cost from *rates*, not totals.
+
+    Fixed-duration experiments cannot identify per-token costs. Every mix ran
+    ~107 GPU-seconds because each was given the same 90s window, while token
+    counts varied 35x -- so the regression was asked to fit a near-constant
+    target from wildly varying features, which no linear model can do. Three
+    successive attempts failed this way for what looked like three different
+    reasons (r2 of -2.9, then zeros, then -36.7); the cause was the experimental
+    design, not the denominator.
+
+    At saturation the server is busy throughout, so what a mix reveals is its
+    *throughput composition*: how many uncached, cached and output tokens per
+    GPU-second. Dividing the cost equation through by GPU-seconds
+
+        gpu_s = a*U + b*C + c*O   ->   1 = a*(U/gpu_s) + b*(C/gpu_s) + c*(O/gpu_s)
+
+    leaves the same coefficients with duration cancelled. The target is now
+    constant 1 by construction, so r2 is meaningless here and fit quality is
+    the residual |1 - prediction| instead.
+    """
+    import numpy as np
+
+    if len(obs) < 3:
+        raise ValueError(f"need >=3 saturated mixes with differing "
+                         f"compositions, got {len(obs)}")
+
+    rows = []
+    for o in obs:
+        g = max(o.gpu_seconds, 1e-9)
+        rows.append([o.uncached_in / g, o.cached_in / g, o.out / g])
+    A = np.array(rows, dtype=float)
+    b = np.ones(len(rows), dtype=float)
+
+    x = _nnls(A, b)
+    pred = A @ x
+    resid = np.abs(pred - 1.0)
+    # Reported in the r2 slot as 1 - worst relative residual, so a single
+    # threshold still works: 1.0 is perfect, below 0.9 means >10% off.
+    quality = float(1.0 - resid.max())
+    return Attribution(float(x[0]), float(x[1]), float(x[2]),
+                       round(quality, 4), len(obs), round(float(resid.max()), 4))
+
+
 def cross_validate(obs: list[Observation]) -> dict:
     """Leave-one-out: fit on the rest, predict the held-out workload.
 
