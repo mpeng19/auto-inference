@@ -174,31 +174,30 @@ QWEN3_8B = ModelSpec(
     tie_embeddings=False, dense=True,
 )
 
-# THE TARGET. A *hybrid* MoE vision-language model, not the dense one an
-# earlier version of this file assumed:
+# THE TARGET. A **dense** hybrid-attention vision-language model. Two earlier
+# versions of this comment were wrong in opposite directions; the config is:
 #
-#   * 64 layers, but only **16 use full attention** (`layer_types` interleaves
-#     three linear-attention layers per full one). Linear attention keeps a
-#     fixed-size state, so only those 16 contribute growing KV. Counting all 64
-#     overestimates memory 4x.
-#   * Mixture-of-experts with `moe_intermediate_size=512`. FP8 weights use a
-#     128x128 block, so SGLang requires
-#     `(512 / (tp_size/ep_size)) % 128 == 0` -- TP=8 needs EP of 2, 4 or 8.
+#   * 64 layers, but only **16 use full attention** (`layer_types` gives full
+#     attention every 4th layer). Linear attention keeps a fixed-size state, so
+#     only those 16 contribute growing KV. Counting all 64 overestimates 4x.
+#     This part of the earlier correction was right.
+#   * **No MoE.** `has_moe: false`, `intermediate_size: 17408`, a plain dense
+#     FFN. An earlier spec guessed 128 experts x 512 -- that is a 64B-parameter
+#     model, more than twice the 27B on the tin, which is exactly the check
+#     below. It also underestimated FFN FLOPs ~4.3x.
+#     Consequently `--ep-size` is meaningless here, and the FP8 128x128 block
+#     constraint applies to 17408 (divisible by 128 for every TP we use).
 #   * `head_dim=256`, unusually large, which is why KV is still 64 KiB/token
 #     despite only a quarter of the layers caching.
 #
 # One real 132k-token agentic conversation is ~8.7 GB: an L40S holds two, an
 # H100 about six, 8xH100 about seventy.
-#
-# FLOPs figures for this model are approximate -- the published config does not
-# expose expert counts, so `total_params`/`active_params` here should not be
-# trusted the way the smaller models' are. KV and memory are exact.
 QWEN3_8_27B = ModelSpec(
     name="Qwen/Qwen3.8-27B-FP8",
     hidden_size=5120, n_layers=64, n_kv_layers=16,
     n_heads=24, n_kv_heads=4, head_dim=256,
-    moe_intermediate=512, n_experts=128, n_experts_active=8,
-    vocab_size=248320, tie_embeddings=False,
+    moe_intermediate=17408, n_experts=1, n_experts_active=1,
+    vocab_size=248320, tie_embeddings=False, dense=True,
 )
 
 QWEN3_235B_A22B = ModelSpec(
