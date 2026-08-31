@@ -173,17 +173,29 @@ TraceLab is 6.4x too *long*.
 discount — called "the whole game" one section above — is 5-13%. And the output
 coefficient is our *least identified* column (35x span vs 472x/348x).
 
-**3. The output coefficient was measured at the wrong context.** Decode
-re-reads each sequence's KV every step, so GPU-s per output token scales with
-context; the rate form fits it as a constant. Roofline on 8xH100:
+**3. Decode runs ~10x off the memory-bandwidth roofline.** An earlier version
+of this section claimed the output coefficient was "measured at the wrong
+context" because 2.331e-03 matches the 132k-context roofline. **That was
+wrong** — the decode mix that identifies the output column used a *64-token*
+prompt, so the match was a coincidence. Checked properly:
 
-    context   batch   GPU-s/token
-    132,092      32      2.80e-03    <- our replay; we measured 2.331e-03
-     20,583      32      6.18e-04    <- market context, 3.8x cheaper
+    context   batch   roofline GPU-s/tok   vs measured 2.331e-03
+      1,000      32             2.35e-04                    9.9x
+      1,000       3             2.32e-03                    1.0x
+     20,583      32             6.18e-04                    3.8x
 
-If that holds, break-even utilisation drops from 73% to **~30%** and we rank
-1/12 at 50% utilisation at any hit rate. **Unverified — it is a roofline
-prediction, not a measurement.**
+At the decode mix's own context and its nominal batch of 32, roofline says
+2.4e-04 and we measured ten times that — a figure consistent with an
+**effective decode batch of ~3, not 32**. Either the scheduler is not batching
+decode, or the mix never reached the concurrency it asked for.
+
+That is the single highest-value thing to find out, because output tokens are
+70-81% of the bill on real traffic. `server_metrics.BatchSampler` now samples
+`num_running_reqs` every 2s during every measured window (one local HTTP GET,
+unlike the nvidia-smi polling that starved the load generator), and every level
+and mix records `batch`. The phase-B mixes now hold context fixed at the
+marketplace's ~20k and vary only output length, so decode is measured in the
+regime the marketplace actually runs.
 
 **Next run must be: market-realistic workload (20.6k in / 2.1k out / 9.9:1) at
 a market-realistic SLO (p99 TTFT 4s), then re-attribute.** Every cost and rank

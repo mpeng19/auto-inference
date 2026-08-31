@@ -174,7 +174,8 @@ def to_sessions(traces: list[list[TraceRound]], system_tokens: int = 400,
     return out
 
 
-def scale_sessions(sessions: list[list[TraceRound]], factor: float
+def scale_sessions(sessions: list[list[TraceRound]], factor: float,
+                   out_factor: float | None = None
                    ) -> list[list[TraceRound]]:
     """Shrink every context by `factor`, preserving cache structure.
 
@@ -188,7 +189,12 @@ def scale_sessions(sessions: list[list[TraceRound]], factor: float
     the same *structure* at a different absolute scale, and results from it do
     not automatically transfer to full-size contexts, where KV pressure and
     eviction dominate.
+
+    `out_factor` scales output independently. Uniform scaling preserves
+    TraceLab's 291:1 input:output ratio, but the marketplace this model
+    actually serves runs at **9.9:1** -- see `scale_to_market`.
     """
+    of = factor if out_factor is None else out_factor
     out = []
     for s in sessions:
         rs = []
@@ -198,7 +204,49 @@ def scale_sessions(sessions: list[list[TraceRound]], factor: float
             rs.append(TraceRound(
                 session=r.session, index=r.index, input_tokens=inp,
                 cached_tokens=cached, new_tokens=max(1, inp - cached),
-                output_tokens=max(1, int(r.output_tokens * factor)),
+                output_tokens=max(1, int(r.output_tokens * of)),
                 model=r.model, provider=r.provider))
         out.append(rs)
     return out
+
+
+# What OpenRouter's traffic for qwen/qwen3.8-27b actually looks like, from 17
+# days of `model_chart` totals (`scripts/market_pull.py`). TraceLab is Claude
+# Code traffic specifically; the marketplace mixes it with agents that generate
+# far more output (pi, Hermes Agent, LangChain, DeepSeek Harness).
+#
+#                    TraceLab   marketplace
+#   input tokens/req  132,092        20,583
+#   output tokens/req     454         2,076
+#   input:output        291:1         9.9:1
+#
+# The ratio matters more than either level: under TraceLab's mix only 12% of
+# modelled serving cost falls on output tokens, against 70-81% under the real
+# one, which changes what is worth optimising.
+MARKET_IN_PER_REQ = 20_583
+MARKET_OUT_PER_REQ = 2_076
+
+
+def scale_to_market(sessions: list[list[TraceRound]],
+                    in_tokens: int = MARKET_IN_PER_REQ,
+                    out_tokens: int = MARKET_OUT_PER_REQ
+                    ) -> tuple[list[list[TraceRound]], dict]:
+    """Rescale a TraceLab pool to the marketplace's input and output sizes.
+
+    Factors are derived from the pool that was actually loaded rather than
+    hard-coded, so this stays correct if the sampling parameters change.
+    Prefix structure -- which turn reuses what -- is untouched; only the
+    absolute token counts move.
+    """
+    rounds = [r for s in sessions for r in s]
+    if not rounds:
+        return sessions, {"scaled": False}
+    mean_in = sum(r.input_tokens for r in rounds) / len(rounds)
+    mean_out = sum(r.output_tokens for r in rounds) / len(rounds)
+    f_in = in_tokens / mean_in
+    f_out = out_tokens / mean_out
+    scaled = scale_sessions(sessions, f_in, f_out)
+    return scaled, {"scaled": True, "in_factor": round(f_in, 5),
+                    "out_factor": round(f_out, 5),
+                    "source_in": round(mean_in), "source_out": round(mean_out),
+                    "target_in": in_tokens, "target_out": out_tokens}

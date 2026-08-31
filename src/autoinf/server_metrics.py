@@ -185,3 +185,68 @@ def compare_client_server(client_ttft_ms: dict, server: dict) -> dict:
                  "a few ms. Large or growing means the client is polluting the "
                  "measurement."),
     }
+
+
+class BatchSampler:
+    """Sample `num_running_reqs` during a measured window.
+
+    Needed because the cost attribution's output coefficient came out ~10x
+    worse than the memory-bandwidth roofline at the decode mix's nominal batch
+    of 32 -- and exactly on roofline at a batch of 3. Before/after gauge
+    scrapes cannot tell those apart: they catch the queue at two instants, not
+    what the scheduler actually ran.
+
+    Deliberately light. Polling `nvidia-smi` four times a second from inside
+    the container starved the load generator and moved N* from 128 to 32 -- the
+    instrument changed the measurement, worst at high load. This is one HTTP
+    GET against a local endpoint every couple of seconds, which is orders of
+    magnitude cheaper, but keep the interval coarse regardless.
+    """
+
+    def __init__(self, base_url: str, interval_s: float = 2.0):
+        self.base_url = base_url
+        self.interval_s = interval_s
+        self.running: list[float] = []
+        self.queued: list[float] = []
+        self._task = None
+        self._stop = None
+
+    async def _loop(self) -> None:
+        import asyncio
+        while not self._stop.is_set():
+            snap = await scrape(self.base_url, timeout_s=3.0)
+            if snap:
+                r = snap.gauges.get("sglang:num_running_reqs")
+                q = snap.gauges.get("sglang:num_queue_reqs")
+                if r is not None:
+                    self.running.append(r)
+                if q is not None:
+                    self.queued.append(q)
+            try:
+                await asyncio.wait_for(self._stop.wait(), self.interval_s)
+            except asyncio.TimeoutError:
+                pass
+
+    async def __aenter__(self) -> "BatchSampler":
+        import asyncio
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(self._loop())
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        import contextlib
+        self._stop.set()
+        if self._task is not None:
+            with contextlib.suppress(Exception):
+                await self._task
+
+    def summary(self) -> dict:
+        """Mean running batch is the number the roofline check needs."""
+        def stat(xs: list[float]) -> dict:
+            if not xs:
+                return {"n": 0}
+            s = sorted(xs)
+            return {"n": len(xs), "mean": round(sum(xs) / len(xs), 2),
+                    "p50": s[len(s) // 2], "max": s[-1],
+                    "frac_idle": round(sum(1 for x in xs if x == 0) / len(xs), 3)}
+        return {"running": stat(self.running), "queued": stat(self.queued)}

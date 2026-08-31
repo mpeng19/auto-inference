@@ -878,7 +878,7 @@ def traces(name: str = ""):
 )
 def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: float = 90.0,
              repeats: int = 1, note: str = "", trace_scale: float = 0.0,
-             sat_users: int = 0) -> dict:
+             sat_users: int = 0, target_in: int = 0, target_out: int = 0) -> dict:
     """Sweep concurrent users and find the largest population meeting SLOs.
 
     Two outputs, from one server launch:
@@ -959,7 +959,19 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                                               scale_sessions, to_sessions)
                 raw = load_sessions(min_rounds=4, max_rounds=40,
                                     max_sessions=300, seed=0)
-                scaled = scale_sessions(raw, trace_scale)
+                # `target_in`/`target_out` rescale input and output separately
+                # to what the marketplace actually sends. Uniform scaling keeps
+                # TraceLab's 291:1 ratio; the real traffic runs 9.9:1, and that
+                # ratio decides whether output tokens are 12% of serving cost
+                # or 70-81% of it.
+                if target_in and target_out:
+                    from autoinf.tracelab import scale_to_market
+                    scaled, rec["market_scaling"] = scale_to_market(
+                        raw, target_in, target_out)
+                    print(f"rescaled to marketplace traffic: "
+                          f"{rec['market_scaling']}", flush=True)
+                else:
+                    scaled = scale_sessions(raw, trace_scale)
                 pool = to_sessions(scaled, seed=0)
                 rec["trace_source"] = describe(scaled)
                 print(f"replaying TraceLab at {trace_scale:g}x: "
@@ -978,6 +990,19 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                 pool = build_sessions(base).sessions
                 make_session = lambda uid, n: pool[(uid * 7919 + n * 104729) % len(pool)]
 
+            async def _measure(mk_session, n, secs):
+                """Run a window while sampling the scheduler's running batch.
+
+                The output coefficient came out ~10x worse than the
+                memory-bandwidth roofline at the decode mix's nominal batch of
+                32, and exactly on roofline at a batch of 3. Before/after gauge
+                scrapes cannot distinguish those, so sample during the window.
+                """
+                async with server_metrics.BatchSampler(SERVER_URL) as bs:
+                    out = await run_concurrent_users(
+                        mk_session, SERVER_URL, sc.model, n, secs)
+                return out, bs.summary()
+
             for n_users in levels:
                 for rep in range(repeats):
                     # Nothing samples the GPU during a measured window. Polling
@@ -987,9 +1012,8 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                     # the answer lives.
                     before = asyncio.run(server_metrics.scrape(SERVER_URL))
                     t0 = time.perf_counter()
-                    res = asyncio.run(run_concurrent_users(
-                        make_session, SERVER_URL, sc.model, n_users,
-                        seconds_per_level))
+                    res, batch = asyncio.run(_measure(
+                        make_session, n_users, seconds_per_level))
                     wall = time.perf_counter() - t0
                     after = asyncio.run(server_metrics.scrape(SERVER_URL))
 
@@ -1024,6 +1048,7 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                         "cache_hit_rate": round(c_tok / p_tok, 4) if p_tok else None,
                         "collapse": detect_collapse(res),
                         "client_health": client_health(res),
+                        "batch": batch,
                     }
                     rec["levels"].append(lvl)
                     print(f"  N={n_users:<5} rep{rep}  goodput {lvl['goodput_rps']:>7.2f}"
@@ -1090,21 +1115,38 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                 return Session(idx=uid, arrival_s=0.0, system=_sys,
                                turns=ts, think_s=tuple([0.0] * turns))
 
+            # Every mix decodes against the SAME context length, and that
+            # length is the marketplace's.
+            #
+            # Decode cost is not a constant: each step re-reads the sequence's
+            # KV, so GPU-seconds per output token grow with the context being
+            # decoded against. The previous decode mix used a 64-token prompt
+            # -- a regime the marketplace never runs, since its traffic decodes
+            # against ~20k. Measuring there and then pricing real traffic with
+            # the result silently mixes two operating points.
+            #
+            # Holding context fixed across mixes and varying only output length
+            # still spans the columns, because the mixes differ enormously in
+            # requests/second: a 8-token generation completes hundreds of times
+            # while a 4000-token one completes once.
+            ctx = target_in or 6000
+            long_out = max(4000, 2 * (target_out or 2000))
+
             # A tiny pool, deliberately revisited, to drive cache hits high.
-            _reuse = [_fresh(i, 0, 4000, 8, turns=8) for i in range(6)]
+            _reuse = [_fresh(i, 0, ctx, 8, turns=8) for i in range(6)]
 
             mix_specs = {
-                "uncached": lambda uid, n: _fresh(uid, n, 6000, 8),
-                "decode": lambda uid, n: _fresh(uid, n, 64, 2000),
+                "uncached": lambda uid, n: _fresh(uid, n, ctx, 8),
+                "decode": lambda uid, n: _fresh(uid, n, ctx, long_out),
                 "cached": lambda uid, n: _reuse[(uid + n) % len(_reuse)],
-                "balanced": lambda uid, n: _fresh(uid, n, 1500, 400, turns=3),
+                "balanced": lambda uid, n: _fresh(uid, n, ctx,
+                                                 target_out or 400, turns=3),
             }
             for name, mk in mix_specs.items():
 
                 before = asyncio.run(server_metrics.scrape(SERVER_URL))
                 t0 = time.perf_counter()
-                res = asyncio.run(run_concurrent_users(
-                    mk, SERVER_URL, sc.model, sat_users, seconds_per_level))
+                res, batch = asyncio.run(_measure(mk, sat_users, seconds_per_level))
                 wall = time.perf_counter() - t0
                 after = asyncio.run(server_metrics.scrape(SERVER_URL))
                 ctr = (server_metrics.diff(before, after) if (before and after)
@@ -1124,13 +1166,16 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                     "throughput_rps": m["throughput_rps"],
                     "n_failed": m["n_failed"],
                     "client_health": client_health(res)["verdict"],
+                    "batch": batch,
                 }
                 rec.setdefault("mixes", []).append(row)
                 g = max(row["gpu_seconds"], 1e-9)
                 print(f"  {name:<10} unc/s {row['uncached_tokens']/g:>8.1f}"
                       f"  cach/s {row['cached_tokens']/g:>8.1f}"
                       f"  out/s {row['output_tokens']/g:>7.1f}"
-                      f"  hit {(row['cache_hit_rate'] or 0):.2f}", flush=True)
+                      f"  hit {(row['cache_hit_rate'] or 0):.2f}"
+                      f"  batch {(batch['running'].get('mean') or 0):>5.1f}",
+                      flush=True)
 
             # Report identifiability in the run log, so a degenerate design is
             # visible while the GPUs are still warm rather than at analysis time.

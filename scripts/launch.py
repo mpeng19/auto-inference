@@ -30,6 +30,10 @@ def _fn(name: str):
 
 
 def cmd_frontier(a) -> int:
+    if getattr(a, "market", False) and not a.target_in:
+        from autoinf.tracelab import MARKET_IN_PER_REQ, MARKET_OUT_PER_REQ
+        a.target_in, a.target_out = MARKET_IN_PER_REQ, MARKET_OUT_PER_REQ
+        a.trace_scale = a.trace_scale or 1.0
     import dataclasses
 
     from autoinf.config import SLO, ServingConfig
@@ -62,12 +66,18 @@ def cmd_frontier(a) -> int:
         timeout=60 * 60 * (3 if n > 1 else 2),
     )
     call = fn.spawn(asdict(sc), levels, asdict(sl),
-                    a.seconds, a.repeats, a.note, a.trace_scale, a.sat_users)
+                    a.seconds, a.repeats, a.note, a.trace_scale, a.sat_users,
+                    a.target_in, a.target_out)
     print(f"spawned  call_id={call.object_id}")
     print(f"  model   {sc.model.split('/')[-1]} on {sc.n_gpu}x{sc.gpu}")
     print(f"  levels  {levels}  x {a.seconds:.0f}s  x {a.repeats} repeat(s)")
     print(f"  SLOs    TTFT p99 < {a.ttft_ms:.0f}ms, TPOT p99 < {a.tpot_ms:.0f}ms")
-    print(f"  traffic {'TraceLab replay at %gx' % a.trace_scale if a.trace_scale > 0 else 'synthetic conversations'}")
+    if a.target_in:
+        print(f"  traffic  marketplace-scaled replay: {a.target_in} in / "
+              f"{a.target_out} out per request "
+              f"({a.target_in / max(1, a.target_out):.1f}:1)")
+    else:
+        print(f"  traffic {'TraceLab replay at %gx' % a.trace_scale if a.trace_scale > 0 else 'synthetic conversations'}")
     print(f"\ncollect:  uv run python scripts/launch.py collect {call.object_id}")
     return 0
 
@@ -204,6 +214,12 @@ def main() -> int:
                         "(0 = max(32, 4*N*)); must be enough to saturate decode")
     f.add_argument("--ep", type=int, default=0,
                    help="expert-parallel size; MoE+FP8 constrains valid values")
+    f.add_argument("--market", action="store_true",
+                   help="rescale the replay to OpenRouter's observed traffic "
+                        "(20583 in / 2076 out per request, 9.9:1) instead of "
+                        "TraceLab's 291:1; implies --trace-scale 1.0")
+    f.add_argument("--target-in", dest="target_in", type=int, default=0)
+    f.add_argument("--target-out", dest="target_out", type=int, default=0)
     f.add_argument("--trace-scale", dest="trace_scale", type=float, default=0.0,
                    help="replay real TraceLab agent sessions, scaled by this "
                         "factor (0 = synthetic conversations)")
