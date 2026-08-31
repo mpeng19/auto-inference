@@ -121,6 +121,65 @@ def attribute(obs: list[Observation]) -> Attribution:
                        round(r2, 4), len(obs), round(ss_res ** 0.5, 3))
 
 
+def cross_validate(obs: list[Observation]) -> dict:
+    """Leave-one-out: fit on the rest, predict the held-out workload.
+
+    In-sample r2 only says the fit reproduces the points it was fitted to. It
+    cannot tell us whether the *structure* is right -- whether GPU time really
+    is additive across token classes, or whether prefill and decode interact in
+    ways a linear model cannot express. Held-out prediction can.
+
+    This is the strongest fidelity check available without being a serving
+    provider: it does not require knowing anyone's utilisation, margin or
+    hardware cost. If held-out error is large while in-sample r2 is high, the
+    model is memorising four points rather than describing the system.
+    """
+    if len(obs) < 4:
+        return {"available": False,
+                "reason": "need >=4 workloads to hold one out and still fit 3 unknowns"}
+
+    rows, errs = [], []
+    for i, held in enumerate(obs):
+        rest = obs[:i] + obs[i + 1:]
+        try:
+            a = attribute(rest)
+        except ValueError:
+            continue
+        pred = (a.per_uncached_in * held.uncached_in
+                + a.per_cached_in * held.cached_in
+                + a.per_out * held.out)
+        err = abs(pred - held.gpu_seconds) / max(held.gpu_seconds, 1e-9)
+        errs.append(err)
+        rows.append({
+            "held_out": held.name,
+            "actual_gpu_s": round(held.gpu_seconds, 2),
+            "predicted_gpu_s": round(pred, 2),
+            "rel_error": round(err, 4),
+            # How much the held-out point moved the cache ratio -- if dropping
+            # one workload swings it wildly, the ratio is not identified.
+            "cache_discount_without_it": (round(a.cache_discount, 3)
+                                          if a.cache_discount is not None else None),
+        })
+
+    if not errs:
+        return {"available": False, "reason": "no fold could be fitted"}
+    worst, mean = max(errs), sum(errs) / len(errs)
+    ratios = [r["cache_discount_without_it"] for r in rows
+              if r["cache_discount_without_it"] is not None]
+    spread = (max(ratios) - min(ratios)) if len(ratios) > 1 else None
+    return {
+        "available": True,
+        "folds": rows,
+        "mean_rel_error": round(mean, 4),
+        "worst_rel_error": round(worst, 4),
+        "cache_discount_spread": round(spread, 3) if spread is not None else None,
+        # A model that predicts held-out GPU time to within ~20% is describing
+        # the system; one that misses by 2x is fitting noise.
+        "structure_holds": worst < 0.35,
+        "ratio_stable": (spread is not None and spread < 0.25),
+    }
+
+
 MIN_R2 = 0.90
 
 

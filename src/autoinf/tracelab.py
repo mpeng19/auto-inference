@@ -1,0 +1,166 @@
+"""Replay real coding-agent traffic from TraceLab.
+
+TraceLab (SyFI Lab, University of Washington, CC-BY-4.0) is a sanitised trace of
+665,453 Claude Code and Codex invocations across 8,058 sessions, published
+specifically for LLM serving research. https://tracelab.cs.washington.edu/
+
+Why this replaces guessing. Our synthetic workloads were built from plausible
+assumptions and are wrong by two orders of magnitude on the axis that matters:
+
+                              ours    TraceLab
+    median input tokens        537     132,092
+    input:output ratio         2.3       291.4
+    cache hit rate            0.96       0.956
+
+Output length we happened to get right (233 vs 249), which is precisely why the
+ratio came out so badly. The traffic is not chat with a bit of context -- it is
+a ~130k-token context resent every turn with a ~1k increment, hundreds of times
+per session. That is a different serving problem: overwhelmingly prefill,
+overwhelmingly cached, and bounded by KV capacity rather than compute.
+
+The trace carries no message text (sanitised), which is fine: we need the
+*shape*, not the content. Token counts, prefix reuse and session structure are
+reproduced exactly, and filler text is generated to match.
+"""
+from __future__ import annotations
+
+import hashlib
+import random
+from dataclasses import dataclass
+
+REPO = "UW-SyFI/TraceLab"
+REVISION = "v0.0.2"
+ROUNDS = "data/v0.0.2/rounds/train.parquet"
+
+# Attribution required by CC-BY-4.0.
+CITATION = ("TraceLab (SyFI Lab, University of Washington), "
+            "https://tracelab.cs.washington.edu/ , CC-BY-4.0")
+
+
+@dataclass(frozen=True)
+class TraceRound:
+    """One LLM invocation from a real coding-agent session."""
+    session: str
+    index: int
+    input_tokens: int
+    cached_tokens: int          # provider-reported prefix reuse
+    new_tokens: int             # non-cached input appended this round
+    output_tokens: int
+    model: str
+    provider: str
+
+    @property
+    def hit_rate(self) -> float:
+        return self.cached_tokens / max(1, self.input_tokens)
+
+
+def download_rounds(local_dir: str | None = None) -> str:
+    from huggingface_hub import hf_hub_download
+    return hf_hub_download(repo_id=REPO, repo_type="dataset",
+                           filename=ROUNDS, revision=REVISION,
+                           local_dir=local_dir)
+
+
+def load_sessions(path: str | None = None, min_rounds: int = 4,
+                  max_rounds: int = 60, max_sessions: int | None = 400,
+                  seed: int = 0, provider: str | None = None) -> list[list[TraceRound]]:
+    """Load sessions, longest-context first, with the documented correction.
+
+    TraceLab warns that a small fraction of adjacent rounds report
+    `prefix_tokens` larger than the reconstructable previous context, and
+    advises capping the reusable prefix at
+    `previous.input_tokens_total + previous.output_tokens` for session-local
+    KV replay. Applied here -- without it the replay would claim cache hits the
+    server could not possibly serve, and inflate the very number we are trying
+    to measure.
+    """
+    import pandas as pd
+
+    df = pd.read_parquet(path or download_rounds())
+    if provider:
+        df = df[df.provider == provider]
+    df = df.sort_values(["session_id", "round_index"])
+
+    out: list[list[TraceRound]] = []
+    for sid, g in df.groupby("session_id", sort=False):
+        if not (min_rounds <= len(g) <= max_rounds):
+            continue
+        rounds: list[TraceRound] = []
+        prev_ctx = 0
+        for i, (_, r) in enumerate(g.iterrows()):
+            inp = int(r.input_tokens_total)
+            # Cap reusable prefix at what the previous round could have left
+            # behind (TraceLab issue #22).
+            cached = min(int(r.prefix_tokens), prev_ctx, inp)
+            rounds.append(TraceRound(
+                session=str(sid), index=i, input_tokens=inp,
+                cached_tokens=max(0, cached),
+                new_tokens=max(0, inp - max(0, cached)),
+                output_tokens=int(r.output_tokens),
+                model=str(r.model), provider=str(r.provider)))
+            prev_ctx = inp + int(r.output_tokens)
+        out.append(rounds)
+
+    rng = random.Random(seed)
+    rng.shuffle(out)
+    return out[:max_sessions] if max_sessions else out
+
+
+def describe(sessions: list[list[TraceRound]]) -> dict:
+    """Summarise a replay set, so a scaled-down subset is not silently
+    unrepresentative of the traffic it claims to model."""
+    rounds = [r for s in sessions for r in s]
+    if not rounds:
+        return {"n_sessions": 0}
+
+    def q(xs, p):
+        xs = sorted(xs)
+        return xs[min(len(xs) - 1, int(len(xs) * p))]
+
+    tin = sum(r.input_tokens for r in rounds)
+    tc = sum(r.cached_tokens for r in rounds)
+    to = sum(r.output_tokens for r in rounds)
+    return {
+        "source": CITATION,
+        "n_sessions": len(sessions),
+        "n_rounds": len(rounds),
+        "rounds_per_session_p50": q([len(s) for s in sessions], 0.5),
+        "input_tokens_p50": q([r.input_tokens for r in rounds], 0.5),
+        "input_tokens_p90": q([r.input_tokens for r in rounds], 0.9),
+        "new_tokens_p50": q([r.new_tokens for r in rounds], 0.5),
+        "output_tokens_p50": q([r.output_tokens for r in rounds], 0.5),
+        "aggregate_hit_rate": round(tc / max(1, tin), 4),
+        "input_output_ratio": round(tin / max(1, to), 1),
+        "total_input_tokens": tin,
+        "total_output_tokens": to,
+    }
+
+
+def scale_sessions(sessions: list[list[TraceRound]], factor: float
+                   ) -> list[list[TraceRound]]:
+    """Shrink every context by `factor`, preserving cache structure.
+
+    Needed because the real traffic will not fit. At a 132k median context and
+    144 KiB/token of KV, one conversation is ~19GB -- an L40S holds two, which
+    is too few to study batching at all. Scaling keeps the *ratios* that drive
+    serving behaviour (hit rate, input:output, increment size) while fitting
+    the memory available.
+
+    This is a compromise and should be recorded as one: a scaled replay tests
+    the same *structure* at a different absolute scale, and results from it do
+    not automatically transfer to full-size contexts, where KV pressure and
+    eviction dominate.
+    """
+    out = []
+    for s in sessions:
+        rs = []
+        for r in s:
+            inp = max(16, int(r.input_tokens * factor))
+            cached = min(int(r.cached_tokens * factor), inp)
+            rs.append(TraceRound(
+                session=r.session, index=r.index, input_tokens=inp,
+                cached_tokens=cached, new_tokens=max(1, inp - cached),
+                output_tokens=max(1, int(r.output_tokens * factor)),
+                model=r.model, provider=r.provider))
+        out.append(rs)
+    return out

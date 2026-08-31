@@ -1095,16 +1095,56 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
     return rec
 
 
-# Live OpenRouter table for qwen/qwen3.8-27b, fetched 2026-08-30.
+# qwen/qwen3.8-27b provider table, from the OpenRouter model page 2026-08-30.
 # (provider, input $/M, output $/M, cache read $/M)
 MARKET_QWEN38_27B = [
-    ("Reka", 0.250, 3.000, 0.025), ("AkashML", 0.350, 2.550, 0.050),
+    ("Reka", 0.350, 2.550, 0.050), ("AkashML", 0.350, 2.550, 0.050),
     ("Chutes", 0.350, 2.750, 0.035), ("Parasail", 0.350, 3.200, 0.050),
     ("Phala", 0.400, 3.000, 0.150), ("CoreWeave", 0.400, 3.000, 0.150),
     ("Novita", 0.420, 3.000, 0.085), ("Alibaba", 0.425, 2.550, 0.085),
     ("Cloudflare", 0.450, 3.200, 0.050), ("Venice", 0.450, 3.200, None),
     ("Io Net", 0.480, 3.400, 0.250),
 ]
+
+# What providers *actually* realise, which OpenRouter publishes alongside the
+# list prices. This is ground truth for two things we previously had to assume:
+#
+#   1. The effective-price formula. eff = h*cache_read + (1-h)*listed reproduces
+#      their published effective price to within 0.1% on 9 of 11 providers.
+#   2. Achievable cache hit rate. Not 95% -- the range is 0% to 82%, and it is
+#      plainly a *serving-system* property: Novita realises 81.8% and Chutes
+#      69.5% while Venice and Cloudflare realise 0.0% on the same model and the
+#      same marketplace traffic. Failing to implement prompt caching costs them
+#      3x on effective input price.
+#
+# (provider, effective in $/M, realised cache hit rate, share of 1d tokens)
+MARKET_REALISED = [
+    ("Chutes", 0.1310, 0.695, 0.095), ("Novita", 0.1459, 0.818, 0.143),
+    ("Alibaba", 0.1961, 0.662, 0.132), ("Parasail", 0.2263, 0.412, 0.053),
+    ("Phala", 0.2281, 0.688, 0.206), ("AkashML", 0.2285, 0.405, 0.104),
+    ("CoreWeave", 0.2336, 0.665, 0.067), ("Reka", 0.2622, 0.293, 0.167),
+    ("Venice", 0.4500, 0.000, 0.017), ("Cloudflare", 0.4500, 0.000, 0.009),
+    ("Io Net", 0.4624, 0.076, 0.006),
+]
+
+# Weighted average price actually paid across the market.
+MARKET_WEIGHTED_IN = 0.2149
+MARKET_WEIGHTED_OUT = 2.866
+
+# The target: beat the best realised effective input price.
+MARKET_BEST_EFF_IN = 0.1310          # Chutes
+
+# Real traffic for this model is overwhelmingly input-dominated: 17.6B prompt
+# tokens against 448M completion + 508M reasoning in one day, so roughly 18:1
+# counting reasoning as output, 39:1 counting only completion. Our synthetic
+# workloads run about 2:1, which models chat rather than the agentic coding
+# traffic this model actually serves -- the top apps on it are pi, Hermes
+# Agent, Claude Code and DeepSeek Harness.
+#
+# This matters for the objective: at 18:1, input is roughly 60% of revenue at
+# market prices, so effective *input* price really is the number that decides
+# competitiveness, and prefill is where the cost sits.
+MARKET_INPUT_OUTPUT_RATIO = 18.4
 
 
 @app.local_entrypoint()
