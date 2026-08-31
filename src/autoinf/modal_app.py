@@ -896,7 +896,6 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
     from autoinf import overlay, server_metrics
     from autoinf.bench import wait_until_ready, warmup
     from autoinf.config import SLO, ServingConfig, WorkloadConfig
-    from autoinf.gpuwatch import GpuWatch
     from autoinf.loadgen import client_health, install_fast_loop, run_concurrent_users
     from autoinf.metrics import detect_collapse, percentile, summarize
     from autoinf.workload import build_sessions
@@ -942,15 +941,17 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
 
             for n_users in levels:
                 for rep in range(repeats):
+                    # Nothing samples the GPU during a measured window. Polling
+                    # nvidia-smi 4x/second from this container starved the load
+                    # generator and moved N* from 128 to 32 -- the instrument
+                    # changed the thing being measured, worst at high load where
+                    # the answer lives.
                     before = asyncio.run(server_metrics.scrape(SERVER_URL))
-                    watch = GpuWatch().start()
                     t0 = time.perf_counter()
                     res = asyncio.run(run_concurrent_users(
                         make_session, SERVER_URL, sc.model, n_users,
                         seconds_per_level))
                     wall = time.perf_counter() - t0
-                    watch.stop()
-                    gw = watch.summary(wall, sc.n_gpu)
                     after = asyncio.run(server_metrics.scrape(SERVER_URL))
 
                     warm = min(20.0, 0.2 * seconds_per_level)
@@ -961,19 +962,15 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                     c_tok = ctr.get("sglang:cached_tokens_total", 0.0)
                     g_tok = ctr.get("sglang:generation_tokens_total", 0.0)
 
-                    # GPU-seconds come from sampled utilisation, not wall time
-                    # and not from SGLang: `forward_execution_seconds_total` is
-                    # defined but never emitted outside DP-cooperation mode
-                    # (verified on a live server). Charging idle GPU time to the
-                    # few tokens processed at low load is what made the first
-                    # attribution unfittable.
+                    # These levels are for the SLO frontier, not for cost: at
+                    # low concurrency the GPU idles, so wall time here would
+                    # charge idle capacity to the few tokens that passed
+                    # through. Cost attribution happens in phase B, at
+                    # saturation, where wall time is a valid measure of work.
                     lvl = {
                         "n_users": n_users, "repeat": rep,
                         "wall_s": round(wall, 1),
-                        "wall_gpu_seconds": gw.get("wall_gpu_seconds"),
-                        "gpu_seconds": gw.get("gpu_seconds"),
-                        "gpu_busy_frac": gw.get("busy_frac"),
-                        "gpu_watch": gw,
+                        "gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
                         "goodput_rps": m["goodput_rps"],
                         "throughput_rps": m["throughput_rps"],
                         "good_frac": m["good_frac"],
@@ -994,56 +991,84 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                           f"  SLO {lvl['good_frac'] * 100:>5.1f}%"
                           f"  TTFT p99 {(lvl['ttft_p99_ms'] or 0):>7.0f}ms"
                           f"  hit {(lvl['cache_hit_rate'] or 0):.2f}"
-                          f"  busy {(lvl['gpu_busy_frac'] or 0):.2f}"
+
                           f"  {'OK' if lvl['meets_slo'] else 'MISS'}", flush=True)
 
-            # ── phase B: mixes for cost attribution ──────────────
-            # The sweep above varies *scale*, not *mix*: every level runs the
-            # same conversations, so its token-class ratios barely move and the
-            # three per-token costs are not separable from it alone (the design
-            # matrix is near rank-1 in ratio terms). These four workloads exist
-            # to span the space -- input-dominated, output-dominated,
-            # cache-dominated, balanced -- at one fixed sub-saturation load.
-            from autoinf.loadgen import run_trace_sp
-            from autoinf.workload import build_trace, suite
+            # ── phase B: cost attribution, deliberately at saturation ──
+            # A different question from phase A, so a different operating point.
+            # Phase A asks "what load holds the SLOs". This asks "what does a
+            # token cost", and the honest denominator is GPU time actually spent
+            # working.
+            #
+            # **Wall time equals work time only when the GPU is busy throughout**,
+            # so each mix is driven at 2x N* -- past the SLO frontier on purpose.
+            # Latency there is irrelevant: we are measuring cost, not service
+            # quality. Two cheaper denominators were tried and both failed:
+            # SGLang's `forward_execution_seconds_total` is declared but never
+            # emitted, and `nvidia-smi utilization.gpu` pins near 100% at any
+            # load (it reports kernel residency, not work) while polling it also
+            # starved the load generator and moved N* from 128 to 32.
+            #
+            # The mixes span the space the regression needs: input-dominated,
+            # output-dominated, cache-dominated, balanced. The concurrency sweep
+            # alone cannot do this -- it varies scale, not ratio.
+            ok_lv = [l["n_users"] for l in rec["levels"] if l["meets_slo"]]
+            n_star = max(ok_lv) if ok_lv else max(levels)
+            sat_users = max(8, n_star * 2)
+            print(f"\n-- attribution mixes at N={sat_users} "
+                  f"(2x N*={n_star}), saturated on purpose --", flush=True)
 
-            attr_users = max(4, (max(levels) // 4) or 4)
-            print(f"\n-- attribution mixes at ~{attr_users} concurrent --", flush=True)
-            for name in ("prefill_heavy", "decode_heavy", "prefix_heavy", "short_chat"):
-                wc = suite(seed=0)[name]
-                trace = build_trace(wc)
+            mix_specs = {
+                "prefill_heavy": dict(turns_mu=1.0,
+                                      category_mix=("summarize", "rag")),
+                "decode_heavy": dict(turns_mu=1.0,
+                                     category_mix=("creative", "code_gen")),
+                "cache_heavy": dict(turns_mu=12.0,
+                                    category_mix=("explain", "chat")),
+                "balanced": dict(turns_mu=3.0,
+                                 category_mix=("code_debug", "analysis",
+                                               "chat", "explain")),
+            }
+            for name, kw in mix_specs.items():
+                # think_mu very negative => effectively no think time, so the
+                # population stays saturated rather than idling between turns.
+                wc = WorkloadConfig(name=name, multi_turn=True, turns_max=20,
+                                    think_mu=-4.0, think_sigma=0.2,
+                                    shared_prefix_len=300, n_requests=600,
+                                    seed=1, **kw)
+                pool_m = build_sessions(wc).sessions
+                mk = lambda uid, n, _p=pool_m: _p[(uid * 7919 + n * 104729) % len(_p)]
+
                 before = asyncio.run(server_metrics.scrape(SERVER_URL))
-                watch = GpuWatch().start()
                 t0 = time.perf_counter()
-                res = asyncio.run(run_trace_sp(trace, SERVER_URL, sc.model))
+                res = asyncio.run(run_concurrent_users(
+                    mk, SERVER_URL, sc.model, sat_users, seconds_per_level))
                 wall = time.perf_counter() - t0
-                watch.stop()
-                gw = watch.summary(wall, sc.n_gpu)
                 after = asyncio.run(server_metrics.scrape(SERVER_URL))
                 ctr = (server_metrics.diff(before, after) if (before and after)
                        else {}).get("counters", {})
                 p_tok = ctr.get("sglang:prompt_tokens_total", 0.0)
                 c_tok = ctr.get("sglang:cached_tokens_total", 0.0)
                 g_tok = ctr.get("sglang:generation_tokens_total", 0.0)
-                m = summarize(res, sl, warmup_s=min(15.0, 0.15 * trace.duration_s))
+                m = summarize(res, sl, warmup_s=min(15.0, 0.2 * seconds_per_level))
                 row = {
-                    "mix": name, "wall_s": round(wall, 1),
-                    "wall_gpu_seconds": gw.get("wall_gpu_seconds"),
-                    "gpu_seconds": gw.get("gpu_seconds"),
-                    "gpu_busy_frac": gw.get("busy_frac"),
-                    "gpu_watch": gw,
+                    "mix": name, "n_users": sat_users,
+                    "wall_s": round(wall, 1),
+                    "gpu_seconds": round(wall * max(1, sc.n_gpu), 1),
                     "prompt_tokens": p_tok, "cached_tokens": c_tok,
                     "uncached_tokens": max(0.0, p_tok - c_tok),
                     "output_tokens": g_tok,
                     "cache_hit_rate": round(c_tok / p_tok, 4) if p_tok else None,
-                    "goodput_rps": m["goodput_rps"], "n_failed": m["n_failed"],
+                    "throughput_rps": m["throughput_rps"],
+                    "n_failed": m["n_failed"],
+                    "client_health": client_health(res)["verdict"],
                 }
                 rec.setdefault("mixes", []).append(row)
-                print(f"  {name:<15} in {row['uncached_tokens']:>9.0f} uncached"
-                      f" {row['cached_tokens']:>9.0f} cached"
+                print(f"  {name:<15} uncached {row['uncached_tokens']:>9.0f}"
+                      f"  cached {row['cached_tokens']:>9.0f}"
                       f"  out {row['output_tokens']:>9.0f}"
-                      f"  {row['gpu_seconds']:>7.1f} gpu-s"
-                      f"  busy {(row['gpu_busy_frac'] or 0):.2f}", flush=True)
+                      f"  {row['gpu_seconds']:>6.1f} gpu-s"
+                      f"  hit {(row['cache_hit_rate'] or 0):.2f}", flush=True)
 
             rec["status"] = "ok"
         except Exception as e:
