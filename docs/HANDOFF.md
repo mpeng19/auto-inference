@@ -100,13 +100,38 @@ and in:out ratio, because full-size contexts often do not fit.
   ~a fifth of an uncached one. Roofline agrees independently: measured rates
   are 40-44% of ceiling.
 
-**Qwen3.8-27B on 8xH100 TP=8/EP=8, full-scale TraceLab:**
+**Qwen3.8-27B on 8xH100 TP=8/EP=8, full-scale TraceLab** (run
+`1788189825`, the first trustworthy one):
 
-- N* = 4 (TTFT-bound at 2s), goodput 0.68 rps, TPOT 7.3ms.
-- TP=8 fixed decode entirely: TPOT 54ms on 1 GPU -> 7.3ms on 8.
-- **TTFT is the binding constraint.** At 88% hit on a 132k context you still
-  prefill ~16k new tokens per turn.
-- **The cost attribution from this run is NOT trustworthy** — see §5.
+- N* = 4 (TTFT-bound at 2s), goodput 0.79 rps, TPOT 8.7ms, cache hit 0.88.
+- TP=8 fixed decode entirely: TPOT 54ms on 1 GPU -> 8.7ms on 8.
+- **TTFT is the binding constraint**, and it is what caps N* at 4. At 88% hit
+  on a 132k context you still prefill ~16k new tokens per turn. **Raising N*
+  by improving TTFT is the clearest optimisation target.**
+- Cost attribution, all three classes identified (spans 472x / 348x / 35x,
+  fit 0.9901, condition 1.3):
+
+      uncached input  1.403e-04 GPU-s/token  -> $0.0974/M raw
+      cached input    4.487e-05              -> $0.0312/M raw
+      output          2.331e-03              -> $1.6188/M raw
+
+  **cache_discount = 0.320** — a cached token costs ~a third of an uncached
+  one. Cheaper, as the thesis requires, but less so than Qwen3-4B's 0.197 and
+  well above the ~0.10 the market prices cache reads at. Weak support for the
+  idea that this model's 48 linear-attention layers cache less effectively
+  than its 16 full-attention ones.
+
+- Sanity: market *listed* input ($0.35-$0.48/M) is 3.6-4.9x our raw cost,
+  which is the plausible size of a utilisation-plus-margin gap.
+
+- **The result hinges entirely on utilisation.** At 60% we beat every provider
+  on effective input price; the break-even against the best (Chutes, $0.1310
+  at 69.5% hit) is **49% utilisation**. Below that we lose. Utilisation is not
+  measurable here — it is a property of the traffic a marketplace sends — so
+  no "we beat the market" claim should be made without stating it.
+
+- Volume: 100B input tokens/week is 1.25 req/s, about 1.6 nodes of 8xH100,
+  roughly $23k/month of compute at $2.50/GPU-hr.
 
 ---
 

@@ -157,11 +157,20 @@ def report(rec: dict) -> None:
         r = rank_vs_market(e, MARKET_QWEN38_27B, h)
         print(f"{h:>7.3f}{e:>13.4f}{r['rank']:>6}/{r['of']:<3}")
 
-    if rec["serving"].get("model", "") != "Qwen/Qwen3.8-27B":
-        print(f"\n  !! RANK IS NOT A COMPETITIVE RESULT: measured "
-              f"{rec['serving'].get('model','?').split('/')[-1]}, but the market "
-              f"table is Qwen3.8-27B. A smaller model serves cheaper for reasons "
-              f"that have nothing to do with the serving stack.")
+    # Compare model *families*, not exact strings: "Qwen3.8-27B-FP8" is the
+    # same model as the market table's "Qwen3.8-27B", just quantised. The
+    # earlier exact-match check fired a false warning on a valid comparison.
+    served = rec["serving"].get("model", "").split("/")[-1]
+    family = served.replace("-FP8", "").replace("-Instruct", "")
+    if not family.startswith("Qwen3.8-27B"):
+        print(f"\n  !! RANK IS NOT A COMPETITIVE RESULT: measured {served}, but "
+              f"the market table is Qwen3.8-27B. A different model serves at a "
+              f"different cost for reasons unrelated to the serving stack.")
+    else:
+        print(f"\n  Comparison is valid: {served} is the market table's model.")
+        print(f"  But price still rests on assumptions the harness cannot check:"
+              f" utilisation {p['utilization']:.0%} and margin {p['margin']:.0%}."
+              f" At 30% utilisation every figure above doubles.")
 
 
 def cmd_collect(a) -> int:
