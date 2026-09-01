@@ -1,5 +1,4 @@
 """A stack is identified by its content, because that is the cache key."""
-import pytest
 
 from simulator.stack import InferenceStack
 

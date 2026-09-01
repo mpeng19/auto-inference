@@ -20,6 +20,7 @@ dev = [
     "pytest-aiohttp>=1.1.1",
     "pytest-asyncio>=1.4.0",
     "requests>=2.34.2",
+    "ruff>=0.16.5",
     "seaborn>=0.13.2",
 ]
 
@@ -32,7 +33,29 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/simulator"]
+# The market snapshot is package data, not repo data -- see price.market.
+artifacts = ["src/simulator/data/*.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+# The product only. `research/` is an archive: it is preserved as it was
+# written, and reformatting it would destroy the thing it exists to record.
+src = ["src"]
+include = ["src/**/*.py", "tests/**/*.py", "ops/**/*.py"]
+line-length = 90
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E501",    # line length is checked by the formatter, not the linter
+    "B008",    # dataclass field defaults read better than the alternative
+    "SIM108",  # a ternary is not always clearer than an if
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests say what they mean; a lambda or a magic number in an assertion is fine.
+"tests/**" = ["E731", "B011"]

@@ -1,8 +1,7 @@
 """Pricing arithmetic, and the gate that refuses to price what it should not."""
 import pytest
 
-from simulator.price.direct import (gpu_seconds_per_request, price_direct,
-                                    usable)
+from simulator.price.direct import gpu_seconds_per_request, price_direct, usable
 from simulator.price.market import Economics, Market
 
 LEVEL = {"server_counters": {
@@ -55,7 +54,6 @@ def test_gate_accepts_the_real_level():
 
 def test_price_times_capacity_is_exactly_the_hardware_bill():
     """The identity that proves utilisation is not double-counted anywhere."""
-    m = Market.load()
     for n_gpu, rate, u in ((1, 3.00, 0.50), (2, 3.00, 0.53), (8, 2.50, 0.31)):
         e = Economics(gpu_s_per_request=7.341, n_gpu=n_gpu,
                       rate_per_gpu_hour=rate, utilisation=u)

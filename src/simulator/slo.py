@@ -43,7 +43,7 @@ class Bound:
         return f"{self.stat} {self.metric.upper()}"
 
     @classmethod
-    def parse(cls, spec: str) -> "Bound":
+    def parse(cls, spec: str) -> Bound:
         """`'ttft:p90:2818'` -> Bound. For CLI and config files."""
         metric, stat, limit = spec.split(":")
         return cls(metric.strip().lower(), stat.strip().lower(), float(limit))
@@ -57,7 +57,7 @@ class Bound:
         if not self.stat.startswith("p"):
             return 0
         q = int(self.stat[1:])
-        return 0 if q <= 50 else int(round(3 / (1 - q / 100)))
+        return 0 if q <= 50 else round(3 / (1 - q / 100))
 
 
 # Measured from OpenRouter's own published percentiles for this model
@@ -93,7 +93,7 @@ class SLO:
     max_failed: int = 0
 
     @classmethod
-    def parse(cls, specs: str, **kw) -> "SLO":
+    def parse(cls, specs: str, **kw) -> SLO:
         """`'ttft:p90:2818,tpot:mean:20'` -> SLO."""
         return cls(bounds=tuple(Bound.parse(s) for s in specs.split(",") if s.strip()),
                    **kw)
@@ -159,7 +159,7 @@ class SLO:
                 "max_failed": self.max_failed}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "SLO":
+    def from_dict(cls, d: dict) -> SLO:
         return cls(bounds=tuple(Bound(x["metric"], x["stat"], x["limit_ms"],
                                       x.get("note", "")) for x in d["bounds"]),
                    min_good_frac=d.get("min_good_frac", 0.99),

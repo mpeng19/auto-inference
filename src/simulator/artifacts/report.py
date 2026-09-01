@@ -13,7 +13,7 @@ def render(sim, res) -> str:
     add = L.append
     add("=" * 72)
     add(f"  {sim.model}   {sim.n_gpu}x{sim.gpu}   stack: {sim.stack.describe()}")
-    add(f"  ${sim.rate_per_gpu_hour:.2f}/GPU-hr, utilisation {sim.util:.0%}, break-even")
+    add(f"  {sim.cost_basis}, utilisation {sim.util:.0%}, break-even")
     add(f"  SLO: {sim.slo.describe()}")
     add(f"  eval digest {sim.digest()}   stack digest {sim.stack.digest}")
     if sim.note:

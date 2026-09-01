@@ -54,7 +54,7 @@ def compare(a: dict[str, str], b: dict[str, str]) -> dict:
             exact += 1
             per_key[k] = {"status": "identical", "len": len(x)}
             continue
-        i = next((j for j, (cx, cy) in enumerate(zip(x, y)) if cx != cy),
+        i = next((j for j, (cx, cy) in enumerate(zip(x, y, strict=False)) if cx != cy),
                  min(len(x), len(y)))
         per_key[k] = {
             "status": "diverged",

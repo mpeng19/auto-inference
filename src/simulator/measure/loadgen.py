@@ -43,9 +43,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
-import multiprocessing as mp
-import os
 import time
 
 from .metrics import RequestResult
@@ -95,7 +92,9 @@ def client_health(results, plan_info: dict | None = None) -> dict:
     if not results:
         return {"verdict": "no data"}
     lags = sorted(r.dispatch_lag_ms for r in results)
-    q = lambda p: lags[min(len(lags) - 1, int(len(lags) * p))]
+    def q(p):
+        return lags[min(len(lags) - 1, int(len(lags) * p))]
+
     p99, mx = q(0.99), lags[-1]
 
     # A lag that grows through the run means the client fell progressively

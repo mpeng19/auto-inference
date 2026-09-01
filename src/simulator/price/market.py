@@ -18,9 +18,10 @@ serving stack is. The stack sets only where the curve stops falling.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 import pathlib
+from dataclasses import dataclass
 
+from .direct import effective_in
 
 # qwen/qwen3.8-27b provider table, from the OpenRouter model page 2026-08-30.
 # (provider, input $/M, output $/M, cache read $/M)
@@ -108,7 +109,7 @@ def rank_vs_market(eff: float, market: list[tuple[str, float, float, float | Non
     `market` rows are (provider, input $/M, output $/M, cache_read $/M).
     """
     scored = []
-    for name, pin, pout, pcache in market:
+    for name, pin, _pout, pcache in market:
         e = pin if pcache is None else effective_in(pin, pcache, hit_rate)
         scored.append((name, e))
     scored.sort(key=lambda r: r[1])
@@ -173,27 +174,27 @@ SNAPSHOT_NAME = "market-qwen-qwen3.8-27b.json"
 
 
 def _find_snapshot() -> pathlib.Path:
-    """The market snapshot is data, not code, so it may sit outside the package.
+    """Locate the market snapshot.
 
-    Checked in order: an explicit AUTOINF_MARKET_DATA, the repo checkout, and
-    the working directory. Failing all three, say which paths were tried --
-    a missing denominator silently turning into a wrong market share would be
-    much worse than a stack trace.
+    It ships **inside the package**: it is only meaningful at simulation scope
+    -- nothing outside `simulator` has any use for OpenRouter's daily volumes
+    -- and a price quoted against a denominator that silently went missing
+    would be far worse than an import-time failure.
+
+    `SIMULATOR_MARKET_DATA` overrides it, which is how you price against a
+    different model or a fresher pull without editing the package.
     """
     import os
     tried = []
-    env = os.environ.get("AUTOINF_MARKET_DATA")
-    if env:
+    if env := os.environ.get("SIMULATOR_MARKET_DATA"):
         tried.append(pathlib.Path(env))
-    here = pathlib.Path(__file__).resolve()
-    tried += [here.parents[3] / "data" / SNAPSHOT_NAME,
-              pathlib.Path.cwd() / "data" / SNAPSHOT_NAME]
+    tried.append(pathlib.Path(__file__).resolve().parents[1] / "data" / SNAPSHOT_NAME)
     for t in tried:
         if t.is_file():
             return t
     raise FileNotFoundError(
         "no market snapshot found; tried " + ", ".join(str(t) for t in tried)
-        + ".  Refresh it with `make market`, or set AUTOINF_MARKET_DATA.")
+        + ".  Refresh it with `make market`, or set SIMULATOR_MARKET_DATA.")
 
 
 @dataclass(frozen=True)
@@ -219,7 +220,7 @@ class Market:
 
     @classmethod
     def load(cls, path: str | pathlib.Path | None = None,
-             window_days: int = 7) -> "Market":
+             window_days: int = 7) -> Market:
         """Read a `market_pull` snapshot.
 
         `window_days` is the trailing window used for the demand denominator.

@@ -10,7 +10,8 @@ the metric that refuses to reward that.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+import itertools
+from dataclasses import dataclass
 
 from ..slo import SLO
 
@@ -172,7 +173,7 @@ def _error_counts(failed: list[RequestResult]) -> dict:
     return counts
 
 
-def detect_collapse(results: list["RequestResult"], n_buckets: int = 12,
+def detect_collapse(results: list[RequestResult], n_buckets: int = 12,
                     escalation_factor: float = 3.0) -> dict:
     """Did latency run away during the trace?
 
@@ -225,7 +226,7 @@ def detect_collapse(results: list["RequestResult"], n_buckets: int = 12,
     late = sum(med[-third:]) / third
     peak = max(med)
     ends_high = med[-1] >= 0.7 * peak
-    rises = sum(1 for a, b in zip(med, med[1:]) if b > a)
+    rises = sum(1 for a, b in itertools.pairwise(med) if b > a)
     monotonic_frac = rises / max(1, len(med) - 1)
 
     collapsed = (late > early * escalation_factor) and ends_high

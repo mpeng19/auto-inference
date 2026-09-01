@@ -34,6 +34,15 @@ from .price.market import Economics, Market
 from .slo import MARKET_SLO, SLO, Bound
 from .stack import InferenceStack
 
-__all__ = ["Simulator", "EvalResult", "Point", "InferenceStack",
-           "SLO", "Bound", "MARKET_SLO", "Market", "Economics"]
+__all__ = [
+           "MARKET_SLO",
+           "SLO",
+           "Bound",
+           "Economics",
+           "EvalResult",
+           "InferenceStack",
+           "Market",
+           "Point",
+           "Simulator",
+]
 __version__ = "0.1.0"

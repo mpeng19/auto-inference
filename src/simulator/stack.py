@@ -63,11 +63,11 @@ class InferenceStack:
 
     # ── construction ────────────────────────────────────────────────────
     @classmethod
-    def stock(cls) -> "InferenceStack":
+    def stock(cls) -> InferenceStack:
         return cls(label="stock")
 
     @classmethod
-    def from_dir(cls, root: str | pathlib.Path) -> "InferenceStack":
+    def from_dir(cls, root: str | pathlib.Path) -> InferenceStack:
         """Read a directory that mirrors the sglang package under `sglang/`.
 
         `<root>/sglang/srt/managers/schedule_policy.py` replaces
@@ -97,7 +97,7 @@ class InferenceStack:
 
     @classmethod
     def from_files(cls, mapping: dict[str, str | pathlib.Path],
-                   label: str = "") -> "InferenceStack":
+                   label: str = "") -> InferenceStack:
         return cls(files={k: pathlib.Path(v).read_text() for k, v in mapping.items()},
                    label=label or f"{len(mapping)} file(s)")
 
@@ -129,7 +129,7 @@ class InferenceStack:
                 "upstream_sha": self.upstream_sha, "label": self.label}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "InferenceStack":
+    def from_dict(cls, d: dict) -> InferenceStack:
         return cls(files=d.get("files", {}), patches=d.get("patches", {}),
                    upstream_sha=d.get("upstream_sha", {}), label=d.get("label", ""))
 

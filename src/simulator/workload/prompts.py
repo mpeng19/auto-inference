@@ -25,11 +25,7 @@ CHARS_PER_TOKEN = 4.0   # English text, close enough for sizing
 
 
 # ── slot vocabularies ────────────────────────────────────────────
-_TOPICS = """distributed systems kubernetes rate limiting database indexing
-caching strategies message queues load balancing API design microservices
-observability incident response capacity planning data modelling schema
-migration authentication authorization feature flags CI pipelines
-infrastructure as code cost optimisation on-call rotations postmortems""".split("\n")
+_TOPICS = ["distributed systems kubernetes rate limiting database indexing", "caching strategies message queues load balancing API design microservices", "observability incident response capacity planning data modelling schema", "migration authentication authorization feature flags CI pipelines", "infrastructure as code cost optimisation on-call rotations postmortems"]
 _TOPICS = [t.strip() for line in _TOPICS for t in line.split("  ") if t.strip()]
 _TOPICS = ["distributed systems", "kubernetes", "rate limiting", "database indexing",
            "caching strategies", "message queues", "load balancing", "API design",

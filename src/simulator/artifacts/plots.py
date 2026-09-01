@@ -23,10 +23,12 @@ from __future__ import annotations
 import pathlib
 
 import matplotlib
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt          # noqa: E402
-import numpy as np                       # noqa: E402
-import seaborn as sns                    # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+
 
 def _num(v, _pos=None):
     """Log axes with plain numbers: 0.05, 0.3, 3 -- never 10^-1."""
@@ -64,13 +66,13 @@ def slo_frontier(sim, res, path: pathlib.Path) -> str:
     fig, axes = plt.subplots(1, len(bounds), figsize=(4.6 * len(bounds), 4.4),
                              dpi=DPI, squeeze=False)
     star = res.best
-    for ax, b in zip(axes[0], bounds):
+    for ax, b in zip(axes[0], bounds, strict=True):
         xs = [p.n_users for p in res.curve]
         ys = [next((c["value"] for c in p.checks if c["label"] == b.label), None)
               for p in res.curve]
         okm = [p.meets_slo for p in res.curve]
         ax.plot(xs, ys, color=SERIES, lw=2, zorder=3)
-        for x, y, ok in zip(xs, ys, okm):
+        for x, y, ok in zip(xs, ys, okm, strict=True):
             if y is None:
                 continue
             ax.scatter([x], [y], s=90, zorder=5, linewidth=2,
@@ -80,8 +82,8 @@ def slo_frontier(sim, res, path: pathlib.Path) -> str:
         # Headroom above whichever is higher, the limit or the data, so the
         # N* label has somewhere to sit that is not on top of the limit line.
         vals = [v for v in ys if v is not None]
-        top = max(vals + [b.limit_ms])
-        ax.set_ylim(min(vals + [b.limit_ms]) * 0.92, top * 1.14)
+        top = max([*vals, b.limit_ms])
+        ax.set_ylim(min([*vals, b.limit_ms]) * 0.92, top * 1.14)
         ax.annotate(f"limit {b.limit_ms:g} ms", (xs[-1], b.limit_ms), color=LIMIT,
                     fontsize=8.5, ha="right", textcoords="offset points",
                     xytext=(0, 6))
@@ -140,7 +142,7 @@ def price_vs_share(sim, res, path: pathlib.Path) -> str:
     # points sit within a tenth of the axis of each other.
     span = (max(xs) - min(xs)) or 1.0
     prev_x, above = None, True
-    for p, x, y in sorted(zip(res.curve, xs, ys), key=lambda t: t[1]):
+    for p, x, y in sorted(zip(res.curve, xs, ys, strict=True), key=lambda t: t[1]):
         if prev_x is not None and (x - prev_x) < 0.12 * span:
             above = not above
         else:
@@ -149,7 +151,7 @@ def price_vs_share(sim, res, path: pathlib.Path) -> str:
                     xytext=(0, 13 if above else -19), ha="center",
                     fontsize=8.5, color=INK)
         prev_x = x
-    lo, hi = min(ys + [ref]), max(ys)
+    lo, hi = min([*ys, ref]), max(ys)
     ax.set_ylim(lo - 0.13 * (hi - lo), hi + 0.11 * (hi - lo))
     ax.axhline(ref, color=LIMIT, lw=1.6, ls=(0, (5, 3)), zorder=2)
     ax.annotate(f"{best_provider.name} ${ref:.2f} — cheapest provider",
@@ -177,7 +179,8 @@ def price_vs_share(sim, res, path: pathlib.Path) -> str:
         bx.annotate(f"{best_provider.name} ${ref:.2f}", (s[0] * 100, ref),
                     textcoords="offset points", xytext=(0, 6), fontsize=8.5,
                     color=LIMIT)
-        bx.set_xscale("log"); bx.set_yscale("log")
+        bx.set_xscale("log")
+        bx.set_yscale("log")
         bx.minorticks_off()
         for axis in (bx.xaxis, bx.yaxis):
             axis.set_major_formatter(matplotlib.ticker.FuncFormatter(_num))
@@ -196,7 +199,7 @@ def price_vs_share(sim, res, path: pathlib.Path) -> str:
 
 def _caption(sim, res) -> str:
     m = res.market or sim.market
-    return (f"{sim.model} · {sim.n_gpu}x{sim.gpu} · ${sim.rate_per_gpu_hour:.2f}/GPU-hr · "
+    return (f"{sim.model} · {sim.n_gpu}x{sim.gpu} · {sim.cost_basis} · "
             f"utilisation {sim.util:.0%} · break-even · stack {sim.stack.describe()[:60]}\n"
             f"SLO {sim.slo.describe()} · market {m.requests_per_day:,.0f} req/day at "
             f"{m.in_per_request:,.0f} in / {m.out_per_request:,.0f} out per request")

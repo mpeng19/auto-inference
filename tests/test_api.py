@@ -98,8 +98,36 @@ def test_utilisation_is_reported_not_hidden(root, sweep):
     """It is the largest lever and cannot be measured, so it must be visible."""
     sim(root, utilisation=0.25).finish(sweep)
     cfg = json.loads((root / "config.json").read_text())
-    assert cfg["utilisation"] == 0.25
+    assert cfg["assumptions"]["utilisation"] == 0.25
     assert "utilisation 25%" in (root / "report.txt").read_text()
+
+
+def test_every_assumption_is_recorded(root, sweep):
+    """None of these can be validated from inside the harness, and all of them
+    scale the answer, so a result that does not carry them is unreadable."""
+    sim(root).finish(sweep)
+    a = json.loads((root / "config.json").read_text())["assumptions"]
+    for k in ("rate_per_gpu_hour", "gpu_provider", "cost_basis", "utilisation",
+              "margin", "market_as_of", "market_requests_per_day",
+              "in_per_request", "out_per_request"):
+        assert k in a, k
+
+
+def test_rate_comes_from_the_catalog_when_a_provider_is_named(root):
+    from simulator import Simulator
+    assert Simulator(root_dir=root).rate_per_gpu_hour == 3.00
+    s = Simulator(root_dir=root, gpu_provider="nebius-committed")
+    assert s.rate_per_gpu_hour == 2.50
+    assert "nebius-committed" in s.cost_basis
+
+
+def test_serverless_retail_is_refused_as_a_serving_basis(root):
+    from simulator import Simulator
+    with pytest.raises(ValueError, match="retail"):
+        Simulator(root_dir=root, gpu="L40S", gpu_provider="modal")
+    ok = Simulator(root_dir=root, gpu="L40S", gpu_provider="modal",
+                   allow_retail_rate=True)
+    assert ok.rate_per_gpu_hour == 1.95
 
 
 def test_good_frac_is_a_runtime_gate_not_a_rescoring_one(root, sweep):

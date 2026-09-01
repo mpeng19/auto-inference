@@ -20,14 +20,23 @@ seconds for the running batch.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
+import pathlib
 import subprocess
 import time
 from dataclasses import asdict
 
 import modal
 
-APP_NAME = "auto-inference"
+# Everything a fresh clone needs to override. Nothing here is account-specific:
+# the volumes are created on first use in whatever workspace you are logged
+# into, and the HF secret is optional.
+APP_NAME = os.environ.get("SIMULATOR_APP_NAME", "auto-inference")
+HF_CACHE_VOLUME = os.environ.get("SIMULATOR_HF_VOLUME", "auto-inference-hf-cache")
+RESULTS_VOLUME = os.environ.get("SIMULATOR_RESULTS_VOLUME", "auto-inference-results")
+HF_SECRET = os.environ.get("SIMULATOR_HF_SECRET", "huggingface")
 
 SGLANG_VERSION = "0.5.18"
 CUDA_TAG = "12.8.1-devel-ubuntu22.04"
@@ -36,8 +45,25 @@ PY_VERSION = "3.12"
 SERVER_PORT = 30000
 SERVER_URL = f"http://127.0.0.1:{SERVER_PORT}"
 
-hf_cache = modal.Volume.from_name("auto-inference-hf-cache", create_if_missing=True)
-results_vol = modal.Volume.from_name("auto-inference-results", create_if_missing=True)
+hf_cache = modal.Volume.from_name(HF_CACHE_VOLUME, create_if_missing=True)
+results_vol = modal.Volume.from_name(RESULTS_VOLUME, create_if_missing=True)
+
+
+def _hf_secret() -> list:
+    """Hugging Face auth, only if the user has set it up.
+
+    Deliberately optional. Both Qwen3 checkpoints we use are Apache-2.0 and
+    ungated, so a fresh clone needs no token at all -- requiring one would mean
+    a new user's first `make deploy` fails on a secret they have no reason to
+    have. Create it (`modal secret create huggingface HF_TOKEN=...`) only for a
+    gated model or if you hit anonymous rate limits.
+    """
+    try:
+        s = modal.Secret.from_name(HF_SECRET)
+        s.hydrate()
+        return [s]
+    except Exception:
+        return []
 
 image = (
     modal.Image.from_registry(f"nvidia/cuda:{CUDA_TAG}", add_python=PY_VERSION)
@@ -94,7 +120,7 @@ def _provenance() -> dict:
 @app.function(
     image=image, gpu="H100", cpu=16.0,
     volumes={"/cache": hf_cache, "/results": results_vol},
-    secrets=[modal.Secret.from_name("huggingface")],
+    secrets=_hf_secret(),
     timeout=4 * 60 * 60,
 )
 def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
@@ -111,13 +137,20 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
     from simulator.config import ServingConfig
     from simulator.measure import canary as canary_mod
     from simulator.measure import server as srv
-    from simulator.measure.loadgen import (client_health, install_fast_loop,
-                                           run_concurrent_users)
+    from simulator.measure.loadgen import (
+        client_health,
+        install_fast_loop,
+        run_concurrent_users,
+    )
     from simulator.measure.metrics import detect_collapse, summarize
     from simulator.slo import SLO
     from simulator.stack import InferenceStack
-    from simulator.workload.tracelab import (describe, load_sessions,
-                                             scale_to_market, to_sessions)
+    from simulator.workload.tracelab import (
+        describe,
+        load_sessions,
+        scale_to_market,
+        to_sessions,
+    )
 
     try:
         import resource
@@ -251,10 +284,9 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
             except subprocess.TimeoutExpired:
                 proc.kill()
 
-    try:
-        rec["server_log_tail"] = open(log_path, errors="replace").read()[-6000:]
-    except Exception:
-        pass
+    with contextlib.suppress(Exception):
+        rec["server_log_tail"] = pathlib.Path(log_path).read_text(
+            errors="replace")[-6000:]
     return _save(rec, sc)
 
 

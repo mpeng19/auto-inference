@@ -31,6 +31,7 @@ import pathlib
 import time
 from dataclasses import dataclass, field, replace
 
+from . import costs
 from .config import ServingConfig
 from .price import direct as price_direct_mod
 from .price.direct import DirectPrice, price_direct
@@ -167,8 +168,14 @@ class Simulator:
     canaries: bool = True
     slo: SLO = field(default_factory=lambda: SLO(bounds=MARKET_SLO))
 
-    # the cost basis -- assumptions, never measurements
-    rate_per_gpu_hour: float = 3.00
+    # ── the cost basis: assumptions, never measurements ──
+    # Named separately from the measurement because these are the inputs a
+    # result must always be quoted with. `gpu_provider=None` takes the agreed
+    # default for the GPU (H100 -> $3.00/hr); name a provider to price against
+    # a real quote, or set `rate_per_gpu_hour` to override both.
+    gpu_provider: str | None = None
+    rate_per_gpu_hour: float | None = None
+    allow_retail_rate: bool = False
     # 0.50 is the agreed basis, not a measurement. It sits just under the 53%
     # that this model's own daily volume implies for a single-model deployment
     # sized for peak (`market.utilisation_ceiling`) -- pass that instead to
@@ -182,6 +189,9 @@ class Simulator:
     allow_stale_stack: bool = False
 
     def __post_init__(self):
+        if self.rate_per_gpu_hour is None:
+            self.rate_per_gpu_hour = costs.rate(
+                self.gpu, self.gpu_provider, allow_retail=self.allow_retail_rate)
         self.root = pathlib.Path(self.root_dir)
         if not self.root.is_dir():
             raise NotADirectoryError(
@@ -202,6 +212,27 @@ class Simulator:
     @property
     def util(self) -> float:
         return self.utilisation
+
+    @property
+    def cost_basis(self) -> str:
+        """One line naming the rate and where it came from."""
+        return costs.describe(self.gpu, self.gpu_provider, self.rate_per_gpu_hour)
+
+    def assumptions(self) -> dict:
+        """Everything that is an input rather than a measurement.
+
+        Reported with every result, because none of it can be validated from
+        inside the harness and all of it scales the answer.
+        """
+        return {"rate_per_gpu_hour": self.rate_per_gpu_hour,
+                "gpu_provider": self.gpu_provider,
+                "cost_basis": self.cost_basis,
+                "utilisation": self.util,
+                "margin": 0.0,
+                "market_as_of": self.market.as_of,
+                "market_requests_per_day": self.market.requests_per_day,
+                "in_per_request": self.market.in_per_request,
+                "out_per_request": self.market.out_per_request}
 
     def digest(self) -> str:
         """Identifies (stack, environment, measurement). Cache key for a loop."""
@@ -255,8 +286,9 @@ class Simulator:
                 if isinstance(e, modal.exception.OutputExpiredError):
                     raise
                 if time.time() > deadline:
-                    raise TimeoutError(f"sweep {call_id} still running after "
-                                       f"{timeout_s/3600:.1f}h")
+                    raise TimeoutError(
+                        f"sweep {call_id} still running after "
+                        f"{timeout_s/3600:.1f}h") from e
                 await asyncio.sleep(poll_s)
         return self.finish(rec)
 
@@ -354,10 +386,7 @@ class Simulator:
         return {"digest": self.digest(), "stack": self.stack.describe(),
                 "stack_digest": self.stack.digest, "serving": asdict(self.serving),
                 "levels": list(self.levels), "seconds_per_level": self.seconds_per_level,
-                "repeats": self.repeats, "slo": self.slo.as_dict(),
-                "rate_per_gpu_hour": self.rate_per_gpu_hour, "utilisation": self.util,
-                "market": {"as_of": self.market.as_of,
-                           "requests_per_day": self.market.requests_per_day,
-                           "in_per_request": self.market.in_per_request,
-                           "out_per_request": self.market.out_per_request},
+                "repeats": self.repeats, "n_sessions": self.n_sessions,
+                "canaries": self.canaries, "slo": self.slo.as_dict(),
+                "assumptions": self.assumptions(),
                 "note": self.note}

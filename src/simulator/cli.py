@@ -36,6 +36,7 @@ def _build(a) -> Simulator:
     return Simulator(root_dir=root, stack=stack, slo=slo, model=a.model,
                      gpu=a.gpu, n_gpu=a.n_gpu, seconds_per_level=a.seconds,
                      repeats=a.repeats, rate_per_gpu_hour=a.rate,
+                     gpu_provider=a.provider,
                      utilisation=a.utilisation, note=a.note,
                      canaries=not a.no_canaries, **kw)
 
@@ -64,7 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--seconds", type=float, default=120.0)
         p.add_argument("--repeats", type=int, default=1)
         p.add_argument("--slo", default="", help="ttft:p90:2818,tpot:mean:20")
-        p.add_argument("--rate", type=float, default=3.00, help="$/GPU-hour")
+        p.add_argument("--provider", default=None,
+                       help="price against a named provider, e.g. nebius-committed")
+        p.add_argument("--rate", type=float, default=None,
+                       help="$/GPU-hour; overrides --provider")
         p.add_argument("--utilisation", type=float, default=0.50)
         p.add_argument("--no-canaries", action="store_true")
         p.add_argument("--note", default="")

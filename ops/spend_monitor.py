@@ -21,7 +21,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import modal
@@ -72,7 +72,7 @@ def collect() -> dict:
 
     ws = Workspace.from_context()
     s = ws.billing.summary()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     metered_now = _f(s.metered_cost)
 
     # Diff against the previous reading to get real burn.
@@ -167,7 +167,7 @@ def render(d: dict) -> tuple[str, str]:
          "  Since last check:            (first reading, no baseline yet)"),
         f"  Actually charged so far:     ${d['mtd_billed_usd']:.2f}",
         "",
-        f"Once credits run out, metered usage becomes real charges at full rate.",
+        "Once credits run out, metered usage becomes real charges at full rate.",
         f"At 8xH100 ($31.60/hr) the remaining credit is "
         f"{d['credits_left_usd'] / 31.60:.1f} hours.",
         "",
@@ -231,7 +231,8 @@ def send_email(subject: str, body: str) -> dict:
 def daily_digest() -> dict:
     d = collect()
     subject, body = render(d)
-    print(subject); print(body, flush=True)
+    print(subject)
+    print(body, flush=True)
     return {"severity": severity(d), "email": send_email(subject, body), "data": d}
 
 

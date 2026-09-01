@@ -17,16 +17,8 @@ Three properties matter more than realism:
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import random
-from dataclasses import asdict, dataclass, replace
-from typing import Callable
-
-from . import prompts as _prompts
-
-
-
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -59,10 +51,7 @@ class Session:
 # token count rather than tokenized for real, so trace building needs no GPU
 # and no tokenizer. True token counts come back from the server.
 _CHARS_PER_TOKEN = 4
-_WORDS = (
-    "system latency throughput scheduler batch cache prefix decode prefill "
-    "tensor expert routing kernel memory request token attention parallel"
-).split()
+_WORDS = ["system", "latency", "throughput", "scheduler", "batch", "cache", "prefix", "decode", "prefill", "tensor", "expert", "routing", "kernel", "memory", "request", "token", "attention", "parallel"]
 
 
 def _filler(n_tokens: int, rng: random.Random) -> str:

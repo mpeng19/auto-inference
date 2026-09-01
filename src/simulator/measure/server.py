@@ -17,8 +17,15 @@ assuming it.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
+import pathlib
 import re
+import time
 from dataclasses import dataclass
+
+import aiohttp
 
 # Histogram buckets are cumulative counters, so a "snapshot" is only meaningful
 # as a difference between two points in time.
@@ -61,7 +68,7 @@ class Snapshot:
     gauges: dict[str, float]
 
     @staticmethod
-    def parse(text: str) -> "Snapshot":
+    def parse(text: str) -> Snapshot:
         buckets: dict[str, dict[float, float]] = {}
         counters: dict[str, float] = {}
         gauges: dict[str, float] = {}
@@ -166,9 +173,9 @@ def diff(before: Snapshot, after: Snapshot) -> dict:
 async def scrape(base_url: str, timeout_s: float = 10.0) -> Snapshot | None:
     import aiohttp
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(base_url.rstrip("/") + "/metrics",
-                             timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
+        async with aiohttp.ClientSession() as s, s.get(
+                base_url.rstrip("/") + "/metrics",
+                timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
                 if r.status != 200:
                     return None
                 return Snapshot.parse(await r.text())
@@ -237,19 +244,15 @@ class BatchSampler:
                     self.running.append(r)
                 if q is not None:
                     self.queued.append(q)
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), self.interval_s)
-            except asyncio.TimeoutError:
-                pass
 
-    async def __aenter__(self) -> "BatchSampler":
-        import asyncio
+    async def __aenter__(self) -> BatchSampler:
         self._stop = asyncio.Event()
         self._task = asyncio.create_task(self._loop())
         return self
 
     async def __aexit__(self, *exc) -> None:
-        import contextlib
         self._stop.set()
         if self._task is not None:
             with contextlib.suppress(Exception):
@@ -278,6 +281,20 @@ class BatchSampler:
 
 
 # ── server lifecycle: get it up, get it warm, tell us fast if it died ────
+
+def _tail(path: str | None, n: int) -> str:
+    """Last `n` characters of the server log, or "" if it cannot be read.
+
+    Always best-effort: this is only ever called while raising a more
+    important error, and losing that error to an IO problem in the reporting
+    path would be the worst possible trade.
+    """
+    if not path:
+        return ""
+    try:
+        return pathlib.Path(path).read_text(errors="replace")[-n:]
+    except OSError:
+        return ""
 
 async def wait_until_ready(base_url: str, timeout_s: float = 1800.0,
                            proc=None, log_path: str | None = None,
@@ -321,22 +338,13 @@ async def wait_until_ready(base_url: str, timeout_s: float = 1800.0,
                 if sz != last_size:
                     last_size, last_change = sz, time.perf_counter()
                 elif time.perf_counter() - last_change > stall_s:
-                    tail = ""
-                    try:
-                        tail = open(log_path, errors="replace").read()[-2000:]
-                    except Exception:
-                        pass
+                    tail = _tail(log_path, 2000)
                     raise RuntimeError(
                         f"server load stalled: no log output for {stall_s:.0f}s "
                         f"({time.perf_counter() - start:.0f}s elapsed). Normal "
                         f"loads finish in 90-505s.\n--- log tail ---\n{tail}")
             if proc is not None and proc.poll() is not None:
-                tail = ""
-                if log_path:
-                    try:
-                        tail = open(log_path, errors="replace").read()[-3000:]
-                    except Exception:
-                        pass
+                tail = _tail(log_path, 3000)
                 raise RuntimeError(
                     f"server process exited with code {proc.returncode} after "
                     f"{time.perf_counter() - start:.0f}s\n--- log tail ---\n{tail}"
@@ -352,7 +360,7 @@ async def wait_until_ready(base_url: str, timeout_s: float = 1800.0,
             if log_path and elapsed - last_echo >= 30:
                 last_echo = elapsed
                 try:
-                    lines = open(log_path, errors="replace").read().splitlines()
+                    lines = _tail(log_path, 4000).splitlines()
                     if lines:
                         print(f"  [{elapsed:.0f}s loading] {lines[-1][:150]}", flush=True)
                 except Exception:
@@ -364,17 +372,16 @@ async def wait_until_ready(base_url: str, timeout_s: float = 1800.0,
 async def complete(base_url: str, model: str, prompt: str, max_tokens: int,
                    timeout_s: float = 300.0) -> str:
     """Non-streaming completion, for canaries where only the text matters."""
-    async with aiohttp.ClientSession() as s_:
-        async with s_.post(
-            base_url.rstrip("/") + "/v1/chat/completions",
-            json={"model": model, "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": max_tokens, "temperature": 0.0, "stream": False},
-            timeout=aiohttp.ClientTimeout(total=timeout_s),
-        ) as r:
-            if r.status != 200:
-                return f"<HTTP {r.status}>"
-            body = await r.json()
-            return (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+    async with aiohttp.ClientSession() as s_, s_.post(
+        base_url.rstrip("/") + "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": prompt}],
+              "max_tokens": max_tokens, "temperature": 0.0, "stream": False},
+        timeout=aiohttp.ClientTimeout(total=timeout_s),
+    ) as r:
+        if r.status != 200:
+            return f"<HTTP {r.status}>"
+        body = await r.json()
+        return (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
 
 
 async def warmup(base_url: str, model: str, n: int = 20) -> float:

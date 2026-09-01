@@ -24,7 +24,7 @@ up in the former; a procurement decision only moves the latter.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Reference costs, $/GPU-hour. Nebius list prices fetched 2026-08-30; the
 # committed figure applies their stated "up to 35% off on-demand".
