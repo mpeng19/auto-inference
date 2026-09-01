@@ -200,3 +200,20 @@ def test_counters_keep_the_category_label():
     assert c["sglang:forward_execution_seconds_total"] == pytest.approx(103.1)
     assert c["sglang:forward_execution_seconds_total[prefill]"] == pytest.approx(41.5)
     assert c["sglang:forward_execution_seconds_total[decode]"] == pytest.approx(61.6)
+
+
+def test_forward_time_is_already_gpu_seconds():
+    """The counter is summed across TP ranks; multiplying by n_gpu doubles it.
+
+    Caught because the affine model predicted $5.53/M output and the direct
+    measurement said $10.97/M -- exactly 2x on a 2-GPU run. Physically, forward
+    time can never exceed wall_seconds x n_gpu, and the measured ratio was 1.00
+    rather than the 0.50 per-rank timing would give.
+    """
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "scripts" / "results.py").read_text()
+    assert "gpu_seconds_input=ext * n_gpu" not in src
+    assert "gpu_seconds_output=dec * n_gpu" not in src
+    assert "gpu_seconds_input=ext," in src

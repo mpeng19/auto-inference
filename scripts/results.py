@@ -258,3 +258,69 @@ def phases(name: str):
             continue
         for k, v in sorted(fwd.items()):
             print(f"   {k} = {v:.2f}")
+
+
+@app.local_entrypoint()
+def direct_price(name: str):
+    """Price a run from sweep-A levels alone, with no regression.
+
+    The end-to-end test of the direct path: real traffic, phase-split GPU time,
+    priced at the hit rate the system actually achieved.
+    """
+    from autoinf.pricing import price_direct
+
+    r = _get.remote(name)
+    n_gpu = (r.get("serving") or {}).get("n_gpu", 1)
+    print(f"{'users':>6}{'extend s':>10}{'decode s':>10}{'in tok':>12}"
+          f"{'out tok':>10}{'hit':>7}{'eff-in $/M':>12}{'out $/M':>10}")
+    print("-" * 78)
+    for lv in r.get("levels", []):
+        ctr = lv.get("server_counters") or {}
+        ext = ctr.get("sglang:forward_execution_seconds_total[extend]")
+        dec = ctr.get("sglang:forward_execution_seconds_total[decode]")
+        if ext is None or dec is None:
+            print(f"{lv['n_users']:>6}   no phase-split counters on this level")
+            continue
+        # NOT x n_gpu: `forward_execution_seconds_total` is already summed
+        # across TP ranks, so it IS GPU-seconds. Verified by ::sanity --
+        # fwd/(wall x n_gpu) = 1.00, where per-rank timing would give 0.50.
+        # Multiplying here doubled every output price.
+        p = price_direct(gpu_seconds_input=ext,
+                         gpu_seconds_output=dec,
+                         input_tokens=lv["prompt_tokens"],
+                         output_tokens=lv["output_tokens"],
+                         cached_tokens=lv["cached_tokens"])
+        print(f"{lv['n_users']:>6}{ext:>10.1f}{dec:>10.1f}"
+              f"{lv['prompt_tokens']:>12,.0f}{lv['output_tokens']:>10,.0f}"
+              f"{p.hit_rate:>7.3f}{p.effective_in_per_m:>12.4f}{p.out_per_m:>10.3f}")
+    print(f"\n  basis: $3.00/GPU-hr, 50% utilisation, break-even (no margin)")
+    print("  eff-in = extend GPU-s / ALL input tokens -- cached tokens cost no")
+    print("  prefill, so a higher hit rate lowers this automatically. That is the")
+    print("  whole point: caching well shows up as a cheaper price, not as a")
+    print("  number we normalise away.")
+
+
+@app.local_entrypoint()
+def sanity(name: str):
+    """Is forward GPU-time physically possible against wall clock?
+
+    Forward time can never exceed wall_seconds x n_gpu. If it does, the counter
+    is being aggregated differently than assumed -- e.g. already summed across
+    TP ranks, in which case multiplying by n_gpu double-counts.
+    """
+    r = _get.remote(name)
+    n_gpu = (r.get("serving") or {}).get("n_gpu", 1)
+    print(f"n_gpu = {n_gpu}\n")
+    print(f"{'level':>7}{'wall s':>9}{'wall x n_gpu':>14}{'extend':>9}{'decode':>9}"
+          f"{'fwd total':>11}{'fwd/wall':>10}{'fwd/(wall*n)':>14}")
+    print("-" * 84)
+    for lv in r.get("levels", []):
+        c = lv.get("server_counters") or {}
+        e = c.get("sglang:forward_execution_seconds_total[extend]", 0.0)
+        d = c.get("sglang:forward_execution_seconds_total[decode]", 0.0)
+        w = lv.get("wall_s", 0.0)
+        print(f"{lv['n_users']:>7}{w:>9.1f}{w*n_gpu:>14.1f}{e:>9.1f}{d:>9.1f}"
+              f"{e+d:>11.1f}{(e+d)/max(w,1e-9):>10.2f}{(e+d)/max(w*n_gpu,1e-9):>14.2f}")
+    print("\n  fwd/(wall x n_gpu) must be <= 1.0. If it sits near 1/n_gpu instead,")
+    print("  the counter is ONE rank's time and must be multiplied by n_gpu.")
+    print("  If it sits near 1.0, it is already aggregated -- do not multiply.")
