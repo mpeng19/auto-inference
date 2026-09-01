@@ -35,7 +35,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/simulator"]
+packages = ["src/simulator", "src/harness"]
 # The market snapshot is package data, not repo data (see price.market), and the
 # tests ship with it so an installed copy can be verified: `pytest --pyargs simulator`.
 artifacts = ["src/simulator/data/*.json", "src/simulator/tests/data/*.json"]
@@ -45,7 +45,7 @@ asyncio_mode = "auto"
 # Tests live beside the code they test. Every test directory is a package
 # (`__init__.py`), so pytest imports them through `simulator.*` rather than by
 # path -- which is what makes `pytest <any path>` work from any directory.
-testpaths = ["src/simulator"]
+testpaths = ["src/simulator", "src/harness"]
 
 [tool.ruff]
 src = ["src"]

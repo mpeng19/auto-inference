@@ -76,6 +76,39 @@ what a real run leaves behind.
    whole bill is what a buyer pays. On the current baseline those give rank 1
    and rank 9, so the report always carries both.
 
+## The auto-research harness
+
+`src/harness/` is a fleet of agents that propose diffs to SGLang's `srt/` and
+price them with the simulator. Four services, each defined by a Protocol in
+`harness.contracts` and each replaceable without the others noticing:
+
+| service | question it answers |
+|---|---|
+| `MemoryService` | has anyone tried this, and what happened? |
+| `ContextService` | how exactly did they do it? |
+| `AgentService` | one idea, iterated, with divergence and retry policy |
+| `OrchestrationService` | N of those at once, gating the scarce thing |
+
+An agent's whole interface to the code is a `Workspace`:
+
+```python
+ws = Workspace("agents/a01")
+ws.replace("srt/managers/schedule_policy.py", old, new)   # refuses if ambiguous
+ok, why = ws.check()                                      # parses? actually changed?
+result = await Simulator(root_dir=ws.run_dir(), stack=ws.stack()).eval()
+```
+
+Stock SGLang is fetched from the pinned wheel by URL and cached across the
+fleet — 0.5.18 publishes only manylinux wheels and no sdist, so `pip download`
+on a Mac cannot get it, and an agent needs the source, not an install.
+
+**On isolation:** the modified SGLang only ever executes inside a fresh Modal
+container, so the isolation that matters is already paid for. Agents write text
+and wait on an API. The resource they genuinely contend over is **GPU
+concurrency and money** — every attempt rents an H100 for 25–60 minutes — so
+the orchestrator gates evaluations rather than processes, and per-agent
+directories are enough.
+
 ## Layout
 
 ```
@@ -92,6 +125,12 @@ src/simulator/          the product
   artifacts/            report and figures written into root_dir
   conftest.py           shared fixtures for every test below
   */tests/              tests live beside the service they test
+src/harness/            the auto-research harness
+  contracts/            the four service Protocols; no logic lives here
+  memory/               SqliteMemory: experiment graph, FTS, briefs
+  context/              JsonlContext: append-only agent traces
+  agent/                Workspace (the diff API), the iterate-on-one-idea loop
+  orchestration/        Fleet: N agents, one gate on GPU spend
 monitor/                Modal spend monitoring
 docs/methodology.md     how the method was arrived at, and every negative result
 docs/example.ipynb      minimal end-to-end notebook
