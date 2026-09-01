@@ -404,3 +404,36 @@ def validate_batch(obs: list[Observation], **kw) -> dict:
     errs = [abs(r["rel_error"]) for r in rows]
     return {"rows": rows, "mean_abs_error": round(sum(errs) / len(errs), 3),
             "worst_abs_error": round(max(errs), 3)}
+
+
+# Measurement noise floor: worst residual across accepted attribution runs was
+# ~8% (fit 0.92-0.94), so an experiment whose predicted effect is smaller than
+# this cannot resolve it however long it runs.
+FIT_NOISE = 0.08
+
+
+def effect_size(model: str, context: int, batch_lo: float, batch_hi: float,
+                gpu: str = "H100") -> dict:
+    """Will this experiment produce a signal? Check BEFORE spending.
+
+    Cost per output token is `n * (W/batch + per_seq) / bandwidth`, so it varies
+    with batch **only through the weight term**. When per-sequence KV dominates
+    the weights, cost is nearly flat in batch and no batch sweep can measure
+    anything.
+
+    This exists because a planned sweep on the Qwen3-4B dev model — chosen to
+    save money — would have produced 1.21x cost variation over a 2.2x batch
+    range, inside the 8% fit noise. The 4B has 4 GB of weights against the
+    27B's 23 GB, so the effect being tested is largely absent there. Cheap
+    iteration on a dev model is fine for anything model-independent; this is
+    not that. Run validation on the model being sold.
+    """
+    m = MODELS[model]
+    W, ps = m.active_params * WEIGHT_BYTES, m.bytes_per_seq(context, KV_BYTES)
+    lo, hi = W / batch_hi + ps, W / batch_lo + ps
+    ratio = hi / lo
+    return {"model": model, "cost_ratio": round(ratio, 3),
+            "batch_ratio": round(batch_hi / batch_lo, 2),
+            "weight_frac_at_lo_batch": round((W / batch_lo) / hi, 3),
+            "resolvable": bool(ratio - 1.0 > 2 * FIT_NOISE),
+            "noise_floor": FIT_NOISE}

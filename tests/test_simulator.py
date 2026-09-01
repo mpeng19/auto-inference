@@ -194,3 +194,29 @@ def test_tp8_underfills_its_own_memory_ceiling():
     o = [x for x in SWEEP_2026_08_31 if x.n_gpu == 8][0]
     ceiling = predict_batch(o.model, o.gpu, o.n_gpu, o.context)
     assert ceiling > o.batch * 1.5, (ceiling, o.batch)
+
+
+def test_effect_size_rejects_the_dev_model_for_batch_sweeps():
+    """The guard for an error made twice: an experiment that cannot resolve.
+
+    A batch sweep on Qwen3-4B was launched to save money. Its predicted cost
+    variation is 1.21x over a 2.2x batch range -- inside the 8% fit noise, so
+    it was unresolvable by construction. The target model, whose weights
+    dominate the per-step read, gives 2.47x over 5.6x.
+    """
+    from autoinf.simulator import effect_size
+
+    dev = effect_size("Qwen/Qwen3-4B-Instruct-2507-FP8", 4000, 15, 33)
+    tgt = effect_size("Qwen/Qwen3.8-27B-FP8", 4000, 21, 117)
+    assert not dev["resolvable"], dev
+    assert tgt["resolvable"], tgt
+    assert tgt["cost_ratio"] > 2 * (dev["cost_ratio"] - 1) + 1
+
+
+def test_effect_size_shrinks_as_context_grows():
+    """Long contexts make KV dominate, killing the batch effect."""
+    from autoinf.simulator import effect_size
+
+    short = effect_size("Qwen/Qwen3.8-27B-FP8", 4_000, 20, 100)
+    long_ = effect_size("Qwen/Qwen3.8-27B-FP8", 132_000, 20, 100)
+    assert short["cost_ratio"] > long_["cost_ratio"]
