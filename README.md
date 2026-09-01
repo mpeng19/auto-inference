@@ -90,7 +90,6 @@ src/simulator/          the product
   runner/               where a sweep executes (Modal, one entrypoint)
   artifacts/            report and figures written into root_dir
 monitor/                Modal spend monitoring
-docs/HANDOFF.md         the running log; §6b-§6e is the settled method
 docs/methodology.md     how the method was arrived at, and every negative result
 docs/example.ipynb      minimal end-to-end notebook
 docs/examples/          what a finished run leaves behind

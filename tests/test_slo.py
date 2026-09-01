@@ -16,7 +16,7 @@ def test_market_slo_puts_n_star_at_12():
 
 
 def test_mean_tpot_is_what_binds_not_ttft():
-    """The finding in HANDOFF 6c: p90 TTFT is nowhere near binding on 1xH100.
+    """p90 TTFT is nowhere near binding on 1xH100.
 
     An earlier SLO judged both metrics at one percentile and made p90 TTFT the
     constraint, which sent us optimising prefill for nothing.

@@ -13,7 +13,12 @@ def sim(root, **kw):
 
 
 def test_reproduces_the_handoff_numbers(root, sweep):
-    """HANDOFF 6c/6d, straight through the public API."""
+    """The 1xH100 baseline, straight through the public API.
+
+    These are the numbers in `docs/examples/baseline-1xh100/report.txt`, which
+    is generated from this same fixture -- so the example and the test cannot
+    drift apart without one of them failing.
+    """
     res = sim(root).analyse(sweep)
     assert res.ok and res.n_star == 12
     assert res.effective_in_per_m == pytest.approx(0.0294, abs=5e-4)

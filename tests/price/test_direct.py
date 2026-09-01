@@ -14,7 +14,7 @@ LEVEL = {"server_counters": {
 
 
 def test_reproduces_the_1xh100_baseline():
-    """HANDOFF 6c: eff-in $0.0294/M, out $5.60/M at $3.00/hr and 50%."""
+    """The 1xH100 baseline: eff-in $0.0294/M, out $5.60/M at $3.00/hr, 50%."""
     p = price_direct(gpu_seconds_input=12.1, gpu_seconds_output=367.2,
                      input_tokens=683084, output_tokens=109244,
                      cached_tokens=510947, utilization=0.50, margin=0.0)
@@ -70,7 +70,7 @@ def test_share_scales_linearly_with_nodes_at_flat_price():
 
 
 def test_below_saturation_price_is_a_hyperbola_the_stack_does_not_enter():
-    """HANDOFF 6d. Two very different stacks idle at the same cost."""
+    """Two very different stacks idle at exactly the same cost."""
     m = Market.load()
     a = Economics(gpu_s_per_request=7.341, n_gpu=1, utilisation=0.50)
     b = Economics(gpu_s_per_request=3.000, n_gpu=1, utilisation=0.50)

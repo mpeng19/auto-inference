@@ -1,7 +1,6 @@
 # Methodology: how the serving-cost simulator was built and checked
 
-Written 2026-08-31. Companion to `docs/HANDOFF.md` (resume state) and
-`docs/checklist.md` (plan). This document states what the simulator computes,
+Written 2026-08-31, extended 2026-09-01 (§8.3). This document states what the simulator computes,
 how it was built, everything we have measured, and every assumption it rests
 on — separated by whether the assumption is verifiable.
 
@@ -300,7 +299,7 @@ actually run, and unlike the KV term there is headroom in it.
 Leave-one-out is out-of-sample across configurations, but every held-out point
 still sits inside the convex hull of the rest, and all seven come from one
 apparatus and one SGLang build. So a prediction was **sealed in git before the
-confirming run** (`docs/prediction-2026-09-01.json`, commit `a70f3ae`) for a
+confirming run** (sealed before the run, commit `a70f3ae`) for a
 combination absent from training: **n_gpu=2 at 6k context** (the n=2 training
 point is at 22.7k; every 6k point is n=1).
 
@@ -329,7 +328,7 @@ per-step synchronisation is a larger share of the total. Untested.
 
 The per-token costs come from **rate-form NNLS regression** over saturated
 workload mixes. Four earlier approaches all failed, all producing
-plausible-looking numbers (`docs/HANDOFF.md` §4). The root cause was one thing:
+plausible-looking numbers (§7 below). The root cause was one thing:
 fixed-duration experiments hold GPU-seconds nearly constant while token counts
 vary, so nothing is identifiable. Dividing through by GPU-seconds cancels
 duration:
@@ -771,6 +770,54 @@ re-derived rather than trusted across a change of model or context.
 - No real agent traffic captured through the deployed OpenHands gateway.
 
 ---
+
+## 8.3 The decode slope at market context — the largest quantified headroom
+
+Measured on the 1xH100 baseline (run `1788287578`, 2026-09-01), at the
+marketplace's own 20,583-token context rather than the 6k the affine model in
+§3.3.3 was fitted at. Two independent routes to the step model, and they agree:
+
+    client TPOT vs sampled batch        step = 9.45 ms + 2.034 ms x B   r2 0.998
+    client TPOT vs device-timer batch   step = 10.44 ms + 1.585 ms x B  r2 0.995
+
+(the second infers batch as `output_tokens / decode_GPU_s x TPOT`, using no
+sampler at all). Against roofline — weights 23.1 GB, per-seq state 1.504 GB,
+HBM 3.35 TB/s:
+
+    roofline    step = 6.89 ms + 0.449 ms x B
+    -> fixed term at 0.66-0.73 of bandwidth
+    -> per-sequence KV term at **0.22-0.28** of bandwidth
+
+**The slope is what a TPOT SLO converts into money.** A 20 ms budget minus a
+~10 ms fixed cost leaves ~10 ms for the batch term, so batch = 10/slope:
+
+    f_kv    slope    batch @ 20 ms    output $/M    whole bill $/1k
+    0.22   2.04 ms            5.2          6.45              12.2
+    0.40   1.12 ms            9.4          3.55               8.0
+    0.60   0.75 ms           14.1          2.36               6.0
+    1.00   0.45 ms           23.5          1.42               4.3
+
+Reaching 0.60 would move the whole bill from 9th on the board to 1st. **This is
+the first optimisation target with a quantified payoff.**
+
+**It also contradicts §3.3.3**, which found the same term *at roofline*
+(`f_kv = 1.00`) on a 1xH100 batch sweep at 6k context. Same model, same GPU,
+3.4x the context, and the term falls 4.5x. Either `bytes_per_seq` under-counts
+at long context or effective bandwidth on the KV read degrades with it (paging
+and fragmentation are the obvious suspects). **Unresolved, and the single most
+useful thing to resolve**, because the whole table above rests on the roofline
+denominator being right.
+
+SGLang exposes `estimated_read_bytes_per_gpu_total`, which would settle it from
+the server's own byte accounting rather than our arithmetic. It is in the
+scrape list but was **not emitted** on that run; getting it turned on is the
+cheapest next step.
+
+A second consequence: `tp_decay = 0.29` does not transfer either. At equal
+batch, 2xH100 measured 0.82-0.94x the cost per token where that term predicts
+1.22x *worse*. Both constants were fitted at ~6k context and neither survives
+the move to 20.6k.
+
 
 ## 9. Using it
 

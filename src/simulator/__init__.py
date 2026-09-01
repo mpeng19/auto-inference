@@ -11,7 +11,7 @@ serve marketplace traffic at, and how much of that market can it hold?**
     result = await sim.eval()
     print(result.summary())
 
-The method, in four steps (HANDOFF SS6b):
+The method, in four steps:
 
   1. Sweep offered load on real coding-agent traffic, rescaled to the
      marketplace's own token mix, until the SLOs stop holding. The last level

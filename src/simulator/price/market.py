@@ -8,7 +8,7 @@ OpenRouter publishes alongside each provider's realised hit rate. Ranking
 uses the realised figures at each provider's OWN hit rate: re-blending
 everyone to a common rate would erase the thing being optimised, since
 Novita realises 87.4% and Cloudflare 0.0% on the same model and the same
-traffic (HANDOFF SS5e).
+traffic (`docs/methodology.md` SS5e).
 
 The share economics are the other half. A price quoted without the demand
 it assumes is meaningless: below saturation, utilisation is set by demand

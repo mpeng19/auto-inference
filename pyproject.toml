@@ -44,8 +44,6 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
-# The product only. `research/` is an archive: it is preserved as it was
-# written, and reformatting it would destroy the thing it exists to record.
 src = ["src"]
 include = ["src/**/*.py", "tests/**/*.py", "ops/**/*.py"]
 line-length = 90

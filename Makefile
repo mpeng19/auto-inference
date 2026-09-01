@@ -4,7 +4,7 @@
 test:            ## unit tests, no GPU, no network
 	uv run pytest -q
 
-lint:            ## ruff over the product; research/ is an archive, left as written
+lint:            ## ruff
 	uv run ruff check .
 
 fix:             ## apply the lint fixes ruff is confident about

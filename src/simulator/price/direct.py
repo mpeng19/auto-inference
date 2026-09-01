@@ -9,7 +9,7 @@ there needs three things the harness can measure and one it cannot:
      consume, read straight off SGLang's CUDA-event device timer. Measured.
      There is no regression here any more: splitting input cost into cached
      and uncached is needed only to re-blend at a competitor's hit rate, and
-     caching well *is* serving well, so we price at our own (HANDOFF SS6b).
+     caching well *is* serving well, so we price at our own.
   3. **A cost basis.** Dollars per GPU-hour. *Not* measured — an input.
   4. **Utilisation.** What fraction of paid-for capacity carries traffic. Not
      measurable here at all; it depends on how much traffic the marketplace
@@ -170,7 +170,7 @@ def usable(level: dict, n_gpu: int = 1) -> tuple[bool, str]:
     """Can this level be priced at all? Returns (ok, reason-if-not).
 
     Five earlier attempts at per-token cost all produced *plausible-looking*
-    numbers from unusable data (HANDOFF SS4), which is worse than producing
+    numbers from unusable data (`docs/methodology.md` SS7), which is worse than producing
     none. An automated caller cannot sanity-check a price, so refusing has to
     be the default rather than a warning.
 
