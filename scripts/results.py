@@ -324,3 +324,21 @@ def sanity(name: str):
     print("\n  fwd/(wall x n_gpu) must be <= 1.0. If it sits near 1/n_gpu instead,")
     print("  the counter is ONE rank's time and must be multiplied by n_gpu.")
     print("  If it sits near 1.0, it is already aggregated -- do not multiply.")
+
+
+@app.local_entrypoint()
+def tiers(name: str):
+    """Which SLO tier failed at each level, and by how much."""
+    r = _get.remote(name)
+    for lv in r.get("levels", []):
+        print(f"\nN = {lv['n_users']} users   good_frac {lv.get('good_frac', 0):.3f}"
+              f"   meets_slo {lv.get('meets_slo')}")
+        for t in lv.get("slo_tiers", []):
+            q = t["percentile"]
+            for kind, lim in (("ttft", t["ttft_limit"]), ("tpot", t["tpot_limit"])):
+                v = t[kind]
+                if v is None:
+                    continue
+                ok = v <= lim
+                print(f"   p{q} {kind.upper():<5} {v:>8.1f} ms  vs {lim:>7.1f} ms"
+                      f"   {'ok' if ok else 'FAIL by %.0f%%' % ((v/lim-1)*100)}")

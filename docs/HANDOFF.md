@@ -581,6 +581,89 @@ mass where reality has a spread — which matters for the p99 tail, and the tail
 is what sets N*. Reproducibility is worth more than realism while hill-climbing;
 expose it as an argument when the research environment settles.
 
+## 6b. THE CURRENT METHOD — supersedes §3 and §3c-3f
+
+Settled 2026-09-01. Everything before this describes how we got here; this is
+what to actually run.
+
+### The standard environment
+
+    model        Qwen/Qwen3.8-27B-FP8      (never a substitute; see §3c)
+    hardware     1 x H100                   assume $3.00/GPU-hr
+    utilisation  0.50                       margin 0.0 -> report BREAK-EVEN
+    traffic      TraceLab rescaled to 20,583 in / 2,076 out per request
+
+1xH100 rather than the cheaper A100 80GB because Ampere (SM80) has **no FP8
+tensor cores** and this checkpoint is block-quantised FP8 — it would dequantise
+to bf16 and we would be measuring a different machine. Not L40S either:
+decode is bandwidth-bound, so L40S is half the hourly price and ~1.9x the cost
+per token, and holds only ~12 conversations of KV.
+
+### The SLOs, taken from what the market actually publishes
+
+    p90 TTFT <= 2818 ms    median provider's p90 latency
+    p50 TPOT <=   20 ms    median provider's p50 throughput (49 tok/s)
+
+Both are measured values from `scripts/market_pull.py`, not guesses.
+
+Three things had to be discarded to get here:
+
+1. **Generic guidance (p90 TTFT 300-500 ms) is unreachable for this workload.**
+   A cold prefill of 20,583 tokens is ~770 ms of compute on 2 GPUs. Our p90
+   TTFT sits at ~450 ms and **does not move with load** (471 ms at 8 users,
+   411 ms at 32) because sessions are multi-turn and TTFT is bimodal: first
+   turns prefill everything, later turns prefill ~20%. The 90th percentile
+   lands on the boundary between the two modes. That guidance assumes ordinary
+   chat prompts, not 20k-token agentic contexts.
+2. **A p99 TPOT cannot be read off market data.** Throughput percentiles run
+   the wrong way — `TPOT = 1/throughput` is decreasing, so `p99_throughput` is
+   the FASTEST 1%, mapping to p1 TPOT. The slow tail would be
+   `p1_throughput`, which nobody publishes.
+3. **Fitting the tail does not rescue it.** A lognormal fitted to the TPOT
+   quantiles we do have (p1-p50) gives p90/p50 ratios of only 1.16-1.61x,
+   while our own measurements show 1.2-3.4x and their published TTFT shows
+   2-9x. Latency tails are heavy for reasons the body cannot predict —
+   queueing, preemption, eviction. Only 4 of 11 providers even reached
+   r2 > 0.95 on the fast half.
+
+Any TPOT *tail* bound is therefore **our choice, not an industry standard**.
+p99 TPOT ~60 ms is the same service as a 20 ms p50 given a 3x tail; label it
+as a choice wherever it is quoted.
+
+### The measurement, in four steps
+
+1. **Sweep concurrency** on real traffic until the SLOs stop holding. Take the
+   last passing level as N*. **Every evaluation needs its own sweep** — a diff
+   moves N*, and pricing it at the baseline's N* would systematically
+   understate every latency win (a diff that moved N* 16 -> 32 with no change
+   to step time still cuts output cost 22%).
+2. **Read phase-split GPU time** at N*: `forward_execution_seconds_total`
+   labelled `extend` (prefill) and `decode`. Requires
+   `SGLANG_ENABLE_METRICS_DEVICE_TIMER=1`, already set in `_server_env`.
+   The counter is **already summed across TP ranks** — do not multiply by
+   n_gpu (that bug doubled every output price once).
+3. **Divide**: `eff_in = extend_gpu_s / ALL input tokens`,
+   `out = decode_gpu_s / output tokens`. No regression, no mixes, no
+   identifiability gate. `pricing.price_direct()`.
+4. **x rate / utilisation** -> break-even price; blend is already implicit
+   because cached tokens cost no prefill and sit in the denominator.
+
+**Cache hit rate is an OUTCOME, not a control (§5e).** Do not re-blend to a
+competitor's hit rate — caching well *is* serving well, and normalising it
+away removes what we are trying to optimise.
+
+### What phase B was for, and why it is gone
+
+The four-mix NNLS regression existed to split input cost into cached and
+uncached, which is needed **only** to re-blend at someone else's hit rate. It
+also had to run at `sat_users`, past N*, so that wall-clock would equal work
+time — which measured decode at a batch the SLO does not permit and
+**understated output cost ~4x**. The device timer removes the need for both.
+
+Kept as a cross-check, not a dependency: on run `1788247497` the two methods
+agreed to 3% on uncached input and 0% on output, and `busy_frac` came back
+0.98-1.00, confirming wall-clock was a valid denominator at saturation.
+
 ## 7. Commands
 
     make test                 # 118 local tests, no GPU
