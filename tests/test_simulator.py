@@ -351,3 +351,27 @@ def test_kv_term_sits_at_roofline_but_the_fixed_term_does_not():
     m = fit_affine([o for o in ALL_OBSERVATIONS if o.n_gpu == 1])
     assert m.f_kv == 1.00
     assert 0.35 < m.f_weights < 0.60, m.f_weights
+
+
+def test_littles_law_flags_a_client_that_falls_behind():
+    """Concurrency, throughput and residence time are not independent.
+
+    A load generator that cannot keep n_users in flight shows up as implied
+    think time rising with load, because the users are idle somewhere the
+    server never sees. Nothing else in the harness detects this directly; it
+    was diagnosed by accident the first time it happened.
+    """
+    from autoinf.metrics import littles_law_drift
+
+    healthy = [{"n_users": n, "throughput_rps": n / 20.0, "batch": n * 0.5}
+               for n in (8, 16, 32, 64)]          # think constant by construction
+    assert littles_law_drift(healthy)["consistent"]
+
+    # Real 8xH100 market run: think climbs 14.1 -> 27.3s.
+    real = [{"n_users": 8, "throughput_rps": 0.29, "batch": 3.9},
+            {"n_users": 16, "throughput_rps": 0.55, "batch": 8.8},
+            {"n_users": 64, "throughput_rps": 1.60, "batch": 35.6},
+            {"n_users": 128, "throughput_rps": 2.20, "batch": 69.0, "queued": 0.4}]
+    d = littles_law_drift(real)
+    assert not d["consistent"], d
+    assert d["drift"] > 1.5

@@ -240,9 +240,19 @@ class BatchSampler:
             with contextlib.suppress(Exception):
                 await self._task
 
-    def summary(self) -> dict:
-        """Mean running batch is the number the roofline check needs."""
+    def summary(self, warmup_frac: float = 0.0) -> dict:
+        """Mean running batch is the number the cost model needs.
+
+        `warmup_frac` drops the leading fraction of samples. Without it the
+        mean includes the ramp from an empty scheduler, while `summarize()`
+        already excludes warmup from goodput -- so the two describe different
+        windows and Little's Law (batch = throughput * time-in-server) fails
+        for a reason that is pure bookkeeping. The bias grows with load,
+        because a larger batch takes longer to fill.
+        """
         def stat(xs: list[float]) -> dict:
+            if warmup_frac > 0 and len(xs) > 4:
+                xs = xs[int(len(xs) * warmup_frac):]
             if not xs:
                 return {"n": 0}
             s = sorted(xs)

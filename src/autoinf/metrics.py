@@ -251,3 +251,59 @@ def detect_collapse(results: list["RequestResult"], n_buckets: int = 12,
                  "unchanged. It has entered a backlog it cannot drain, so "
                  "goodput from it measures the basin, not the configuration."),
     }
+
+
+def littles_law(n_users: int, throughput_rps: float, batch: float,
+                queued: float = 0.0) -> dict:
+    """Cross-check three independently measured numbers against L = lambda*W.
+
+    Concurrency, throughput and residence time are not free of one another:
+    Little's Law ties them by an identity that holds for any stable system,
+    whatever the scheduling discipline. So it costs nothing and catches a class
+    of error nothing else here does.
+
+    Two boundaries:
+
+        server: running + queued = throughput * time_in_server
+        client: n_users          = throughput * (time_in_server + think)
+
+    `think` is a property of the workload, so it must not vary with load. If
+    it climbs as concurrency rises, the load generator is not keeping `n_users`
+    requests in flight -- which is precisely the failure that once moved N*
+    from 128 to 32 when nvidia-smi polling starved the client, and which was
+    diagnosed then only by accident.
+
+    Compare `implied_think_s` across the levels of one sweep; a single level in
+    isolation says little, because the true think time is not known here.
+    """
+    if throughput_rps <= 0:
+        return {"available": False, "reason": "no throughput"}
+    in_server = (batch + queued) / throughput_rps
+    cycle = n_users / throughput_rps
+    return {"available": True,
+            "time_in_server_s": round(in_server, 2),
+            "cycle_s": round(cycle, 2),
+            "implied_think_s": round(cycle - in_server, 2),
+            "server_utilisation_hint": round(in_server / cycle, 3)}
+
+
+def littles_law_drift(levels: list[dict]) -> dict:
+    """Implied think time across a sweep. It should be flat; drift is a bug.
+
+    `levels` need `n_users`, `throughput_rps`, and a batch (running, and
+    optionally queued).
+    """
+    rows = []
+    for lv in levels:
+        r = littles_law(lv["n_users"], lv["throughput_rps"], lv["batch"],
+                        lv.get("queued", 0.0))
+        if r.get("available"):
+            rows.append({"n_users": lv["n_users"], **r})
+    if len(rows) < 2:
+        return {"available": False}
+    th = [r["implied_think_s"] for r in rows]
+    lo, hi = min(th), max(th)
+    return {"available": True, "rows": rows,
+            "think_min_s": lo, "think_max_s": hi,
+            "drift": round(hi / lo, 2) if lo > 0 else None,
+            "consistent": bool(lo > 0 and hi / lo < 1.5)}
