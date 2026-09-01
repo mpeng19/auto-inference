@@ -1,30 +1,17 @@
-"""Request trace generation and the eval suite.
+"""The nine-workload eval suite and its open-loop trace builder.
 
-Three properties matter more than realism:
-
-1. **Open-loop.** Arrival times are drawn *before* the run and the client fires
-   at those times whether or not earlier requests finished. A closed-loop
-   generator silently converts overload into slowdown, which flatters a bad
-   scheduler and hides queueing.
-
-2. **Deterministic.** Same config + seed gives a byte-identical trace, and
-   `Trace.digest` goes into the run record. Comparing two configs against two
-   different traces is the easiest way to fool yourself.
-
-3. **Variance, not just mean.** Arrival *shape* stresses a serving system as
-   much as arrival rate. `bursty` and `sustained` carry the same mean rate on
-   purpose, so any difference between them is attributable to burstiness alone.
+Retired from the product 2026-09-01. It varies arrival *shape* at fixed
+mean rate, which is the right tool for scheduler comparison and the wrong
+one for pricing: the settled method needs a closed-loop population sweep
+on real traffic (HANDOFF SS6b). Kept for the congestion-collapse work.
 """
 from __future__ import annotations
 
-import hashlib
-import json
-import random
-from dataclasses import asdict, dataclass, replace
-from typing import Callable
-
-from . import prompts as _prompts
-from .config import WorkloadConfig
+import math, random
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from research.autoinf.workload_config import WorkloadConfig
+from simulator.workload.sessions import Session, Turn, _filler, _lognormal_int
 
 
 @dataclass(frozen=True)
@@ -37,28 +24,6 @@ class Request:
     prefix_id: int | None   # which shared prefix, if any
     tag: str = ""           # which suite component produced it (for mixtures)
     category: str = ""      # human-request category, when a mix is configured
-
-
-@dataclass(frozen=True)
-class Turn:
-    """One user message inside a conversation."""
-    text: str
-    max_tokens: int
-    category: str = ""
-
-
-@dataclass(frozen=True)
-class Session:
-    """A conversation: arrives once, then runs closed-loop turn by turn."""
-    idx: int
-    arrival_s: float
-    system: str                     # stable preamble, shared across sessions
-    turns: tuple[Turn, ...]
-    think_s: tuple[float, ...]      # gap after each turn before the next
-
-    @property
-    def n_turns(self) -> int:
-        return len(self.turns)
 
 
 @dataclass(frozen=True)
@@ -153,32 +118,6 @@ class Trace:
             "digest": self.digest(),
         }
 
-
-# A token is ~4 characters of English. Filler text is generated to a target
-# token count rather than tokenized for real, so trace building needs no GPU
-# and no tokenizer. True token counts come back from the server.
-_CHARS_PER_TOKEN = 4
-_WORDS = (
-    "system latency throughput scheduler batch cache prefix decode prefill "
-    "tensor expert routing kernel memory request token attention parallel"
-).split()
-
-
-def _filler(n_tokens: int, rng: random.Random) -> str:
-    target = max(1, n_tokens * _CHARS_PER_TOKEN)
-    out, size = [], 0
-    while size < target:
-        w = rng.choice(_WORDS)
-        out.append(w)
-        size += len(w) + 1
-    return " ".join(out)
-
-
-def _lognormal_int(rng: random.Random, mu: float, sigma: float, cap: int) -> int:
-    return max(1, min(cap, int(rng.lognormvariate(mu, sigma))))
-
-
-# ── arrival processes ────────────────────────────────────────────
 
 def _rate_fn(cfg: WorkloadConfig, duration_s: float) -> tuple[Callable[[float], float], float]:
     """Return (instantaneous rate at t, an upper bound on it)."""
@@ -338,11 +277,6 @@ def merge_traces(traces: list[Trace], name: str = "mixed") -> Trace:
     return Trace(reindexed, replace(base, name=name))
 
 
-# ── the eval suite ───────────────────────────────────────────────
-# Each entry stresses a different part of the serving stack. Run the whole
-# suite against a config; a change that helps one pattern and wrecks another is
-# a trade-off to see explicitly, not to average away.
-
 def roofline_rps(model=None, hw=None, in_tok: int | None = None,
                  out_tok: int | None = None, batch: int = 146) -> float:
     """Ceiling request rate for the human mix, from the capacity model.
@@ -366,26 +300,6 @@ def roofline_rps(model=None, hw=None, in_tok: int | None = None,
         out_tok = int(sum(c.weight * math.exp(c.out_mu + c.out_sigma ** 2 / 2)
                           for c in CATEGORIES) / tw)
     return capacity(model, hw, in_tok, out_tok, batch=batch)["max_rps_roofline"]
-
-
-# The hardware the suite rates were derived from. Rates are meaningless on
-# anything else, and getting this wrong is the single most expensive mistake
-# available: the first calibration was 10x low and measured an idle server.
-CALIBRATED_FOR = ("Qwen/Qwen3-30B-A3B-Instruct-2507-FP8", "H100", 1)
-
-
-def check_calibration(cfg) -> str | None:
-    """Warn when the suite is run against hardware it was not calibrated for."""
-    got = (cfg.model, cfg.gpu, cfg.n_gpu)
-    if got == CALIBRATED_FOR:
-        return None
-    return (f"suite rates were calibrated for {CALIBRATED_FOR[0].split('/')[-1]} "
-            f"on {CALIBRATED_FOR[2]}x{CALIBRATED_FOR[1]}, but this run uses "
-            f"{got[0].split('/')[-1]} on {got[2]}x{got[1]}. Absolute goodput is "
-            f"not comparable across the two, and the load levels may sit in a "
-            f"different regime entirely (the small dense models are "
-            f"prefill-bound where the 30B MoE is decode-bound). Re-derive with "
-            f"`make staircase` before trusting these numbers.")
 
 
 def suite(seed: int = 0, scale: float = 1.0,
@@ -603,69 +517,3 @@ def staircase_levels(seed: int = 0, peak_fraction: float = 1.0,
             seed=seed + int(pct)))
         pct += step_pct
     return out
-
-
-# ── multi-turn ───────────────────────────────────────────────────
-
-_FOLLOWUPS = [
-    "Can you expand on that?",
-    "Why does that work?",
-    "What would break if I did the opposite?",
-    "Show me a concrete example.",
-    "Is there a simpler way?",
-    "What are the failure modes?",
-    "How would I test that?",
-    "Does that still hold at scale?",
-    "What would you do differently in production?",
-    "Summarise that as bullet points.",
-]
-
-
-def build_sessions(cfg: WorkloadConfig) -> SessionTrace:
-    """Generate conversations. Deterministic given the seed.
-
-    Only the *structure* is fixed here -- who arrives when, how many turns, what
-    they say, how long they think. The prompt actually sent at turn k is
-    assembled at run time from the replies the server gave, because that is what
-    a chat client does and it is what makes the prefix grow the way a real one
-    does.
-    """
-    rng = random.Random(cfg.seed)
-    system = _prompts.SYSTEM_PROMPTS[0][1]
-    if cfg.shared_prefix_len:
-        system = _prompts._pad_to(system, cfg.shared_prefix_len,
-                                  random.Random(cfg.seed * 7717))
-
-    # Sessions arrive as a Poisson process at `request_rate`.
-    n_sessions = cfg.n_requests or 200
-    duration = cfg.duration_s
-    times, t = [], 0.0
-    for _ in range(n_sessions):
-        t += rng.expovariate(max(cfg.request_rate, 1e-9))
-        if duration is not None and t > duration:
-            break
-        times.append(t)
-
-    mix = cfg.category_mix or _prompts.ALL_CATEGORIES
-    sessions = []
-    for i, at in enumerate(times):
-        k = max(1, min(cfg.turns_max, int(rng.expovariate(1.0 / cfg.turns_mu)) + 1))
-        cat = _prompts.sample_category(rng, mix)
-
-        turns = [Turn(_prompts.make_request(rng, cat.name,
-                                            _lognormal_int(rng, cat.in_mu, cat.in_sigma,
-                                                           cfg.input_len_cap)),
-                      _lognormal_int(rng, cat.out_mu, cat.out_sigma, cfg.output_len_cap),
-                      cat.name)]
-        for _ in range(k - 1):
-            # Follow-ups are short; the growth comes from accumulated history,
-            # not from the user typing more.
-            turns.append(Turn(rng.choice(_FOLLOWUPS),
-                              _lognormal_int(rng, cat.out_mu, cat.out_sigma,
-                                             cfg.output_len_cap),
-                              cat.name))
-        think = tuple(min(60.0, rng.lognormvariate(cfg.think_mu, cfg.think_sigma))
-                      for _ in range(k))
-        sessions.append(Session(i, at, system, tuple(turns), think))
-
-    return SessionTrace(tuple(sessions), cfg)

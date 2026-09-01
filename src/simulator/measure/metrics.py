@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-from .config import SLO
+from ..slo import SLO
 
 
 @dataclass
@@ -124,13 +124,14 @@ def summarize(results: list[RequestResult], slo: SLO, window_s: float | None = N
 
     # A request is "good" only if it met both targets. Requests that failed or
     # never produced a token are never good.
+    ttft_lim, tpot_lim = slo.per_request_limits()
     good = 0
     for r in ok:
         t, p = r.ttft_ms, r.tpot_ms
-        if t is None or t > slo.ttft_ms:
+        if t is None or t > ttft_lim:
             continue
         # Single-token outputs have no TPOT to violate.
-        if p is not None and p > slo.tpot_ms:
+        if p is not None and p > tpot_lim:
             continue
         good += 1
 
@@ -158,7 +159,7 @@ def summarize(results: list[RequestResult], slo: SLO, window_s: float | None = N
         "e2e_ms": _stats(e2es),
         # ── harness self-check ──
         "client_dispatch_lag_ms": _stats(lags),
-        "slo": asdict(slo),
+        "slo": slo.as_dict(),
         "errors": _error_counts(failed),
     }
 

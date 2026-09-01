@@ -154,7 +154,7 @@ def to_sessions(traces: list[list[TraceRound]], system_tokens: int = 400,
     import random as _r
 
     from . import prompts as _p
-    from .workload import Session, Turn
+    from .sessions import Session, Turn
 
     rng = _r.Random(seed)
     system = _p._pad_to(_p.SYSTEM_PROMPTS[2][1], system_tokens, _r.Random(seed * 31))
