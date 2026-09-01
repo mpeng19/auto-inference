@@ -229,7 +229,8 @@ def test_slo_tiers_are_stricter_than_a_single_p99():
     """
     from autoinf.config import SLO
 
-    single = SLO(ttft_ms=1000, tpot_ms=45)
+    single = SLO(ttft_ms=1000, tpot_ms=45,
+                 ttft_p90_ms=None, tpot_p90_ms=None)
     two = SLO(ttft_ms=1000, tpot_ms=45, ttft_p90_ms=400, tpot_p90_ms=25)
     assert single.tiers() == [(99, 1000, 45)]
     assert two.tiers() == [(90, 400, 25), (99, 1000, 45)]

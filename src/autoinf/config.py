@@ -295,8 +295,13 @@ class SLO:
     loosening the percentile can describe the same service quality with far
     less measurement noise.
     """
-    ttft_ms: float = 500.0
-    tpot_ms: float = 40.0               # mean inter-token latency per request
+    # Agreed 2026-09-01. TTFT is judged at p90 -- a per-request measurement
+    # whose p99 our window lengths cannot resolve (at 90 s the "p99" is the
+    # single worst request). TPOT is judged at p99 because it is ALREADY a mean
+    # over ~2,000 tokens within a request, so its across-request p99 is a
+    # meaningful tail rather than an extreme order statistic on raw samples.
+    ttft_ms: float = 1000.0             # p99 TTFT
+    tpot_ms: float = 50.0               # p99 TPOT -- the binding decode target
     percentile: int = 99
 
     # A second, tighter tier. Industry guidance for interactive serving sets
@@ -305,8 +310,8 @@ class SLO:
     # which is the actual product requirement. For a mid-size model the quoted
     # bands are p90 TTFT 300-500 ms / p99 800-1500 ms, and p90 TPOT 15-30 ms /
     # p99 35-50 ms -- with p99 TPOT above 60 ms said to visibly stutter.
-    ttft_p90_ms: float | None = None
-    tpot_p90_ms: float | None = None
+    ttft_p90_ms: float | None = 300.0   # the binding prefill target
+    tpot_p90_ms: float | None = 25.0
 
     def tiers(self) -> list[tuple[int, float, float]]:
         """(percentile, ttft_ms, tpot_ms), tightest first."""
