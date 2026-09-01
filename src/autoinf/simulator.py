@@ -361,7 +361,7 @@ SWEEP_2026_08_31 = [
 # tokens: `min(max_new_tokens, CLIP_MAX_NEW_TOKENS=4096) * new_token_ratio`,
 # where `new_token_ratio` scales with `--schedule-conservativeness`.
 #
-# That is why batch and GPU count were confounded (§3.3.1 of docs/design.md):
+# That is why batch and GPU count were confounded (§3.3.1 of docs/methodology.md):
 # the KV pool scales with GPU count, so the ceiling does too. Backing out an
 # implied bytes-per-sequence from the sweep:
 #
@@ -376,7 +376,7 @@ SWEEP_2026_08_31 = [
 # decode reservation plus page rounding. **TP=8 is the outlier**: it reaches
 # only ~54% of the same ceiling, so at TP=8 something other than memory caps
 # admission. Since cost falls with batch, that gap is the largest identified
-# saving in the stack -- see docs/design.md §8.2.
+# saving in the stack -- see docs/methodology.md §8.2.
 
 # Calibrated on TP 1/2/4 at ~22.7k context ONLY. It does not transfer: at 6k
 # context the implied charge is 2.1-2.3 GB/sequence against 2.8-3.2 GB at
@@ -487,7 +487,7 @@ def discriminate(obs: list[Observation]) -> dict:
 
     So the discriminating statistic is simply whether `step` is flat or rising.
     This is the test the TP sweep could not run, because there batch and GPU
-    count moved together (docs/design.md §3.3.1c).
+    count moved together (docs/methodology.md §3.3.1c).
 
     Returns the observed step spread against each model's prediction. All
     observations must share `n_gpu`, `model` and `gpu`.

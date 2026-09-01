@@ -2,7 +2,7 @@
 
 Written 2026-08-31. **The** handoff document — a second one at the repo
 root was retired into the appendix below on 2026-08-31. Companions:
-`docs/design.md` (how the simulator works and what it assumes) and
+`docs/methodology.md` (how the simulator works and what it assumes) and
 `docs/checklist.md` (the plan). This file is what a fresh session needs
 to pick up without re-deriving anything.
 

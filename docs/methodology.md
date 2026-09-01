@@ -1,4 +1,4 @@
-# Design: the serving-cost simulator
+# Methodology: how the serving-cost simulator was built and checked
 
 Written 2026-08-31. Companion to `docs/HANDOFF.md` (resume state) and
 `docs/checklist.md` (plan). This document states what the simulator computes,
