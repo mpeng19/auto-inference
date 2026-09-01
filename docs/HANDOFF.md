@@ -908,8 +908,8 @@ sweep three levels in once.
 Four things worth knowing:
 
 1. **`root_dir` must exist.** Every artifact goes there -- `sweep.json`,
-   `result.json`, `config.json`, `report.txt`, `slo-frontier.png`,
-   `price-vs-share.png`. A result is a directory you can hand to someone.
+   `result.json`, `config.json`, `report.txt`, one `slo-<bound>.png` per SLO
+   bound, `price-vs-share.png` and `price-vs-demand.png`. A result is a directory you can hand to someone.
 2. **A stack travels by value.** `InferenceStack` carries file *text*, not
    paths, so an evaluation is reproducible from its record with no mounted
    directory and no image rebuild. `stack.digest` is a content hash: the cache

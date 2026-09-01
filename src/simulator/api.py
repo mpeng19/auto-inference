@@ -55,6 +55,10 @@ class Point:
     goodput_rps: float
     batch: float
     hit_rate: float
+    # Aggregate delivered output tokens per second per GPU. This is the
+    # performance axis: cost per output token is its reciprocal times the
+    # rate, so a plot against it is a plot against money.
+    output_tps_per_gpu: float
     gpu_s_per_request: float
     effective_in_per_m: float
     out_per_m: float
@@ -332,6 +336,9 @@ class Simulator:
                 goodput_rps=lv["goodput_rps"],
                 batch=(lv.get("batch", {}).get("running") or {}).get("mean", 0.0),
                 hit_rate=lv.get("cache_hit_rate") or 0.0,
+                output_tps_per_gpu=(lv["output_tokens"]
+                                    / max(lv.get("wall_s") or 0.0, 1e-9)
+                                    / max(n_gpu, 1)),
                 gpu_s_per_request=gsr,
                 effective_in_per_m=p.effective_in_per_m, out_per_m=p.out_per_m,
                 bill_per_1k=m.bill_per_1k(p.effective_in_per_m, p.out_per_m),

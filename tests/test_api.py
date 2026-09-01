@@ -37,9 +37,15 @@ def test_root_dir_must_already_exist(tmp_path):
 def test_every_artifact_lands_in_root(root, sweep):
     res = sim(root).finish(sweep)
     for name in ("sweep", "result", "config", "report",
-                 "slo_frontier", "price_vs_share"):
+                 "price_vs_share", "price_vs_demand"):
         assert name in res.artifacts, name
         assert (root / res.artifacts[name].rsplit("/", 1)[-1]).exists()
+    # One SLO figure per bound, each its own file: three panels crammed into
+    # one image are three plots nobody can read.
+    slo_figs = [k for k in res.artifacts if k.startswith("slo_")]
+    assert len(slo_figs) == len(sim(root).slo.bounds)
+    for k in slo_figs:
+        assert (root / res.artifacts[k].rsplit("/", 1)[-1]).exists()
     assert "N* = 12" in (root / "report.txt").read_text()
 
 

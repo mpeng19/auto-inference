@@ -26,8 +26,9 @@ N* = 12 users   batch 5.0   hit 0.748   7.34 GPU-s per market request
 ```
 
 Every artifact lands in `root_dir`: the raw sweep, the priced curve, a report,
-and two figures — where the SLO stops us, and what that costs against market
-share.
+and one figure per question — a `slo-<bound>.png` for each SLO bound (aggregate
+throughput on y, the constraint on x, one point per concurrency, the forbidden
+region shaded), plus `price-vs-share.png` and `price-vs-demand.png`.
 
 ## Setup, from a fresh clone
 
