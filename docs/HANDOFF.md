@@ -593,11 +593,51 @@ what to actually run.
     utilisation  0.50                       margin 0.0 -> report BREAK-EVEN
     traffic      TraceLab rescaled to 20,583 in / 2,076 out per request
 
-1xH100 rather than the cheaper A100 80GB because Ampere (SM80) has **no FP8
-tensor cores** and this checkpoint is block-quantised FP8 — it would dequantise
-to bf16 and we would be measuring a different machine. Not L40S either:
-decode is bandwidth-bound, so L40S is half the hourly price and ~1.9x the cost
-per token, and holds only ~12 conversations of KV.
+**Why 1xH100 and not something else.**
+
+*Not A100 80GB* (cheaper per hour): Ampere is SM80 and has **no FP8 tensor
+cores**. This checkpoint is block-quantised FP8, so it would dequantise to
+bf16 — a different machine from the one we are pricing. Same trap as the A10G
+check in §6.
+
+*Not L40S* (cheaper still): decode is bandwidth-bound, so L40S is half the
+hourly price and **~1.9x the cost per token**, and its 48 GB holds only ~12
+conversations of KV. Renting slow GPUs is a false economy here.
+
+*Not 2xH100*, even though it may price lower. Two effects fight:
+
+    at the same batch   1 GPU is cheaper -- TP costs n^0.29 = 1.22x
+    at its own ceiling  2 GPUs reach ~42 convs vs ~17, so ~1.34x cheaper
+                        IF it reaches that ceiling, which the SLO has
+                        never allowed (measured batch 12-36, not 42)
+
+The decisive argument is not price. **`tp_decay = 0.29` is a fitted term that
+exists only to describe TP loss, and at n_gpu = 1 it is exactly 1.0 and drops
+out.** A 1-GPU baseline therefore has strictly fewer unmodelled effects, and a
+diff measured against it cannot be confounded by TP scaling. It is also half
+the cost per run, which matters because **every evaluation needs its own
+sweep**.
+
+Optimise on 1xH100; re-measure on 2 before committing to a deployment.
+
+**Batch is deliberately left unbounded** (`max_running_requests = 256`, never
+binding). In production the scheduler admits whatever fits, so batch is an
+outcome that tracks load. Capping it would measure a system we would not
+deploy. The cap remains useful as a *diagnostic* — fix offered load, sweep the
+cap, and cost-vs-batch falls out with everything else held constant — but note
+that capping trades one SLO for the other: a smaller batch gives faster steps
+(better TPOT) and a longer queue (worse TTFT), so the feasible region is a
+band in (offered load, batch cap), not a point.
+
+**On 1xH100 expect memory to bind sooner than it did on two:**
+
+    68 GB reserved at mem-fraction 0.85
+    23.1 GB weights (FP8, unsharded -- only one GPU)
+    45 GB KV pool / 1.50 GB per 20.6k conversation
+    -> ~30 conversations, ~17 after the scheduler's decode reserve
+
+and price to land between ~$1.55/M output (batch 30) and ~$3.20/M (batch 10),
+depending entirely on the batch sustained.
 
 ### The SLOs, taken from what the market actually publishes
 
