@@ -801,7 +801,7 @@ not serve from. That is exactly the bias §6b retired it for, now measured at
 
 Settled 2026-09-01. A single effective price is the wrong deliverable: price
 depends on how much demand we win, and demand depends on price. The right
-object is a curve. `docs/price-vs-share.png`, `scripts/plot_share.py`.
+object is a curve. `docs/price-vs-share.png` (the one-off); the product now renders this per run from `simulator.artifacts.plots`.
 
 ### The SLO, final
 

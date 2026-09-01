@@ -169,8 +169,31 @@ def fleet_utilisation(cv_single: float, n_models: int, sigma: float = 2.0) -> fl
 
 # ── the market snapshot, as scraped ──────────────────────────────────────
 
-DATA = pathlib.Path(__file__).resolve().parents[3] / "data"
-SNAPSHOT = DATA / "market-qwen-qwen3.8-27b.json"
+SNAPSHOT_NAME = "market-qwen-qwen3.8-27b.json"
+
+
+def _find_snapshot() -> pathlib.Path:
+    """The market snapshot is data, not code, so it may sit outside the package.
+
+    Checked in order: an explicit AUTOINF_MARKET_DATA, the repo checkout, and
+    the working directory. Failing all three, say which paths were tried --
+    a missing denominator silently turning into a wrong market share would be
+    much worse than a stack trace.
+    """
+    import os
+    tried = []
+    env = os.environ.get("AUTOINF_MARKET_DATA")
+    if env:
+        tried.append(pathlib.Path(env))
+    here = pathlib.Path(__file__).resolve()
+    tried += [here.parents[3] / "data" / SNAPSHOT_NAME,
+              pathlib.Path.cwd() / "data" / SNAPSHOT_NAME]
+    for t in tried:
+        if t.is_file():
+            return t
+    raise FileNotFoundError(
+        "no market snapshot found; tried " + ", ".join(str(t) for t in tried)
+        + ".  Refresh it with `make market`, or set AUTOINF_MARKET_DATA.")
 
 
 @dataclass(frozen=True)
@@ -205,7 +228,7 @@ class Market:
         week is the compromise, and the full series is kept so the choice can
         be revisited without re-scraping.
         """
-        d = json.loads(pathlib.Path(path or SNAPSHOT).read_text())
+        d = json.loads(pathlib.Path(path or _find_snapshot()).read_text())
         s = d["summary"]
         daily = [float(r["count"]) for r in d.get("daily", [])]
         win = daily[-window_days:] if daily else []
