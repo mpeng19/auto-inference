@@ -122,3 +122,27 @@ def test_burst_utilisation_is_derived_not_assumed():
     # more of this model.
     assert fleet_utilisation(b["cv"], 1) < 0.60
     assert fleet_utilisation(b["cv"], 100) > 0.85
+
+
+def test_pricing_defaults_are_the_agreed_basis():
+    """A hardcoded copy of the basis kept reporting the superseded numbers.
+
+    `launch.py` and `modal_app.price` both restated $2.50/60%/25% inline, so
+    changing `DEFAULT_BASIS` to the agreed $3.00/50%/break-even silently did
+    nothing to what runs printed. Call sites must inherit, not restate.
+    """
+    import pathlib
+
+    from autoinf.pricing import (COST_BASES, DEFAULT_BASIS, DEFAULT_MARGIN,
+                                 DEFAULT_UTILISATION)
+
+    assert COST_BASES[DEFAULT_BASIS][0] == 3.00
+    assert DEFAULT_UTILISATION == 0.50
+    assert DEFAULT_MARGIN == 0.0          # break-even; margin stated separately
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for f in ("scripts/launch.py", "src/autoinf/modal_app.py"):
+        src = (root / f).read_text()
+        assert 'basis="nebius-h100-committed"' not in src, f
+        assert "utilization=0.6" not in src, f
+        assert "margin=0.25" not in src, f

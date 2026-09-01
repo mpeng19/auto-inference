@@ -1323,8 +1323,8 @@ MARKET_INPUT_OUTPUT_RATIO = 18.4
 
 @app.local_entrypoint()
 def price(levels: str = "1,2,4,8,16,32,64,128", seconds: float = 90.0,
-          repeats: int = 1, basis: str = "nebius-h100-committed",
-          utilization: float = 0.6, margin: float = 0.25,
+          repeats: int = 1, basis: str = "",
+          utilization: float = 0.0, margin: float = -1.0,
           ttft_ms: float = 1000.0, tpot_ms: float = 50.0):
     """Measure the SLO frontier, attribute cost per token, and price it.
 
@@ -1392,8 +1392,15 @@ def price(levels: str = "1,2,4,8,16,32,64,128", seconds: float = 90.0,
     if not cond["well_conditioned"]:
         print(f"  !! {cond['note']}")
 
-    p = prices(attr, basis=basis, n_gpu=sc.n_gpu,
-               utilization=utilization, margin=margin)
+    # Fall through to the module defaults (the agreed basis: $3.00/GPU-hr,
+    # 50% utilisation, break-even) unless a caller overrides deliberately.
+    # These used to be hardcoded here and kept reporting the superseded
+    # $2.50/60%/25% long after the basis changed.
+    from autoinf.pricing import (DEFAULT_BASIS, DEFAULT_MARGIN,
+                                 DEFAULT_UTILISATION)
+    p = prices(attr, basis=basis or DEFAULT_BASIS, n_gpu=sc.n_gpu,
+               utilization=utilization or DEFAULT_UTILISATION,
+               margin=DEFAULT_MARGIN if margin < 0 else margin)
     f = fmt_prices(p)
     print(f"\n{basis} @ ${p['usd_per_gpu_hour']}/GPU-hr, "
           f"utilisation {utilization:.0%}, margin {margin:.0%}")

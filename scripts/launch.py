@@ -172,10 +172,14 @@ def report(rec: dict) -> None:
               "numbers, which is worse than reporting nothing.")
         return
 
-    p = prices(attr, basis="nebius-h100-committed",
-               n_gpu=rec["serving"].get("n_gpu", 1), utilization=0.6, margin=0.25)
+    # Use the module defaults (the agreed basis) rather than restating them
+    # here -- a hardcoded copy silently kept reporting $2.50/60%/25% after the
+    # basis moved to $3.00/50%/break-even.
+    p = prices(attr, n_gpu=rec["serving"].get("n_gpu", 1))
     f = fmt_prices(p)
-    print(f"\n{p['basis']} @ ${p['usd_per_gpu_hour']}/GPU-hr, util 60%, margin 25%")
+    print(f"\n{p['basis']} @ ${p['usd_per_gpu_hour']}/GPU-hr, "
+          f"util {p['utilization']:.0%}, "
+          f"margin {p['margin']:.0%}{' (break-even)' if not p['margin'] else ''}")
     print(f"  in ${f['price_in_per_mtok']}/M   cached ${f['price_cached_in_per_mtok']}/M"
           f"   out ${f['price_out_per_mtok']}/M")
 
