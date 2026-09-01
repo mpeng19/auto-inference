@@ -181,3 +181,22 @@ def test_price_direct_rejects_impossible_inputs():
         price_direct(1.0, 1.0, 0, 100, 0)                  # no input tokens
     with pytest.raises(ValueError):
         price_direct(1.0, 1.0, 100, 100, 0, utilization=0)  # divide by zero
+
+
+def test_counters_keep_the_category_label():
+    """Summing across labels discarded the prefill/decode split.
+
+    `forward_execution_seconds_total` carries a `category` label. Folding it
+    into one number threw away exactly the phase breakdown that makes direct
+    pricing possible -- and the aggregate still looked perfectly sensible, so
+    nothing flagged it.
+    """
+    from autoinf.server_metrics import Snapshot
+
+    snap = Snapshot.parse(
+        'sglang:forward_execution_seconds_total{m="x",category="prefill"} 41.5\n'
+        'sglang:forward_execution_seconds_total{m="x",category="decode"} 61.6\n')
+    c = snap.counters
+    assert c["sglang:forward_execution_seconds_total"] == pytest.approx(103.1)
+    assert c["sglang:forward_execution_seconds_total[prefill]"] == pytest.approx(41.5)
+    assert c["sglang:forward_execution_seconds_total[decode]"] == pytest.approx(61.6)

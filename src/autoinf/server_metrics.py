@@ -24,6 +24,7 @@ from dataclasses import dataclass
 # as a difference between two points in time.
 _LINE = re.compile(r'^(?P<name>[a-zA-Z_:][\w:]*)(?P<labels>\{[^}]*\})?\s+(?P<value>\S+)$')
 _LE = re.compile(r'le="([^"]+)"')
+_CATEGORY = re.compile(r'category="([^"]+)"')
 
 INTERESTING = (
     "sglang:time_to_first_token_seconds",
@@ -84,7 +85,17 @@ class Snapshot:
                     buckets.setdefault(base, {})[edge] = \
                         buckets.setdefault(base, {}).get(edge, 0.0) + v
             elif name.endswith(("_sum", "_count", "_total")):
+                # Summing across labels loses the split that makes some
+                # counters useful. `forward_execution_seconds_total` carries a
+                # `category` label separating prefill from decode -- exactly the
+                # phase breakdown cost attribution wants -- and folding it into
+                # one number discarded it. Keep a per-category key alongside the
+                # aggregate so existing readers are unaffected.
                 counters[name] = counters.get(name, 0.0) + v
+                cat = _CATEGORY.search(labels)
+                if cat:
+                    k = f"{name}[{cat.group(1)}]"
+                    counters[k] = counters.get(k, 0.0) + v
             else:
                 gauges[name] = v
         return Snapshot(buckets, counters, gauges)

@@ -238,3 +238,23 @@ def forward_time(name: str):
     print("\n  busy frac = forward GPU-time / wall GPU-time. At saturation the")
     print("  regression assumes this is ~1.0; anything well below it means wall")
     print("  clock overstates work and every per-token cost is inflated by 1/frac.")
+
+
+@app.local_entrypoint()
+def phases(name: str):
+    """Per-phase forward GPU time, and prices computed straight from it.
+
+    With `busy_frac ~ 1.0` established, the interesting content is the phase
+    label: if forward time splits prefill from decode, effective input price
+    is `prefill_gpu_s / input_tokens` and no decomposition is needed.
+    """
+    r = _get.remote(name)
+    for m in r.get("mixes", []):
+        ctr = m.get("server_counters") or {}
+        fwd = {k: v for k, v in ctr.items() if "forward_execution_seconds" in k}
+        print(f"\n{m['mix']}  (wall GPU-s {m.get('gpu_seconds')})")
+        if not fwd:
+            print("   no forward_execution counters")
+            continue
+        for k, v in sorted(fwd.items()):
+            print(f"   {k} = {v:.2f}")
