@@ -242,3 +242,46 @@ def test_calibration_is_target_model_only():
                     model="Qwen/Qwen3-4B-Instruct-2507-FP8")]
     with pytest.raises(ValueError, match="model may not"):
         assert_target_model(bad)
+
+
+def _synth(world, batches, ctx=4000, n_gpu=1, bw_frac=0.27):
+    from autoinf.simulator import Observation, decode_bytes_per_step
+    out = []
+    for b in batches:
+        if world == "constant-step":
+            step = 0.0214
+        else:
+            step = decode_bytes_per_step(M, b, ctx) / (H.hbm_bandwidth * n_gpu) / bw_frac
+        out.append(Observation(n_gpu=n_gpu, batch=b, context=ctx,
+                               gpu_s_out=step * n_gpu / b))
+    return out
+
+
+def test_discriminate_identifies_each_world():
+    """The test must be able to return either answer, or it proves nothing."""
+    from autoinf.simulator import discriminate
+
+    assert discriminate(_synth("constant-step", (31, 69, 117)))["verdict"] == "constant-step"
+    assert discriminate(_synth("roofline", (31, 69, 117)))["verdict"] == "roofline"
+
+
+def test_the_two_models_are_separable_over_the_planned_batch_range():
+    """At 1xH100 / 4k context, roofline predicts step ~doubles over 31->117.
+
+    If the predictions were close the experiment would be pointless, so assert
+    the separation is large relative to the 8% fit noise before trusting any
+    verdict from it.
+    """
+    from autoinf.simulator import discriminate, FIT_NOISE
+
+    d = discriminate(_synth("roofline", (31, 117)))
+    assert d["roofline_predicts"] > 1.8
+    assert (d["roofline_predicts"] - 1.0) > 4 * FIT_NOISE
+
+
+def test_discriminate_refuses_mixed_gpu_counts():
+    """Mixing GPU counts reintroduces the confound this test exists to break."""
+    from autoinf.simulator import SWEEP_2026_08_31, discriminate
+
+    with pytest.raises(ValueError, match="one GPU count"):
+        discriminate(SWEEP_2026_08_31)

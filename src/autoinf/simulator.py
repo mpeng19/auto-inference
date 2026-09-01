@@ -460,3 +460,55 @@ def assert_target_model(obs: list[Observation]) -> None:
         raise ValueError(
             f"calibration data must all be {TARGET_MODEL}; got {wrong}. "
             "The GPU may vary; the model may not.")
+
+
+def discriminate(obs: list[Observation]) -> dict:
+    """Constant-step vs roofline, on observations that share a GPU count.
+
+    The two models disagree sharply about what happens as batch grows at fixed
+    hardware. Writing `step = gpu_s_out * batch / n_gpu`:
+
+      * constant-step says `step` does not move with batch;
+      * roofline says `step = (W + batch*per_seq) / bandwidth`, which grows —
+        at 1xH100 and 4k context it roughly doubles from batch 31 to 117.
+
+    So the discriminating statistic is simply whether `step` is flat or rising.
+    This is the test the TP sweep could not run, because there batch and GPU
+    count moved together (docs/design.md §3.3.1c).
+
+    Returns the observed step spread against each model's prediction. All
+    observations must share `n_gpu`, `model` and `gpu`.
+    """
+    assert_target_model(obs)
+    if len({(o.n_gpu, o.gpu) for o in obs}) != 1:
+        raise ValueError("discriminate() needs one GPU count and type")
+    if len(obs) < 2:
+        return {"available": False, "reason": "need >= 2 batches"}
+
+    o0 = obs[0]
+    m, hw = MODELS[o0.model], HARDWARE[o0.gpu]
+    rows = []
+    for o in sorted(obs, key=lambda x: x.batch):
+        step = o.gpu_s_out * o.batch / o.n_gpu
+        roof = decode_bytes_per_step(m, int(o.batch), o.context) / (
+            hw.hbm_bandwidth * o.n_gpu)
+        rows.append({"batch": round(o.batch, 1), "step_ms": round(step * 1e3, 2),
+                     "roofline_step_ms": round(roof * 1e3, 2),
+                     "implied_bw_frac": round(roof / step, 3)})
+
+    steps = [r["step_ms"] for r in rows]
+    roofs = [r["roofline_step_ms"] for r in rows]
+    obs_spread = max(steps) / min(steps)
+    roof_spread = max(roofs) / min(roofs)
+    # Which prediction is the observed spread closer to, in log space?
+    import math
+    d_const = abs(math.log(obs_spread))
+    d_roof = abs(math.log(obs_spread) - math.log(roof_spread))
+    return {"available": True, "rows": rows,
+            "batch_range": round(max(o.batch for o in obs)
+                                 / min(o.batch for o in obs), 2),
+            "observed_step_spread": round(obs_spread, 3),
+            "constant_step_predicts": 1.0,
+            "roofline_predicts": round(roof_spread, 3),
+            "verdict": ("constant-step" if d_const < d_roof else "roofline"),
+            "margin": round(abs(d_const - d_roof), 3)}
