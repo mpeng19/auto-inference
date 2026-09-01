@@ -32,7 +32,7 @@ deploy:          ## push the runner so `submit` can find it
 	uv run modal deploy src/simulator/runner/modal_runner.py
 
 spend:           ## current Modal spend
-	uv run python ops/spend_monitor.py
+	uv run python monitor/spend_monitor.py
 
 market:          ## refresh data/market-*.json from OpenRouter
 	uv run python -m simulator.price.market_pull

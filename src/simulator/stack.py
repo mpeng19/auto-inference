@@ -49,7 +49,7 @@ class InferenceStack:
     """Stock SGLang, optionally with files replaced or patches applied.
 
         InferenceStack.stock()                     # the baseline
-        InferenceStack.from_dir("overlays")        # a mirrored sglang/ tree
+        InferenceStack.from_dir("my-diff/")        # a mirrored sglang/ tree
         InferenceStack.from_files({"srt/managers/schedule_policy.py": path})
 
     `files` maps a path *relative to the sglang package root* to the full text

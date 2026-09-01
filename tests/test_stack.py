@@ -1,5 +1,7 @@
 """A stack is identified by its content, because that is the cache key."""
 
+import json
+
 from simulator.stack import InferenceStack
 
 
@@ -30,11 +32,17 @@ def test_travels_by_value(tmp_path):
     assert r.digest == s.digest and r.files == s.files
 
 
-def test_reads_the_repo_overlays():
-    s = InferenceStack.from_dir("overlays")
-    assert not s.is_stock
-    assert "srt/managers/schedule_policy.py" in s.files
-    assert s.upstream_sha, "UPSTREAM.json must be read, or drift goes undetected"
+def test_reads_the_upstream_manifest(tmp_path):
+    """Without it, drift goes undetected: a stack derived from an older sglang
+    would silently revert upstream changes while still looking like a valid
+    experiment."""
+    (tmp_path / "sglang" / "srt" / "managers").mkdir(parents=True)
+    (tmp_path / "sglang" / "srt" / "managers" / "schedule_policy.py").write_text("x = 1\n")
+    (tmp_path / "UPSTREAM.json").write_text(json.dumps(
+        {"srt/managers/schedule_policy.py":
+         {"sglang_version": "0.5.18", "upstream_sha": "7fa154986e574cab"}}))
+    s = InferenceStack.from_dir(tmp_path)
+    assert s.upstream_sha["srt/managers/schedule_policy.py"] == "7fa154986e574cab"
 
 
 def test_patches_are_keyed_to_their_target(tmp_path):

@@ -7,7 +7,7 @@ serve marketplace traffic at, and how much of that market can it hold?**
     from simulator import Simulator, InferenceStack
 
     sim = Simulator(root_dir="runs/my-diff",
-                    stack=InferenceStack.from_dir("overlays"))
+                    stack=InferenceStack.from_dir("my-diff/"))
     result = await sim.eval()
     print(result.summary())
 

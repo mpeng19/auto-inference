@@ -890,9 +890,9 @@ Everything above describes research. This section describes what to *use*.
       runner/modal_runner.py   ONE remote function: `sweep`
       artifacts/            report and the two figures, written to root_dir
       cli.py                `simulate run|submit|collect|rescore|ls`
-    research/               retired code and the reasoning, see its README
-    ops/                    spend monitoring
-    tests/                  44 tests, no GPU, no network
+    monitor/                Modal spend monitoring
+    tests/                  112 tests, no GPU, no network
+    docs/methodology.md     how the method was arrived at, every negative result
 
 ### The API
 
@@ -940,13 +940,25 @@ rescore exactly; `good_frac` does not, so it is kept only as a blow-up detector
 `SLO.judge` and pinned by
 `test_good_frac_is_a_runtime_gate_not_a_rescoring_one`.
 
-### Deliberately left out of the product
+### Deliberately left out of the product, and then deleted
 
-The predictive cost model (`research/autoinf/simulator.py`) -- it is a
-different thing from the product's `Simulator`, which measures rather than
-predicts, and its calibration does not transfer to market context (SS6c). Phase
-B attribution. The nine-workload eval suite. The experiment ledger, which comes
-back with the auto-research harness.
+The predictive cost model, phase-B NNLS attribution, the roofline capacity
+model, the nine-workload eval suite, synthetic session generation, the
+open-loop load generator, `nvidia-smi` sampling, the recording gateway, the
+LLM-driven virtual users, and the experiment ledger.
+
+They lived in `research/` for a day and were removed on 2026-09-01. Every
+*finding* they produced is in `docs/methodology.md` -- the fitted constants
+(`14.59ms + 0.1505ms x B`, `f_weights 0.47`, `f_kv 1.00`, `tp_decay 0.29`), the
+three rejected models with their errors, the failed prospective test, and the
+retractions. The code added nothing the prose does not say, was already
+import-broken by the split, and **git history has all of it** if a specific
+implementation is ever wanted again.
+
+`overlays/` went the same way: it held two *pristine* vendored sglang files
+with zero edits, so applying it was a no-op that looked like a diff, and the
+notebook presented it as an example. A stack is now built from whatever
+directory you point at.
 
 ## 7. Commands
 

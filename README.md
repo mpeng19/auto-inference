@@ -10,7 +10,7 @@ serve marketplace traffic at, and how much of that market can it hold?*
 from simulator import Simulator, InferenceStack
 
 sim = Simulator(root_dir="runs/my-diff",
-                stack=InferenceStack.from_dir("overlays"))
+                stack=InferenceStack.from_dir("my-diff/"))   # or .stock()
 result = await sim.eval()
 print(result.summary())
 ```
@@ -89,9 +89,11 @@ src/simulator/          the product
   price/                GPU-seconds -> price -> market share
   runner/               where a sweep executes (Modal, one entrypoint)
   artifacts/            report and figures written into root_dir
-research/               how we got here: retired code, negative results, docs
-ops/                    spend monitoring
-docs/HANDOFF.md         the running log; read §6b-§6d for the settled method
+monitor/                Modal spend monitoring
+docs/HANDOFF.md         the running log; §6b-§6e is the settled method
+docs/methodology.md     how the method was arrived at, and every negative result
+docs/example.ipynb      minimal end-to-end notebook
+docs/examples/          what a finished run leaves behind
 ```
 
 ## Commands
