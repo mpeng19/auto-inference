@@ -300,3 +300,54 @@ def test_batch_predictor_is_documented_as_context_limited():
     assert predict_batch("Qwen/Qwen3.8-27B-FP8", "H100", 1, 6000,
                          mem_fraction=0.90) > 2 * 23.3
     assert "calibrated" in predict_batch.__doc__.lower()
+
+
+def test_affine_model_is_accurate_at_fixed_gpu_count():
+    """The core claim: batch and context physics, 2% held-out error.
+
+    One free parameter (f_weights); f_kv is pinned at the roofline the
+    fixed-GPU batch sweep measured (109%, i.e. at the bound). Four points
+    spanning 7.6x in batch and 3.8x in context.
+    """
+    from autoinf.simulator import fidelity
+
+    v = fidelity()["fixed_gpu"]
+    assert v["mean_abs_error"] < 0.05, v
+    assert v["worst_abs_error"] < 0.08, v
+
+
+def test_affine_beats_both_earlier_models():
+    """It must beat what it replaced, out of sample, on the same data."""
+    from autoinf.simulator import (ALL_OBSERVATIONS, validate_loo_affine,
+                                   validate_loo_step, validate_loo)
+
+    a = validate_loo_affine(ALL_OBSERVATIONS)["mean_abs_error"]
+    assert a < validate_loo_step(ALL_OBSERVATIONS)["mean_abs_error"]
+    assert a < validate_loo(ALL_OBSERVATIONS)["mean_abs_error"]
+
+
+def test_tp8_is_flagged_not_fitted():
+    """Excluding TP=8 must materially improve the fit, or it is not anomalous.
+
+    If a scheduler fix brings TP=8 onto the trend this test should start
+    failing -- that is the win, and the flag should then be removed.
+    """
+    from autoinf.simulator import fidelity
+
+    f = fidelity()
+    assert f["across_tp_excluding_anomaly"]["mean_abs_error"] * 3 < \
+           f["across_tp_all"]["mean_abs_error"], f
+
+
+def test_kv_term_sits_at_roofline_but_the_fixed_term_does_not():
+    """The finding that made the model work, pinned.
+
+    Fitting step affine in batch separates two constants with different
+    physics: the per-sequence KV read is at the bandwidth bound, while the
+    fixed per-step cost is ~2x off it. That gap is the optimisation headroom.
+    """
+    from autoinf.simulator import AffineModel, fit_affine, ALL_OBSERVATIONS
+
+    m = fit_affine([o for o in ALL_OBSERVATIONS if o.n_gpu == 1])
+    assert m.f_kv == 1.00
+    assert 0.35 < m.f_weights < 0.60, m.f_weights

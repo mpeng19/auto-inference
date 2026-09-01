@@ -525,3 +525,121 @@ def discriminate(obs: list[Observation]) -> dict:
             "roofline_predicts": round(roof_spread, 3),
             "verdict": ("constant-step" if d_const < d_roof else "roofline"),
             "margin": round(abs(d_const - d_roof), 3)}
+
+
+# ── the model that fits both regimes ─────────────────────────────────────
+#
+# Neither pure model was right. A three-point batch sweep at FIXED n_gpu=1
+# (mem-fraction 0.45/0.65/0.90, batches 3.06/12.70/23.30 -- a 7.6x range with
+# the n_gpu confound finally broken) gives:
+#
+#     step(B) = 14.59ms + 0.1505ms * B          residuals < 0.3ms
+#
+# Compared term by term against roofline at 1xH100, 6k context:
+#
+#     fixed term  14.59ms  vs weights/BW 6.89ms    -> 47% of bandwidth
+#     slope      0.1505ms  vs per-seq/BW 0.164ms   -> ~100% of bandwidth
+#
+# **The KV term is at roofline; only the fixed per-step cost is off, by 2.1x.**
+# That explains why the earlier tests disagreed: at small batch the fixed term
+# dominates and the system looks constant-step (TP sweep, batches 15-97 at long
+# context); at large batch the KV term dominates and it looks roofline.
+#
+# Tensor parallelism divides both terms by n_gpu but does not scale perfectly,
+# so an efficiency g(n) = n**-tp_decay carries the loss measured across TP
+# 1/2/4/8.
+
+@dataclass(frozen=True)
+class AffineModel:
+    """step = [W/(BW*f_w) + per_seq*batch/(BW*f_kv)] / (n_gpu * n_gpu**-tp_decay)."""
+    f_weights: float = 0.47      # fraction of bandwidth on the fixed weight read
+    f_kv: float = 1.00           # fraction of bandwidth on the per-sequence KV read
+    # Fitted on TP 1/2/4 only. TP=8 needs g=0.36 where this predicts 0.55 --
+    # a 35% shortfall on top of its known batch under-fill (§8.2), so TP=8 is
+    # excluded from the fit and flagged rather than smoothed over.
+    tp_decay: float = 0.29       # TP scaling loss; g(n) = n ** -tp_decay
+
+    def step_s(self, model: str, gpu: str, n_gpu: int, batch: float,
+               context: int) -> float:
+        m, hw = MODELS[model], HARDWARE[gpu]
+        fixed = m.active_params * WEIGHT_BYTES / (hw.hbm_bandwidth * self.f_weights)
+        per_b = m.bytes_per_seq(context, KV_BYTES) / (hw.hbm_bandwidth * self.f_kv)
+        return (fixed + per_b * batch) / (n_gpu * n_gpu ** -self.tp_decay)
+
+    def gpu_s_out(self, model: str, gpu: str, n_gpu: int, batch: float,
+                  context: int) -> float:
+        return n_gpu * self.step_s(model, gpu, n_gpu, batch, context) / batch
+
+
+def fit_affine(obs: list[Observation], f_kv: float = 1.00) -> AffineModel:
+    """Fit f_weights and tp_decay by least squares in log space.
+
+    `f_kv` is pinned at roofline because the fixed-GPU batch sweep measured it
+    there (109%, i.e. at the bound within our per-seq estimate). Fitting it
+    too would spend a degree of freedom on a quantity already known.
+    """
+    import math
+    assert_target_model(obs)
+    best, best_err = None, float("inf")
+    for fw in [x / 200 for x in range(20, 200)]:              # 0.10 .. 1.00
+        for td in [x / 100 for x in range(0, 60)]:            # 0.00 .. 0.60
+            mdl = AffineModel(f_weights=fw, f_kv=f_kv, tp_decay=td)
+            err = sum(
+                math.log(mdl.gpu_s_out(o.model, o.gpu, o.n_gpu, o.batch,
+                                       o.context) / o.gpu_s_out) ** 2
+                for o in obs)
+            if err < best_err:
+                best, best_err = mdl, err
+    return best
+
+
+def validate_loo_affine(obs: list[Observation], f_kv: float = 1.00) -> dict:
+    rows = []
+    for i, held in enumerate(obs):
+        rest = obs[:i] + obs[i + 1:]
+        mdl = fit_affine(rest, f_kv=f_kv)
+        pred = mdl.gpu_s_out(held.model, held.gpu, held.n_gpu, held.batch,
+                             held.context)
+        rows.append({"n_gpu": held.n_gpu, "batch": round(held.batch, 1),
+                     "predicted": pred, "measured": held.gpu_s_out,
+                     "rel_error": round((pred - held.gpu_s_out) / held.gpu_s_out, 4)})
+    errs = [abs(r["rel_error"]) for r in rows]
+    m = fit_affine(obs, f_kv=f_kv)
+    return {"available": True, "rows": rows,
+            "mean_abs_error": round(sum(errs) / len(errs), 4),
+            "worst_abs_error": round(max(errs), 4),
+            "f_weights": m.f_weights, "f_kv": m.f_kv, "tp_decay": m.tp_decay}
+
+
+# The fixed-n_gpu batch sweep: mem-fraction 0.45/0.65/0.90 on 1xH100 at 6k
+# context. This is the ONLY data where batch moves independently of GPU count.
+BATCH_SWEEP_2026_09_01 = [
+    Observation(n_gpu=1, batch=3.06, context=6000, gpu_s_out=4.870e-03),
+    Observation(n_gpu=1, batch=12.70, context=6000, gpu_s_out=1.321e-03),
+    Observation(n_gpu=1, batch=23.30, context=6000, gpu_s_out=7.709e-04),
+]
+ALL_OBSERVATIONS = SWEEP_2026_08_31 + BATCH_SWEEP_2026_09_01
+
+
+TP_ANOMALY = {8}       # measured 35% below the TP 1/2/4 scaling trend
+
+
+def fidelity(obs: list[Observation] | None = None) -> dict:
+    """The simulator's accuracy, split by what it does and does not model.
+
+    Reported separately because the two are different claims:
+
+      * **fixed GPU count** -- the batch and context physics. One free
+        parameter (`f_weights`; `f_kv` is pinned at the roofline the batch
+        sweep measured). This is the part that is solved.
+      * **across GPU counts** -- adds the TP scaling law, fitted on TP 1/2/4.
+        TP=8 sits 35% below that trend and is flagged, not fitted.
+    """
+    obs = obs or ALL_OBSERVATIONS
+    fixed = [o for o in obs if o.n_gpu == 1]
+    clean = [o for o in obs if o.n_gpu not in TP_ANOMALY]
+    return {"fixed_gpu": validate_loo_affine(fixed),
+            "across_tp_excluding_anomaly": validate_loo_affine(clean),
+            "across_tp_all": validate_loo_affine(obs),
+            "anomalous_tp": sorted(TP_ANOMALY),
+            "n_observations": len(obs)}
