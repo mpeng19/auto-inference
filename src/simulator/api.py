@@ -1,0 +1,363 @@
+"""The public surface: build a Simulator, call `eval()`, get a price curve.
+
+    sim = Simulator(root_dir="runs/baseline")
+    result = await sim.eval()
+    print(result.summary())
+
+Everything that varies is a field on the object, so a caller configures once
+and never passes arguments again. The only required one is `root_dir`, which
+must already exist: every artifact the run produces -- the record, the plots,
+the curve as JSON -- is written there, so a result is a directory you can hand
+to someone rather than a number you have to explain.
+
+Three shapes, same machinery:
+
+    await sim.eval()                 # submit, wait, analyse, write artifacts
+    call_id = sim.submit()           # fire and forget; a sweep is 25-60 min
+    await sim.collect(call_id)       # pick it up later, maybe another process
+    sim.analyse(record)              # no GPU at all: re-score a stored sweep
+
+`analyse` being separable is not tidiness. A sweep stores every percentile and
+the raw server counters precisely so that changing the SLO, the cost basis or
+the market denominator costs nothing -- which order statistic the frontier is
+judged at is a choice we have changed three times, and each change would
+otherwise have meant another 25 GPU-minutes.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import pathlib
+import time
+from dataclasses import dataclass, field, replace
+
+from .config import ServingConfig
+from .price import direct as price_direct_mod
+from .price.direct import DirectPrice, price_direct
+from .price.market import Economics, Market
+from .slo import MARKET_SLO, SLO
+from .stack import InferenceStack
+from .workload.tracelab import MARKET_IN_PER_REQ, MARKET_OUT_PER_REQ
+
+APP_NAME = "auto-inference"
+
+
+# ── results ──────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Point:
+    """One concurrency level, priced."""
+    n_users: int
+    meets_slo: bool
+    binding: str | None
+    n_requests: int
+    goodput_rps: float
+    batch: float
+    hit_rate: float
+    gpu_s_per_request: float
+    effective_in_per_m: float
+    out_per_m: float
+    bill_per_1k: float
+    share_per_node: float
+    capacity_per_day: float
+    checks: list[dict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {k: getattr(self, k) for k in self.__dataclass_fields__}
+
+
+@dataclass(frozen=True)
+class EvalResult:
+    """What an evaluation is worth. `ok=False` means no price, and why."""
+    ok: bool
+    reason: str = ""
+    n_star: int | None = None
+    curve: tuple[Point, ...] = ()
+    market: Market | None = None
+    record: dict = field(default_factory=dict)
+    artifacts: dict[str, str] = field(default_factory=dict)
+    stack_digest: str = ""
+
+    @property
+    def best(self) -> Point | None:
+        """The priced operating point: the largest level that held the SLO."""
+        ok = [p for p in self.curve if p.meets_slo]
+        return max(ok, key=lambda p: p.n_users) if ok else None
+
+    # Convenience passthroughs -- a caller should not have to know about Point.
+    @property
+    def effective_in_per_m(self) -> float | None:
+        return self.best.effective_in_per_m if self.best else None
+
+    @property
+    def out_per_m(self) -> float | None:
+        return self.best.out_per_m if self.best else None
+
+    @property
+    def bill_per_1k(self) -> float | None:
+        return self.best.bill_per_1k if self.best else None
+
+    @property
+    def share_per_node(self) -> float | None:
+        return self.best.share_per_node if self.best else None
+
+    def rank(self) -> dict | None:
+        """Where the priced point sits on the board, both ways."""
+        if not (self.best and self.market):
+            return None
+        board = self.market.leaderboard(self.best.effective_in_per_m,
+                                        self.best.out_per_m)
+        us = next(r for r in board if r["us"])
+        return {"rank_bill": us["rank_bill"], "rank_eff_in": us["rank_eff_in"],
+                "of": len(board), "board": board}
+
+    def as_dict(self) -> dict:
+        r = self.rank()
+        return {"ok": self.ok, "reason": self.reason, "n_star": self.n_star,
+                "stack_digest": self.stack_digest,
+                "curve": [p.as_dict() for p in self.curve],
+                "priced_at": self.best.as_dict() if self.best else None,
+                "rank": {k: r[k] for k in ("rank_bill", "rank_eff_in", "of")} if r else None,
+                "artifacts": self.artifacts}
+
+    def summary(self) -> str:
+        if not self.ok:
+            return f"NO PRICE: {self.reason}"
+        b, r = self.best, self.rank()
+        lines = [
+            f"N* = {b.n_users} users   batch {b.batch:.1f}   hit {b.hit_rate:.3f}"
+            f"   {b.gpu_s_per_request:.2f} GPU-s per market request",
+            f"  effective input  ${b.effective_in_per_m:.4f}/M",
+            f"  output           ${b.out_per_m:.4f}/M",
+            f"  whole bill       ${b.bill_per_1k:.2f} per 1k requests"
+            + (f"   rank {r['rank_bill']}/{r['of']}" if r else ""),
+            f"  one node serves  {b.share_per_node:.2%} of the market"
+            f"  ({b.capacity_per_day:,.0f} req/day)",
+        ]
+        if r:
+            lines.append(f"  on effective input alone: rank {r['rank_eff_in']}/{r['of']}"
+                         "  -- the metric OpenRouter sorts on, not what a buyer pays")
+        return "\n".join(lines)
+
+
+# ── the simulator ────────────────────────────────────────────────────────
+
+@dataclass
+class Simulator:
+    """An inference stack, an environment, and the price it can serve at."""
+
+    root_dir: str | pathlib.Path
+    stack: InferenceStack = field(default_factory=InferenceStack.stock)
+
+    # environment
+    model: str = "Qwen/Qwen3.8-27B-FP8"
+    gpu: str = "H100"
+    n_gpu: int = 1
+    mem_fraction_static: float = 0.85
+    max_running_requests: int = 256          # deliberately non-binding
+    schedule_policy: str = "fcfs"
+    schedule_conservativeness: float = 1.0
+
+    # the measurement
+    levels: tuple[int, ...] = (4, 8, 12, 16, 24)
+    seconds_per_level: float = 120.0
+    repeats: int = 1
+    n_sessions: int = 300
+    canaries: bool = True
+    slo: SLO = field(default_factory=lambda: SLO(bounds=MARKET_SLO))
+
+    # the cost basis -- assumptions, never measurements
+    rate_per_gpu_hour: float = 3.00
+    # 0.50 is the agreed basis, not a measurement. It sits just under the 53%
+    # that this model's own daily volume implies for a single-model deployment
+    # sized for peak (`market.utilisation_ceiling`) -- pass that instead to
+    # price against measured burstiness rather than the agreed round number.
+    # Utilisation is the single largest lever on the answer and cannot be
+    # measured from inside the harness, so it is always reported alongside it.
+    utilisation: float = 0.50
+    market: Market = field(default_factory=Market.load)
+
+    note: str = ""
+    allow_stale_stack: bool = False
+
+    def __post_init__(self):
+        self.root = pathlib.Path(self.root_dir)
+        if not self.root.is_dir():
+            raise NotADirectoryError(
+                f"root_dir {self.root} does not exist. Create it deliberately: "
+                "every artifact of this evaluation is written there, and a run "
+                "that invents its own output directory is one nobody finds again.")
+
+    # ── identity ─────────────────────────────────────────────────────────
+    @property
+    def serving(self) -> ServingConfig:
+        return ServingConfig(
+            model=self.model, gpu=self.gpu, n_gpu=self.n_gpu,
+            tp_size=self.n_gpu, mem_fraction_static=self.mem_fraction_static,
+            max_running_requests=self.max_running_requests,
+            schedule_policy=self.schedule_policy,
+            schedule_conservativeness=self.schedule_conservativeness)
+
+    @property
+    def util(self) -> float:
+        return self.utilisation
+
+    def digest(self) -> str:
+        """Identifies (stack, environment, measurement). Cache key for a loop."""
+        import hashlib
+        body = json.dumps({"stack": self.stack.digest,
+                           "serving": self.serving.digest(),
+                           "levels": list(self.levels),
+                           "seconds": self.seconds_per_level,
+                           "repeats": self.repeats,
+                           "slo": self.slo.as_dict()}, sort_keys=True)
+        return hashlib.sha256(body.encode()).hexdigest()[:12]
+
+    # ── running ──────────────────────────────────────────────────────────
+    def _fn(self):
+        import modal
+        n = max(1, self.n_gpu)
+        return modal.Function.from_name(APP_NAME, "sweep").with_options(
+            gpu=f"{self.gpu}:{n}" if n > 1 else self.gpu,
+            cpu=float(max(16, 4 * n)),
+            timeout=60 * 60 * (3 if n > 1 else 2))
+
+    def _args(self) -> tuple:
+        from dataclasses import asdict
+        return (asdict(self.serving), self.slo.as_dict(), self.stack.as_dict(),
+                list(self.levels), self.seconds_per_level, self.repeats,
+                MARKET_IN_PER_REQ, MARKET_OUT_PER_REQ, self.n_sessions,
+                self.canaries, self.note, self.allow_stale_stack)
+
+    def submit(self) -> str:
+        """Start the sweep and return immediately. Runs outlive this process.
+
+        `.spawn()` rather than `.remote()`: a sweep is 25-60 minutes and a
+        `local_entrypoint`'s in-flight call dies with its client, which
+        cancelled a sweep three levels in once.
+        """
+        call = self._fn().spawn(*self._args())
+        (self.root / "call_id").write_text(call.object_id)
+        return call.object_id
+
+    async def collect(self, call_id: str, poll_s: float = 20.0,
+                      timeout_s: float = 4 * 3600) -> EvalResult:
+        """Wait for a submitted sweep, then analyse and write artifacts."""
+        import modal
+        call = modal.FunctionCall.from_id(call_id)
+        deadline = time.time() + timeout_s
+        while True:
+            try:
+                rec = await call.get.aio(timeout=0)
+                break
+            except (TimeoutError, modal.exception.OutputExpiredError) as e:
+                if isinstance(e, modal.exception.OutputExpiredError):
+                    raise
+                if time.time() > deadline:
+                    raise TimeoutError(f"sweep {call_id} still running after "
+                                       f"{timeout_s/3600:.1f}h")
+                await asyncio.sleep(poll_s)
+        return self.finish(rec)
+
+    async def eval(self) -> EvalResult:
+        """Submit, wait, analyse, write artifacts. The one call most callers want."""
+        return await self.collect(self.submit())
+
+    # ── analysis, which needs no GPU ─────────────────────────────────────
+    def analyse(self, record: dict) -> EvalResult:
+        """Turn a sweep record into a priced curve. Pure; re-runnable offline."""
+        if record.get("status") != "ok":
+            return EvalResult(ok=False, record=record,
+                              stack_digest=record.get("stack_digest", ""),
+                              reason=record.get("failure", "sweep did not complete"))
+        n_gpu = (record.get("serving") or {}).get("n_gpu", 1)
+        m, u = self.market, self.util
+        pts, skipped = [], []
+        for lv in record.get("levels", []):
+            ok, why = price_direct_mod.usable(lv, n_gpu=n_gpu)
+            if not ok:
+                skipped.append(f"N={lv['n_users']}: {why}")
+                continue
+            c = lv["server_counters"]
+            ext = c["sglang:forward_execution_seconds_total[extend]"]
+            dec = c["sglang:forward_execution_seconds_total[decode]"]
+            p: DirectPrice = price_direct(
+                gpu_seconds_input=ext, gpu_seconds_output=dec,
+                input_tokens=lv["prompt_tokens"], output_tokens=lv["output_tokens"],
+                cached_tokens=lv["cached_tokens"], utilization=u,
+                margin=0.0)
+            gsr = price_direct_mod.gpu_seconds_per_request(
+                ext, dec, lv["prompt_tokens"], lv["output_tokens"],
+                m.in_per_request, m.out_per_request)
+            e = Economics(gpu_s_per_request=gsr, n_gpu=n_gpu,
+                          rate_per_gpu_hour=self.rate_per_gpu_hour, utilisation=u)
+            v = self.slo.judge(lv)
+            pts.append(Point(
+                n_users=lv["n_users"], meets_slo=v.ok, binding=v.binding,
+                n_requests=(lv.get("ttft_ms") or {}).get("n", 0),
+                goodput_rps=lv["goodput_rps"],
+                batch=(lv.get("batch", {}).get("running") or {}).get("mean", 0.0),
+                hit_rate=lv.get("cache_hit_rate") or 0.0,
+                gpu_s_per_request=gsr,
+                effective_in_per_m=p.effective_in_per_m, out_per_m=p.out_per_m,
+                bill_per_1k=m.bill_per_1k(p.effective_in_per_m, p.out_per_m),
+                share_per_node=e.share_per_node(m),
+                capacity_per_day=e.capacity_per_node_per_day(),
+                checks=v.checks, warnings=v.warnings))
+        if not pts:
+            return EvalResult(ok=False, record=record,
+                              stack_digest=record.get("stack_digest", ""),
+                              reason="; ".join(skipped) or "no priceable levels")
+        passing = [p for p in pts if p.meets_slo]
+        if not passing:
+            return EvalResult(
+                ok=False, curve=tuple(pts), market=m, record=record,
+                stack_digest=record.get("stack_digest", ""),
+                reason=("no level met the SLO -- the sweep starts above the "
+                        "frontier; lower the levels"))
+        star = max(passing, key=lambda p: p.n_users)
+        if star.n_users == max(p.n_users for p in pts):
+            skipped.append("every level passed: N* is the top of the sweep, so "
+                           "the true frontier is higher and the price lower")
+        return EvalResult(ok=True, reason="; ".join(skipped), n_star=star.n_users,
+                          curve=tuple(pts), market=m, record=record,
+                          stack_digest=record.get("stack_digest", ""))
+
+    def finish(self, record: dict) -> EvalResult:
+        """Analyse, write every artifact into `root_dir`, return the result."""
+        res = self.analyse(record)
+        arts = self.write_artifacts(res)
+        return replace(res, artifacts=arts)
+
+    def write_artifacts(self, res: EvalResult) -> dict[str, str]:
+        from .artifacts import plots, report
+        out: dict[str, str] = {}
+        (self.root / "sweep.json").write_text(json.dumps(res.record, indent=2, default=str))
+        out["sweep"] = str(self.root / "sweep.json")
+        (self.root / "result.json").write_text(json.dumps(res.as_dict(), indent=2, default=str))
+        out["result"] = str(self.root / "result.json")
+        (self.root / "config.json").write_text(json.dumps(self.as_dict(), indent=2, default=str))
+        out["config"] = str(self.root / "config.json")
+        txt = report.render(self, res)
+        (self.root / "report.txt").write_text(txt)
+        out["report"] = str(self.root / "report.txt")
+        try:
+            out.update(plots.render_all(self, res, self.root))
+        except Exception as e:                       # never lose a run to a plot
+            (self.root / "plot-error.txt").write_text(f"{type(e).__name__}: {e}")
+            out["plot_error"] = str(self.root / "plot-error.txt")
+        return out
+
+    def as_dict(self) -> dict:
+        from dataclasses import asdict
+        return {"digest": self.digest(), "stack": self.stack.describe(),
+                "stack_digest": self.stack.digest, "serving": asdict(self.serving),
+                "levels": list(self.levels), "seconds_per_level": self.seconds_per_level,
+                "repeats": self.repeats, "slo": self.slo.as_dict(),
+                "rate_per_gpu_hour": self.rate_per_gpu_hour, "utilisation": self.util,
+                "market": {"as_of": self.market.as_of,
+                           "requests_per_day": self.market.requests_per_day,
+                           "in_per_request": self.market.in_per_request,
+                           "out_per_request": self.market.out_per_request},
+                "note": self.note}

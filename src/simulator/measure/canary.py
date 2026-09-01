@@ -87,3 +87,20 @@ def verdict(observed: dict, floor: dict | None) -> str:
     if o >= f - 0.2:
         return "MARGINAL — slightly more divergence than baseline; re-run before trusting"
     return "SUSPECT — materially more divergence than baseline; treat goodput gains as invalid"
+
+
+async def run(base_url: str, model: str) -> dict:
+    """Fire every canary at an otherwise idle server and digest the outputs.
+
+    Idle on purpose: batch composition perturbs greedy decoding, so running
+    these under load would measure the load, not the code. That also means the
+    gate is weaker than it looks -- divergence introduced only under
+    concurrency will not show up here. It is a cheap floor, not a proof.
+    """
+    from .server import complete
+    outs = {}
+    for name, prompt, max_tokens in CANARIES:
+        outs[name] = await complete(base_url, model, prompt, max_tokens)
+    digests = {k: digest(v) for k, v in outs.items()}
+    return {"outputs": outs, "digests": digests,
+            "summary": f"{len(digests)}/{len(CANARIES)} returned"}

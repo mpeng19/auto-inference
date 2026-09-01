@@ -275,3 +275,129 @@ class BatchSampler:
                     "p50": s[len(s) // 2], "max": s[-1],
                     "frac_idle": round(sum(1 for x in xs if x == 0) / len(xs), 3)}
         return {"running": stat(self.running), "queued": stat(self.queued)}
+
+
+# ── server lifecycle: get it up, get it warm, tell us fast if it died ────
+
+async def wait_until_ready(base_url: str, timeout_s: float = 1800.0,
+                           proc=None, log_path: str | None = None,
+                           stall_s: float = 420.0) -> float:
+    """Block until the server answers /health. Returns seconds waited.
+
+    Model load for a 30B MoE is minutes, not seconds; benchmarking a
+    still-loading server is a classic way to produce garbage TTFT numbers.
+
+    Three ways this can end badly, and all three are handled:
+
+      * **The process dies.** `proc` is polled, so a crash aborts at once.
+      * **The process hangs.** A live process making no progress is not caught
+        by a liveness check. `stall_s` aborts when the server log has not
+        changed for that long -- this actually happened: a run sat at
+        "loading shards: 0%" for the full 2400s timeout, costing ~$2.60 of
+        H100 time to learn nothing. Loads normally finish in 90-505s, so a
+        7-minute silence means something is wrong, not slow.
+      * **It is merely slow.** `timeout_s` remains the outer bound.
+
+    `log_path` is echoed periodically so a stuck load is visible while it is
+    happening rather than in a post-mortem.
+    """
+    url = base_url.rstrip("/") + "/health"
+    start = time.perf_counter()
+    last_echo = 0.0
+    last_size, last_change = -1, time.perf_counter()
+
+    def _log_size() -> int:
+        try:
+            return os.path.getsize(log_path) if log_path else -1
+        except OSError:
+            return -1
+
+    async with aiohttp.ClientSession() as s:
+        while time.perf_counter() - start < timeout_s:
+            # Progress is measured by the server log growing. A live process
+            # writing nothing for `stall_s` is stuck, not loading.
+            if log_path:
+                sz = _log_size()
+                if sz != last_size:
+                    last_size, last_change = sz, time.perf_counter()
+                elif time.perf_counter() - last_change > stall_s:
+                    tail = ""
+                    try:
+                        tail = open(log_path, errors="replace").read()[-2000:]
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"server load stalled: no log output for {stall_s:.0f}s "
+                        f"({time.perf_counter() - start:.0f}s elapsed). Normal "
+                        f"loads finish in 90-505s.\n--- log tail ---\n{tail}")
+            if proc is not None and proc.poll() is not None:
+                tail = ""
+                if log_path:
+                    try:
+                        tail = open(log_path, errors="replace").read()[-3000:]
+                    except Exception:
+                        pass
+                raise RuntimeError(
+                    f"server process exited with code {proc.returncode} after "
+                    f"{time.perf_counter() - start:.0f}s\n--- log tail ---\n{tail}"
+                )
+            try:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        return time.perf_counter() - start
+            except Exception:
+                pass
+
+            elapsed = time.perf_counter() - start
+            if log_path and elapsed - last_echo >= 30:
+                last_echo = elapsed
+                try:
+                    lines = open(log_path, errors="replace").read().splitlines()
+                    if lines:
+                        print(f"  [{elapsed:.0f}s loading] {lines[-1][:150]}", flush=True)
+                except Exception:
+                    pass
+            await asyncio.sleep(2.0)
+    raise TimeoutError(f"server not ready after {timeout_s}s")
+
+
+async def complete(base_url: str, model: str, prompt: str, max_tokens: int,
+                   timeout_s: float = 300.0) -> str:
+    """Non-streaming completion, for canaries where only the text matters."""
+    async with aiohttp.ClientSession() as s_:
+        async with s_.post(
+            base_url.rstrip("/") + "/v1/chat/completions",
+            json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": max_tokens, "temperature": 0.0, "stream": False},
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+        ) as r:
+            if r.status != 200:
+                return f"<HTTP {r.status}>"
+            body = await r.json()
+            return (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+
+
+async def warmup(base_url: str, model: str, n: int = 20) -> float:
+    """Send throwaway requests so measurement starts against a warm server.
+
+    The first requests after launch pay for lazy CUDA graph capture and
+    allocator growth; including them makes the first workload of a suite look
+    systematically worse than the rest.
+    """
+    import time as _t
+    t0 = _t.perf_counter()
+    async with aiohttp.ClientSession() as s_:
+        for _ in range(n):
+            try:
+                async with s_.post(
+                    base_url.rstrip("/") + "/v1/chat/completions",
+                    json={"model": model,
+                          "messages": [{"role": "user", "content": "warmup"}],
+                          "max_tokens": 16, "temperature": 0.0, "stream": False,
+                          "ignore_eos": True},
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as r:
+                    await r.read()
+            except Exception:
+                pass
+    return _t.perf_counter() - t0

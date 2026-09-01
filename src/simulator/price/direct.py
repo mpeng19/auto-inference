@@ -5,9 +5,11 @@ there needs three things the harness can measure and one it cannot:
 
   1. **The SLO frontier.** The largest offered load that still meets the
      marketplace's latency targets. Measured (`sweep_concurrency`).
-  2. **Cost attribution.** How many GPU-seconds an uncached input token, a
-     cached input token, and an output token each consume. Measured, by
-     regression across workloads with deliberately different token mixes.
+  2. **Phase-split GPU time.** How many GPU-seconds prefill and decode each
+     consume, read straight off SGLang's CUDA-event device timer. Measured.
+     There is no regression here any more: splitting input cost into cached
+     and uncached is needed only to re-blend at a competitor's hit rate, and
+     caching well *is* serving well, so we price at our own (HANDOFF SS6b).
   3. **A cost basis.** Dollars per GPU-hour. *Not* measured — an input.
   4. **Utilisation.** What fraction of paid-for capacity carries traffic. Not
      measurable here at all; it depends on how much traffic the marketplace
@@ -162,3 +164,59 @@ def price_direct(gpu_seconds_input: float, gpu_seconds_output: float,
         gpu_seconds_output=gpu_seconds_output,
         basis=basis, usd_per_gpu_hour=usd_hr,
         utilization=utilization, margin=margin)
+
+
+# ── the gate: refuse to price a run that cannot be priced ────────────────
+
+def gpu_seconds_per_request(gpu_seconds_input: float, gpu_seconds_output: float,
+                            input_tokens: float, output_tokens: float,
+                            in_per_request: float, out_per_request: float) -> float:
+    """Forward GPU-seconds for one *market-sized* request.
+
+    The bridge between a measured level -- whose requests are whatever length
+    the trace produced -- and the market's average request. Everything in
+    `price.market.Economics` derives from this one number.
+    """
+    if input_tokens <= 0 or output_tokens <= 0:
+        raise ValueError("need positive token counts")
+    return (gpu_seconds_input / input_tokens * in_per_request
+            + gpu_seconds_output / output_tokens * out_per_request)
+
+
+def usable(level: dict, n_gpu: int = 1) -> tuple[bool, str]:
+    """Can this level be priced at all? Returns (ok, reason-if-not).
+
+    Five earlier attempts at per-token cost all produced *plausible-looking*
+    numbers from unusable data (HANDOFF SS4), which is worse than producing
+    none. An automated caller cannot sanity-check a price, so refusing has to
+    be the default rather than a warning.
+
+    The direct method's failure modes are different from the regression's, so
+    the checks are too:
+
+      * the device timer was off, so the phase split is missing entirely;
+      * forward time exceeds wall time x n_gpu, which is physically impossible
+        and means the counter is aggregated differently than assumed (this is
+        exactly the bug that doubled every output price once);
+      * the GPU was mostly idle, so forward time is a tiny slice of a window
+        and the level is dominated by whatever else was happening;
+      * no tokens flowed.
+    """
+    c = level.get("server_counters") or {}
+    ext = c.get("sglang:forward_execution_seconds_total[extend]")
+    dec = c.get("sglang:forward_execution_seconds_total[decode]")
+    if ext is None or dec is None:
+        return False, ("no phase-split forward time; SGLANG_ENABLE_METRICS_DEVICE_TIMER "
+                       "was not set, so the counter is declared but never incremented")
+    if not level.get("prompt_tokens") or not level.get("output_tokens"):
+        return False, "no tokens recorded for this level"
+    wall = level.get("wall_s") or 0.0
+    if wall > 0:
+        busy = (ext + dec) / (wall * max(1, n_gpu))
+        if busy > 1.02:
+            return False, (f"forward time is {busy:.2f}x wall x n_gpu, which is "
+                           "impossible; the counter is not aggregated as assumed")
+        if busy < 0.05:
+            return False, (f"GPU busy only {busy:.1%} of the window; forward time "
+                           "is too small a slice of this level to price from")
+    return True, ""
