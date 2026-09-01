@@ -875,23 +875,90 @@ At N* neither configuration beats Chutes' $8.67/1k on 1 GPU ($11.56); 2xH100
 does ($7.28). Both beat every provider on effective *input* price by 4x, which
 remains a statement about what OpenRouter sorts on rather than what a buyer pays.
 
+## 6e. THE REPO, AFTER PRODUCTIONISATION — 2026-09-01
+
+Everything above describes research. This section describes what to *use*.
+
+    src/simulator/          the product -- one importable package
+      api.py                Simulator, EvalResult          <- start here
+      stack.py              InferenceStack: diffs to sglang, carried BY VALUE
+      slo.py                bounds that name their own order statistic
+      config.py specs.py    serving config; model and hardware specs
+      workload/             request loading and sanitisation
+      measure/              load generation, latency, counters, canaries
+      price/                GPU-seconds -> price -> market share
+      runner/modal_runner.py   ONE remote function: `sweep`
+      artifacts/            report and the two figures, written to root_dir
+      cli.py                `simulate run|submit|collect|rescore|ls`
+    research/               retired code and the reasoning, see its README
+    ops/                    spend monitoring
+    tests/                  44 tests, no GPU, no network
+
+### The API
+
+    sim = Simulator(root_dir="runs/my-diff",              # must already exist
+                    stack=InferenceStack.from_dir("overlays"))
+    result = await sim.eval()
+
+`eval()` = `submit()` + `collect()`. `submit()` returns a call id and the run
+outlives the process, which matters because a sweep is 25-60 minutes and a
+`local_entrypoint`'s in-flight call dies with its client -- that cancelled a
+sweep three levels in once.
+
+Four things worth knowing:
+
+1. **`root_dir` must exist.** Every artifact goes there -- `sweep.json`,
+   `result.json`, `config.json`, `report.txt`, `slo-frontier.png`,
+   `price-vs-share.png`. A result is a directory you can hand to someone.
+2. **A stack travels by value.** `InferenceStack` carries file *text*, not
+   paths, so an evaluation is reproducible from its record with no mounted
+   directory and no image rebuild. `stack.digest` is a content hash: the cache
+   key a research loop needs so it does not pay 25 GPU-minutes for a diff it
+   has already evaluated.
+3. **`analyse()` needs no GPU.** Levels store every percentile and the raw
+   counters, so `simulate rescore` re-judges a stored sweep at a different SLO,
+   cost basis or utilisation for free. That is not tidiness -- we have changed
+   which order statistic the frontier is judged at three times.
+4. **The gate stayed.** `price.direct.usable()` refuses to price a level whose
+   device timer was off, whose forward time exceeds wall x n_gpu, or whose GPU
+   was idle. Five earlier attempts all produced plausible-looking numbers from
+   unusable data (SS4); an automated caller cannot sanity-check a price.
+
+### Verified against the baseline
+
+`tests/data/sweep-1xh100.json` is run `1788287578`, trimmed. The whole pipeline
+reproduces SS6c and SS6d exactly through the public API: N* = 12, eff-in
+$0.0294/M, out $5.6021/M, $12.23/1k, 0.42% share per node, rank 1/12 on
+effective input and 9/12 on the bill.
+
+### One caveat found while building it
+
+`good_frac` is computed **at run time** against whatever SLO the sweep used and
+cannot be recovered offline without per-request records. The percentile bounds
+rescore exactly; `good_frac` does not, so it is kept only as a blow-up detector
+(a level at 0.97 had real stragglers under any threshold). Documented in
+`SLO.judge` and pinned by
+`test_good_frac_is_a_runtime_gate_not_a_rescoring_one`.
+
+### Deliberately left out of the product
+
+The predictive cost model (`research/autoinf/simulator.py`) -- it is a
+different thing from the product's `Simulator`, which measures rather than
+predicts, and its calibration does not transfer to market context (SS6c). Phase
+B attribution. The nine-workload eval suite. The experiment ledger, which comes
+back with the auto-research harness.
+
 ## 7. Commands
 
-    make test                 # 118 local tests, no GPU
-    make suite                # eval suite on the dev model
-    make noise                # noise floor
-    make ledger               # research-loop health
-    make spend                # current spend
-
-    # frontier + cost attribution + price, spawned so it outlives the terminal
-    uv run python scripts/launch.py frontier \
-      --model Qwen/Qwen3.8-27B-FP8 --gpu H100 --n-gpu 8 --ep 8 \
-      --levels 4,8,16,32,64 --seconds 120 --trace-scale 1.0 \
-      --ttft-ms 2000 --tpot-ms 50
-    uv run python scripts/launch.py collect <call_id>
-
-    uv run modal run scripts/results.py::ls
-    uv run modal run src/autoinf/modal_app.py::traces    # agent captures
+    make test                          # 44 tests, no GPU, no network
+    make deploy                        # push the runner
+    make run     ROOT=runs/baseline    # full evaluation, 25-60 GPU-min
+    make submit  ROOT=runs/baseline    # start it and walk away
+    make collect ROOT=runs/baseline
+    make rescore ROOT=runs/baseline ARGS='--slo ttft:p99:1000,tpot:mean:20'
+    make ls
+    make spend
+    make market                        # refresh the OpenRouter snapshot
 
 **Always `.spawn()` for long runs** (`launch.py` does). `modal run --detach`
 keeps the app alive but a `local_entrypoint`'s in-flight call still dies with

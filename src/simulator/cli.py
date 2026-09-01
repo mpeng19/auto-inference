@@ -1,0 +1,108 @@
+"""Thin command line over `Simulator`. Everything it does, the API does.
+
+    simulate run     --root runs/baseline
+    simulate submit  --root runs/baseline           # a sweep is 25-60 min
+    simulate collect --root runs/baseline           # picks up the stored call
+    simulate rescore --root runs/baseline --slo ttft:p99:1000,tpot:mean:20
+    simulate ls
+
+`rescore` is the one worth knowing about: it re-judges and re-prices a stored
+sweep with no GPU at all, because every level keeps its full percentile set and
+its raw counters. Changing the SLO, the cost basis or the utilisation
+assumption should never cost 25 GPU-minutes.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import pathlib
+import sys
+
+from .api import Simulator
+from .slo import MARKET_SLO, SLO
+from .stack import InferenceStack
+
+
+def _build(a) -> Simulator:
+    root = pathlib.Path(a.root)
+    if a.mkdir:
+        root.mkdir(parents=True, exist_ok=True)
+    stack = InferenceStack.from_dir(a.stack) if a.stack else InferenceStack.stock()
+    slo = SLO.parse(a.slo) if a.slo else SLO(bounds=MARKET_SLO)
+    kw = {}
+    if a.levels:
+        kw["levels"] = tuple(int(x) for x in a.levels.split(",") if x.strip())
+    return Simulator(root_dir=root, stack=stack, slo=slo, model=a.model,
+                     gpu=a.gpu, n_gpu=a.n_gpu, seconds_per_level=a.seconds,
+                     repeats=a.repeats, rate_per_gpu_hour=a.rate,
+                     utilisation=a.utilisation, note=a.note,
+                     canaries=not a.no_canaries, **kw)
+
+
+def _report(sim: Simulator, res) -> int:
+    print((sim.root / "report.txt").read_text())
+    print("artifacts:")
+    for k, v in res.artifacts.items():
+        print(f"  {k:<16} {v}")
+    return 0 if res.ok else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="simulate", description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def common(p, need_root=True):
+        p.add_argument("--root", required=need_root,
+                       help="artifact directory; must exist unless --mkdir")
+        p.add_argument("--mkdir", action="store_true")
+        p.add_argument("--stack", default="", help="directory mirroring sglang/")
+        p.add_argument("--model", default="Qwen/Qwen3.8-27B-FP8")
+        p.add_argument("--gpu", default="H100")
+        p.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
+        p.add_argument("--levels", default="", help="e.g. 4,8,12,16,24")
+        p.add_argument("--seconds", type=float, default=120.0)
+        p.add_argument("--repeats", type=int, default=1)
+        p.add_argument("--slo", default="", help="ttft:p90:2818,tpot:mean:20")
+        p.add_argument("--rate", type=float, default=3.00, help="$/GPU-hour")
+        p.add_argument("--utilisation", type=float, default=0.50)
+        p.add_argument("--no-canaries", action="store_true")
+        p.add_argument("--note", default="")
+
+    common(sub.add_parser("run", help="submit, wait, analyse, write artifacts"))
+    common(sub.add_parser("submit", help="start a sweep and return its call id"))
+    c = sub.add_parser("collect", help="wait for a submitted sweep")
+    common(c)
+    c.add_argument("--call-id", default="", help="defaults to <root>/call_id")
+    r = sub.add_parser("rescore", help="re-judge a stored sweep, no GPU")
+    common(r)
+    r.add_argument("--sweep", default="", help="defaults to <root>/sweep.json")
+    sub.add_parser("ls", help="list stored sweeps")
+
+    a = ap.parse_args(argv)
+
+    if a.cmd == "ls":
+        import modal
+        for n in modal.Function.from_name("auto-inference", "ls").remote(40):
+            print(n)
+        return 0
+
+    sim = _build(a)
+    if a.cmd == "submit":
+        cid = sim.submit()
+        print(f"submitted  {cid}")
+        print(f"collect:   simulate collect --root {sim.root} ")
+        return 0
+    if a.cmd == "run":
+        return _report(sim, asyncio.run(sim.eval()))
+    if a.cmd == "collect":
+        cid = a.call_id or (sim.root / "call_id").read_text().strip()
+        return _report(sim, asyncio.run(sim.collect(cid)))
+    if a.cmd == "rescore":
+        path = pathlib.Path(a.sweep or (sim.root / "sweep.json"))
+        return _report(sim, sim.finish(json.loads(path.read_text())))
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -20,8 +20,8 @@ results/
 logs/
 *.log
 
-# Experiment artifacts
-runs/*.json
+# Evaluation artifacts: a Simulator root_dir is a local working directory
+runs/
 !runs/.gitkeep
 
 # macOS

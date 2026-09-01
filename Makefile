@@ -1,40 +1,32 @@
-# Common operations. Everything runs on one H100 unless stated.
-#
-# GPU runs use `modal run --detach`. Without it, `modal run` creates an
-# *ephemeral* app tied to the local client: kill the terminal and Modal tears
-# the run down mid-flight. That cost us a ~$4 run that produced no result.
-# Detached runs survive client death and still persist to the results Volume.
-.PHONY: test suite suite30 staircase noise realism results capacity probe fmt
+# The product is `simulator`. Everything below is a thin wrapper over it.
+.PHONY: test lint run submit collect rescore ls spend research-test help
 
-test:            ## local tests, no GPU
+test:            ## unit tests, no GPU, no network
 	uv run pytest -q
 
-capacity:        ## regenerate docs/capacity.md from the roofline model
-	uv run python scripts/capacity_report.py
+run:             ## full evaluation: submit, wait, write artifacts (25-60 GPU-min)
+	uv run simulate run --root $(ROOT) --mkdir $(ARGS)
 
-suite:           ## eval suite, ~10 min of traces (+4 min model load)
-	uv run modal run --detach src/autoinf/modal_app.py::suite
+submit:          ## start a sweep and return; it outlives this terminal
+	uv run simulate submit --root $(ROOT) --mkdir $(ARGS)
 
-suite30:         ## eval suite, 30 min of traces -- the consistency run
-	uv run modal run --detach src/autoinf/modal_app.py::suite --minutes 30
+collect:         ## pick up a submitted sweep and write its artifacts
+	uv run simulate collect --root $(ROOT) $(ARGS)
 
-staircase:       ## step to 100% of roofline, stop when SLO collapses
-	uv run modal run --detach src/autoinf/modal_app.py::staircase
+rescore:         ## re-judge and re-price a stored sweep, no GPU
+	uv run simulate rescore --root $(ROOT) $(ARGS)
 
-noise:           ## same config N times: the noise floor
-	uv run modal run --detach src/autoinf/modal_app.py::noise --repeats 5
+ls:              ## list sweeps on the results volume
+	uv run simulate ls
 
-realism:         ## LLM-driven virtual users (multi-turn, abandonment)
-	uv run modal run --detach src/autoinf/modal_app.py::realism
-
-results:         ## list stored runs
-	uv run modal run scripts/results.py::ls
-
-ledger:          ## research-loop health: novelty, diversity, progress
-	uv run python scripts/ledger_report.py
+deploy:          ## push the runner so `submit` can find it
+	uv run modal deploy src/simulator/runner/modal_runner.py
 
 spend:           ## current Modal spend
-	uv run python scripts/spend_monitor.py
+	uv run python ops/spend_monitor.py
+
+market:          ## refresh data/market-*.json from OpenRouter
+	uv run python -m simulator.price.market_pull
 
 help:
-	@grep -E '^[a-z0-9]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t18
+	@grep -E '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t18

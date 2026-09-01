@@ -99,7 +99,15 @@ class SLO:
                    **kw)
 
     def judge(self, level: dict) -> Verdict:
-        """Score one measured level. `level` is a row from the sweep record."""
+        """Score one measured level. `level` is a row from the sweep record.
+
+        One caveat that matters when re-judging a stored sweep: the percentile
+        bounds are recomputed from the stored statistics and are exact, but
+        `good_frac` was computed **at run time** against whatever SLO the sweep
+        used, and cannot be recovered without per-request records. It is kept
+        as a blow-up detector -- a level at 0.97 had real stragglers under any
+        threshold -- but do not read it as evidence about *this* SLO.
+        """
         v = Verdict(ok=True)
         n = (level.get("ttft_ms") or {}).get("n", 0)
         for b in self.bounds:

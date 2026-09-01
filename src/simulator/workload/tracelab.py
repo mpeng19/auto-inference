@@ -148,7 +148,7 @@ def to_sessions(traces: list[list[TraceRound]], system_tokens: int = 400,
     turn, the server sees the same growing-prefix pattern the real agent
     produced.
 
-    Returns `autoinf.workload.Session` objects so the existing multi-turn
+    Returns `simulator.workload.sessions.Session` objects so the existing multi-turn
     runner replays them unchanged.
     """
     import random as _r
