@@ -444,3 +444,19 @@ def effect_size(model: str, context: int, batch_lo: float, batch_hi: float,
             "resolvable": bool(ratio - 1.0 > 4 * FIT_NOISE),
             "snr": round((ratio - 1.0) / (FIT_NOISE * 2 ** 0.5), 2),
             "noise_floor": FIT_NOISE}
+
+
+# Serving physics is measured on ONE model. The GPU may vary — that is a
+# parameter we deliberately sweep — but the model may not, because cost per
+# token varies with batch only through the weight read and a 4B has 4 GB of
+# weights against this model's 23 GB. Calibrating on anything else imports a
+# different regime. The dev model is for harness validation only.
+TARGET_MODEL = "Qwen/Qwen3.8-27B-FP8"
+
+
+def assert_target_model(obs: list[Observation]) -> None:
+    wrong = sorted({o.model for o in obs} - {TARGET_MODEL})
+    if wrong:
+        raise ValueError(
+            f"calibration data must all be {TARGET_MODEL}; got {wrong}. "
+            "The GPU may vary; the model may not.")

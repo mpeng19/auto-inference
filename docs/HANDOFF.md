@@ -93,7 +93,16 @@ and in:out ratio, because full-size contexts often do not fit.
 
 ## 3. What is measured and reproducible
 
-**Qwen3-4B on L40S** (dev model, cheap iteration):
+**RULE: all serving-physics analysis is on `Qwen/Qwen3.8-27B-FP8`.** The GPU
+may change when there is a reason (cost, or to vary a parameter); the model may
+not. Cost per token varies with batch only through the weight read, and a 4B
+has 4 GB of weights against the target's 23 GB — so batching, cache behaviour
+and the cost model itself live in a different regime there. The dev model is
+for *harness* validation only: noise floors, determinism, load-generator
+behaviour. `simulator.TARGET_MODEL` and `test_calibration_is_target_model_only`
+enforce this.
+
+**Qwen3-4B on L40S** (dev model — harness validation ONLY, not serving physics):
 
 - N* = 128 concurrent users, goodput ~7.2-7.7 rps. **Reproduced three times.**
 - Noise floor: goodput CV **0.0003** over 5 separate launches. Effects below
@@ -102,9 +111,9 @@ and in:out ratio, because full-size contexts often do not fit.
 - Metastable collapse at ~88% utilisation: two identical runs gave goodput
   30.29 and 0.54. `metrics.detect_collapse` measures it rather than averaging
   it away.
-- cache_discount **0.197** (fit 0.959, condition 3.4) — a cached token costs
-  ~a fifth of an uncached one. Roofline agrees independently: measured rates
-  are 40-44% of ceiling.
+- cache_discount 0.197 was also measured here. **Do not compare it to the
+  target's.** Cache discount varies 0.101 -> 0.324 across TP *on the target
+  model alone* (§3e), so a cross-model comparison carries no information.
 
 **Qwen3.8-27B on 8xH100 TP=8/EP=8, full-scale TraceLab** (run
 `1788189825`, the first trustworthy one):
@@ -122,8 +131,9 @@ and in:out ratio, because full-size contexts often do not fit.
       output          2.331e-03              -> $1.6188/M raw
 
   **cache_discount = 0.320** — a cached token costs ~a third of an uncached
-  one. Cheaper, as the thesis requires, but less so than Qwen3-4B's 0.197 and
-  well above the ~0.10 the market prices cache reads at. The linear-attention layers keep fixed-size
+  one at TP=8, and **0.101 at TP=1** (§3e), against the ~0.10 the market prices
+  cache reads at. An earlier version compared this to the 4B dev model's 0.197;
+  that comparison was meaningless and is withdrawn. The linear-attention layers keep fixed-size
   state rather than a growing cache, so only 16 of 64 layers benefit from a
   prefix hit at all — a plausible mechanism, still unverified.
 

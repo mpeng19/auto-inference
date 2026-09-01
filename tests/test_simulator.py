@@ -220,3 +220,25 @@ def test_effect_size_shrinks_as_context_grows():
     short = effect_size("Qwen/Qwen3.8-27B-FP8", 4_000, 20, 100)
     long_ = effect_size("Qwen/Qwen3.8-27B-FP8", 132_000, 20, 100)
     assert short["cost_ratio"] > long_["cost_ratio"]
+
+
+def test_calibration_is_target_model_only():
+    """The GPU is a swept parameter; the model is not.
+
+    Cost varies with batch only through the weight read, so a 4 GB model and a
+    23 GB model sit in different regimes. Mixing them into one calibration
+    imports physics from a model we are not selling.
+    """
+    from autoinf.simulator import (SWEEP_2026_08_31, TARGET_MODEL,
+                                   assert_target_model)
+
+    assert_target_model(SWEEP_2026_08_31)
+    assert {o.model for o in SWEEP_2026_08_31} == {TARGET_MODEL}
+    # GPUs genuinely do vary across the calibration set -- that is intended.
+    assert len({o.n_gpu for o in SWEEP_2026_08_31}) == 4
+
+    bad = list(SWEEP_2026_08_31) + [
+        Observation(n_gpu=1, batch=20, context=4000, gpu_s_out=1e-3,
+                    model="Qwen/Qwen3-4B-Instruct-2507-FP8")]
+    with pytest.raises(ValueError, match="model may not"):
+        assert_target_model(bad)
