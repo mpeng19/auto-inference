@@ -55,9 +55,11 @@ class Attempt:
     # Split on purpose: an infrastructure failure is retried unchanged, a
     # rejected hypothesis is not.
     failure: Literal["", "infra", "hypothesis", "invalid_diff", "slo"] = ""
+    tier: str = "full"
     metrics: dict = field(default_factory=dict)
     delta: dict = field(default_factory=dict)     # vs the baseline
     cost_usd: float = 0.0
+    queued_s: float = 0.0
     ts: float = field(default_factory=now)
 
 
@@ -70,6 +72,10 @@ class AgentOutcome:
     best: Attempt | None = None
     cost_usd: float = 0.0
     note: str = ""
+    # Seconds this agent spent with nothing to do. The number the evaluation
+    # queue exists to keep near zero -- an agent blocked on a GPU is capacity
+    # being paid for and not used.
+    idle_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -82,6 +88,19 @@ class AgentBudget:
     # the most expensive thing this system can do by accident.
     patience: int = 3
     divergence_threshold: float = 0.6
+    # Screen first, confirm only what survives. The largest throughput lever
+    # in the system: a screening run is a fraction of a full sweep and most
+    # candidates die in it, so running everything at full size wastes more
+    # capacity than any scheduling improvement can recover.
+    screen_first: bool = True
+    # A screen has to beat the baseline by at least this much to earn a full
+    # sweep. Above zero on purpose: a screen is noisy, and confirming
+    # break-even candidates is how the queue fills with nothing.
+    screen_promise_pct: float = -1.0
+    # Infrastructure failures are retried unchanged, but not forever: a
+    # persistently broken runner would otherwise consume the whole budget
+    # rediscovering that it is broken.
+    max_infra_retries: int = 2
 
 
 @runtime_checkable

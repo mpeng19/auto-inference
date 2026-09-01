@@ -1,4 +1,5 @@
-"""Orchestration implementations. `Fleet` is the reference one."""
+"""Orchestration implementations: the fleet and the evaluation queue."""
+from .broker import EvalBroker
 from .fleet import Fleet
 
-__all__ = ["Fleet"]
+__all__ = ["EvalBroker", "Fleet"]

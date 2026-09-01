@@ -7,7 +7,12 @@ orchestrator owns exactly the things a single agent cannot see:
 nothing about that needs isolating. What is scarce is **GPU concurrency and
 money**: every attempt is a 25-60 minute sweep on a rented H100. Ten agents
 attempting freely is ten simultaneous sweeps, and the failure mode is a bill,
-not a race condition. So the orchestrator gates evaluations, not processes.
+not a race condition.
+
+That scheduling lives in `EvalService` (see `contracts/evaluation.py`), not
+here, and it is a queue rather than a lock so an agent waiting on a GPU is
+still doing work. This service owns what is left: which ideas exist, whether
+they are diverse, and when an agent should give its slot up.
 
 **Diversity is a fleet property.** No agent can tell whether its idea is a
 duplicate; only something holding all ten can. Seeding goes through here.
@@ -23,6 +28,7 @@ from typing import Protocol, runtime_checkable
 
 from .agent import AgentBudget, AgentOutcome, Idea
 from .common import now
+from .evaluation import EvalService
 
 
 @dataclass(frozen=True)
@@ -75,8 +81,13 @@ class OrchestrationService(Protocol):
 
     def stop(self, reason: str = "") -> FleetState: ...
 
-    def acquire_eval_slot(self, agent_id: str, timeout_s: float = 3600) -> bool:
-        """Block until this agent may spend GPU time. The whole cost control."""
-        ...
+    @property
+    def evals(self) -> EvalService:
+        """The evaluation queue. Agents submit here; nobody holds a lock.
 
-    def release_eval_slot(self, agent_id: str) -> None: ...
+        Deliberately not `acquire_slot()`. The first version of this interface
+        handed out slots with a semaphore and seven of ten agents sat blocked
+        in it doing nothing. Waiting for a GPU and having nothing to do are
+        different problems, and only the first is unavoidable.
+        """
+        ...

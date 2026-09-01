@@ -7,10 +7,10 @@ and ten agents attempting freely is ten simultaneous rentals.
 
 So this class does exactly three things a single agent cannot do for itself:
 
-**Gate evaluations.** `acquire_eval_slot` blocks until the fleet can afford
-another sweep. This is the only place spend is controlled, and it is a
-semaphore over GPU concurrency rather than over agent threads -- an agent
-waiting for a slot should keep thinking, not stop existing.
+**Hold the budget.** Whether the fleet can afford to keep going at all. The
+*scheduling* of GPU time lives in `EvalService`, deliberately: this class used
+to hand out slots with a semaphore and seven of ten agents sat blocked in it,
+which is capacity being rented and not used.
 
 **Keep seeds diverse.** No agent can tell whether its idea duplicates another's;
 only something holding all ten can. `_too_similar` is a deliberately crude
@@ -29,7 +29,6 @@ not.
 """
 from __future__ import annotations
 
-import contextlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -47,18 +46,23 @@ def _tokens(text: str) -> set[str]:
 class Fleet:
     """Reference implementation of `contracts.orchestration.OrchestrationService`."""
 
-    def __init__(self, make_agent, *, similarity_threshold: float = 0.6):
+    def __init__(self, make_agent, evals, *, similarity_threshold: float = 0.6):
         # `make_agent(agent_id, fleet) -> AgentService`. Injected so the fleet
         # never needs to know how an agent thinks.
         self.make_agent = make_agent
+        self._evals = evals              # contracts.evaluation.EvalService
         self.similarity_threshold = similarity_threshold
         self._lock = threading.RLock()
         self._state = FleetState()
         self._spec: FleetSpec | None = None
-        self._slots: threading.BoundedSemaphore | None = None
         self._live_ideas: list[Idea] = []
         self._pool: ThreadPoolExecutor | None = None
         self._stop = threading.Event()
+
+    @property
+    def evals(self):
+        """The evaluation queue. Agents submit here and keep working."""
+        return self._evals
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self, spec: FleetSpec) -> str:
@@ -66,8 +70,6 @@ class Fleet:
             if self._state.running:
                 raise RuntimeError("fleet already running")
             self._spec = spec
-            self._slots = threading.BoundedSemaphore(
-                spec.fleet_budget.max_concurrent_evals)
             self._stop.clear()
             n = spec.fleet_budget.max_agents
             self._state = FleetState(
@@ -90,21 +92,7 @@ class Fleet:
             self._state = replace(self._state, running=False)
             return self._state
 
-    # ── the gate ─────────────────────────────────────────────────────────
-    def acquire_eval_slot(self, agent_id: str, timeout_s: float = 3600) -> bool:
-        """Block until this agent may rent a GPU. The whole of cost control."""
-        if self._stop.is_set() or not self._within_budget():
-            return False
-        got = self._slots.acquire(timeout=timeout_s)
-        if got:
-            self._touch(agent_id, status="evaluating", evals_delta=+1)
-        return got
-
-    def release_eval_slot(self, agent_id: str) -> None:
-        with contextlib.suppress(ValueError):   # released more than acquired
-            self._slots.release()
-        self._touch(agent_id, status="working", evals_delta=-1)
-
+    # ── budget ───────────────────────────────────────────────────────────
     def _within_budget(self) -> bool:
         s, b = self.state(), self._spec.fleet_budget
         if s.cost_usd >= b.max_usd_total:
@@ -175,6 +163,7 @@ class Fleet:
                     self._live_ideas = [i for i in self._live_ideas if i.id != idea.id]
                 continue
             self._touch(agent_id, status="idle", cost=out.cost_usd,
-                        attempts=len(out.attempts), note=out.stop)
+                        attempts=len(out.attempts),
+                        note=f"{out.stop} (idle {out.idle_s:.0f}s)")
             self._record_outcome(out)
         self._touch(agent_id, status="done")

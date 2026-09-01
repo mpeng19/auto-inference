@@ -86,8 +86,9 @@ price them with the simulator. Four services, each defined by a Protocol in
 |---|---|
 | `MemoryService` | has anyone tried this, and what happened? |
 | `ContextService` | how exactly did they do it? |
+| `EvalService` | the queue in front of the GPUs |
 | `AgentService` | one idea, iterated, with divergence and retry policy |
-| `OrchestrationService` | N of those at once, gating the scarce thing |
+| `OrchestrationService` | N of those at once, kept diverse and in budget |
 
 An agent's whole interface to the code is a `Workspace`:
 
@@ -106,8 +107,34 @@ on a Mac cannot get it, and an agent needs the source, not an install.
 container, so the isolation that matters is already paid for. Agents write text
 and wait on an API. The resource they genuinely contend over is **GPU
 concurrency and money** — every attempt rents an H100 for 25–60 minutes — so
-the orchestrator gates evaluations rather than processes, and per-agent
-directories are enough.
+per-agent directories are enough.
+
+**On keeping agents busy.** That scarcity is a *queue*, not a lock. An agent
+submits and keeps working; it blocks only on `collect`, and only after it has
+run out of useful things to do:
+
+```python
+ticket = evals.submit(EvalRequest(stack=ws.stack(), tier="screen"))
+proposer.study(...)          # read other agents' traces, refine the hypothesis
+rec = evals.collect(ticket.id)
+```
+
+Three mechanisms keep utilisation high, in descending order of what they buy:
+
+1. **Tiers.** A screening run is a fraction of a full sweep and most candidates
+   die in it. Capacity is reserved for screens so a backlog of confirmations
+   cannot starve the tier that does the filtering.
+2. **Dedup by content.** A stack digest is a content hash, so identical
+   proposals share one GPU run. Writing the tests surfaced how common this is:
+   ten agents seeded from one baseline produced **twenty proposals and one
+   run**. Only successes are cached — a failure is a property of the moment,
+   and memoising one turns an infra retry into an infinite loop.
+3. **Fair ordering.** FIFO within a priority band, so a fast agent cannot barge
+   repeatedly and starve a slow one.
+
+`AgentOutcome.idle_s` and `QueueStats.utilisation` report whether it is
+working, and tests assert that every `study` call happens with an evaluation
+actually in flight.
 
 ## Layout
 

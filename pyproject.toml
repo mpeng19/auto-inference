@@ -65,3 +65,8 @@ ignore = [
 # Tests say what they mean; a lambda or a magic number in an assertion is fine.
 "**/tests/**" = ["E731", "B011"]
 "**/conftest.py" = ["E731", "B011"]
+# The contracts index groups `__all__` by service rather than alphabetically:
+# that grouping is the documentation of what services exist, and sorting it
+# destroys the only structure the file has.
+"src/harness/contracts/__init__.py" = ["RUF022"]
+"src/harness/__init__.py" = ["RUF022"]
