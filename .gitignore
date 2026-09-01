@@ -20,9 +20,10 @@ results/
 logs/
 *.log
 
-# Evaluation artifacts: a Simulator root_dir is a local working directory
+# Evaluation artifacts: a Simulator root_dir is a working directory.
+# docs/examples/ is the exception -- a committed example of what a run produces.
 runs/
-!runs/.gitkeep
+*.ipynb_checkpoints/
 
 # macOS
 .DS_Store

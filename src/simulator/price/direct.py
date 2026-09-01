@@ -26,23 +26,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Reference costs, $/GPU-hour. Nebius list prices fetched 2026-08-30; the
-# committed figure applies their stated "up to 35% off on-demand".
-COST_BASES: dict[str, tuple[float, str]] = {
-    "nebius-h100-committed": (2.50, "on-demand less 35% commitment discount"),
-    "nebius-h100-preemptible": (2.15, "preemptible; cheapest, can be reclaimed"),
-    "nebius-h100-ondemand": (3.85, "list on-demand"),
-    "nebius-h200-committed": (2.93, "on-demand less 35%"),
-    "nebius-h200-preemptible": (2.45, "preemptible"),
-    "modal-h100": (3.95, "serverless retail -- for our own spend, NOT a serving cost basis"),
-}
-# Agreed with the project stakeholder 2026-09-01: price at $3.00/GPU-hr and
-# 50% utilisation. Both are decisions, not estimates -- $3.00 sits between
-# Nebius committed ($2.50) and list on-demand ($3.85), covering a realistic
-# on-demand/preemptible mix; 50% is close to the 48% mean/peak this model's
-# own traffic implies for a single-model deployment sized for peak.
-COST_BASES["agreed-2026-09"] = (3.00, "agreed basis: on-demand/preemptible mix")
-DEFAULT_BASIS = "agreed-2026-09"
+# The rate itself lives in `simulator.costs`, keyed by (provider, gpu): it is
+# purely an assumption, it moves, and it scales the whole answer, so it has no
+# business being a lookup table buried in a pricing function.
+from .. import costs
+
+DEFAULT_USD_PER_GPU_HOUR = costs.rate()      # the agreed default, $3.00 on H100
 DEFAULT_UTILISATION = 0.50
 DEFAULT_MARGIN = 0.0                 # report break-even; margin is stated separately
 
@@ -101,14 +90,9 @@ class DirectPrice:
     output_tokens: float
     gpu_seconds_input: float
     gpu_seconds_output: float
-    basis: str
     usd_per_gpu_hour: float
     utilization: float
     margin: float
-
-    @property
-    def bill_per_1k_requests(self) -> float:
-        raise NotImplementedError("needs a request count; use bill_per_request")
 
     def bill_per_request(self, in_tok: float, out_tok: float) -> float:
         return (self.effective_in_per_m * in_tok
@@ -118,7 +102,7 @@ class DirectPrice:
 def price_direct(gpu_seconds_input: float, gpu_seconds_output: float,
                  input_tokens: float, output_tokens: float,
                  cached_tokens: float,
-                 basis: str = DEFAULT_BASIS,
+                 usd_per_gpu_hour: float = DEFAULT_USD_PER_GPU_HOUR,
                  utilization: float = DEFAULT_UTILISATION,
                  margin: float = DEFAULT_MARGIN) -> DirectPrice:
     """Effective input price at the hit rate the system actually achieved.
@@ -146,14 +130,13 @@ def price_direct(gpu_seconds_input: float, gpu_seconds_output: float,
     seconds are not a valid substitute below saturation, because idle time
     would be charged to whatever tokens happened to flow.
     """
-    if basis not in COST_BASES:
-        raise KeyError(f"unknown cost basis {basis!r}; have {sorted(COST_BASES)}")
+    if usd_per_gpu_hour <= 0:
+        raise ValueError(f"rate must be positive, got {usd_per_gpu_hour}")
     if not 0 < utilization <= 1:
         raise ValueError(f"utilisation must be in (0, 1], got {utilization}")
     if input_tokens <= 0 or output_tokens <= 0:
         raise ValueError("need positive token counts")
-    usd_hr, _ = COST_BASES[basis]
-    per_s = usd_hr / 3600.0
+    per_s = usd_per_gpu_hour / 3600.0
     scale = per_s / utilization * (1.0 + margin) * 1e6
     return DirectPrice(
         effective_in_per_m=gpu_seconds_input / input_tokens * scale,
@@ -162,7 +145,7 @@ def price_direct(gpu_seconds_input: float, gpu_seconds_output: float,
         input_tokens=input_tokens, output_tokens=output_tokens,
         gpu_seconds_input=gpu_seconds_input,
         gpu_seconds_output=gpu_seconds_output,
-        basis=basis, usd_per_gpu_hour=usd_hr,
+        usd_per_gpu_hour=usd_per_gpu_hour,
         utilization=utilization, margin=margin)
 
 

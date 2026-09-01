@@ -36,7 +36,11 @@ import modal
 APP_NAME = os.environ.get("SIMULATOR_APP_NAME", "auto-inference")
 HF_CACHE_VOLUME = os.environ.get("SIMULATOR_HF_VOLUME", "auto-inference-hf-cache")
 RESULTS_VOLUME = os.environ.get("SIMULATOR_RESULTS_VOLUME", "auto-inference-results")
-HF_SECRET = os.environ.get("SIMULATOR_HF_SECRET", "huggingface")
+# Opt-in by name. Unset means no secret is attached, which is the right
+# default: both Qwen3 checkpoints are Apache-2.0 and ungated, so a fresh clone
+# needs no token, and requiring one would make a new user's first `make deploy`
+# fail on a secret they have no reason to have.
+HF_SECRET = os.environ.get("SIMULATOR_HF_SECRET", "")
 
 SGLANG_VERSION = "0.5.18"
 CUDA_TAG = "12.8.1-devel-ubuntu22.04"
@@ -50,20 +54,20 @@ results_vol = modal.Volume.from_name(RESULTS_VOLUME, create_if_missing=True)
 
 
 def _hf_secret() -> list:
-    """Hugging Face auth, only if the user has set it up.
+    """Hugging Face auth, attached only when `SIMULATOR_HF_SECRET` names one.
 
-    Deliberately optional. Both Qwen3 checkpoints we use are Apache-2.0 and
-    ungated, so a fresh clone needs no token at all -- requiring one would mean
-    a new user's first `make deploy` fails on a secret they have no reason to
-    have. Create it (`modal secret create huggingface HF_TOKEN=...`) only for a
-    gated model or if you hit anonymous rate limits.
+    **Never hydrated here.** This runs at decorator time, i.e. on every
+    `import simulator.runner.modal_runner`, and an existence check makes a
+    network round trip -- which took 57 seconds under a blocked socket and
+    would have made the module un-importable offline. Modal resolves the name
+    when the app is deployed, which is the right time to find out it is wrong.
+
+    Needed only for a gated model or if anonymous Hub rate limits bite:
+
+        modal secret create huggingface HF_TOKEN=hf_...
+        export SIMULATOR_HF_SECRET=huggingface
     """
-    try:
-        s = modal.Secret.from_name(HF_SECRET)
-        s.hydrate()
-        return [s]
-    except Exception:
-        return []
+    return [modal.Secret.from_name(HF_SECRET)] if HF_SECRET else []
 
 image = (
     modal.Image.from_registry(f"nvidia/cuda:{CUDA_TAG}", add_python=PY_VERSION)

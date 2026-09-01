@@ -1,4 +1,6 @@
 """Pricing arithmetic, and the gate that refuses to price what it should not."""
+import pathlib
+
 import pytest
 
 from simulator.price.direct import gpu_seconds_per_request, price_direct, usable
@@ -92,3 +94,36 @@ def test_leaderboard_disagrees_with_itself_on_purpose():
 def test_gpu_seconds_per_request_bridges_to_market_size():
     g = gpu_seconds_per_request(12.1, 367.2, 683084, 109244, 20583, 2076)
     assert g == pytest.approx(7.34, abs=0.02)
+
+
+def test_the_rate_actually_reaches_the_token_prices():
+    """Regression: `price_direct` took a cost-basis *name* and ignored the
+    Simulator's rate, so naming a cheaper provider changed nothing.
+
+    It was invisible because the agreed default ($3.00) happened to equal the
+    default basis. Caught by the example notebook printing an identical price
+    for nebius-committed at $2.50/hr.
+    """
+    base = price_direct(12.1, 367.2, 683084, 109244, 510947,
+                        usd_per_gpu_hour=3.00, utilization=0.50)
+    cheap = price_direct(12.1, 367.2, 683084, 109244, 510947,
+                         usd_per_gpu_hour=2.50, utilization=0.50)
+    assert cheap.out_per_m / base.out_per_m == pytest.approx(2.50 / 3.00)
+    assert cheap.effective_in_per_m / base.effective_in_per_m == pytest.approx(2.50 / 3.00)
+
+
+def test_a_named_provider_changes_the_whole_bill(tmp_path):
+    """End to end through the Simulator, which is where the bug actually bit."""
+    import json
+
+    from simulator import Simulator
+
+    d = tmp_path / "r"
+    d.mkdir()
+    rec = json.loads((pathlib.Path(__file__).resolve().parents[1]
+                      / "data" / "sweep-1xh100.json").read_text())
+    lv = (4, 8, 12, 16, 24)
+    default = Simulator(root_dir=d, n_gpu=1, levels=lv).analyse(rec)
+    nebius = Simulator(root_dir=d, n_gpu=1, levels=lv,
+                       gpu_provider="nebius-committed").analyse(rec)
+    assert nebius.bill_per_1k / default.bill_per_1k == pytest.approx(2.50 / 3.00)

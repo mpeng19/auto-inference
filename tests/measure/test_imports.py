@@ -33,3 +33,22 @@ def test_module_imports(name):
 def test_public_api_is_importable_from_the_top():
     for n in simulator.__all__:
         assert hasattr(simulator, n), n
+
+
+def test_importing_the_runner_makes_no_network_call():
+    """It runs at decorator time on every import.
+
+    An existence check on a Modal secret used to sit here; under a blocked
+    socket it retried for 57 seconds, and it would have failed a fresh clone's
+    first deploy on a secret the user has no reason to own. The offline fixture
+    turns any regression into a hard failure, so this only has to be fast.
+    """
+    import importlib
+    import time
+
+    import simulator.runner.modal_runner as r
+
+    t0 = time.perf_counter()
+    importlib.reload(r)
+    assert time.perf_counter() - t0 < 5.0
+    assert r._hf_secret() == [] or r.HF_SECRET

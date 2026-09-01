@@ -317,8 +317,9 @@ class Simulator:
             p: DirectPrice = price_direct(
                 gpu_seconds_input=ext, gpu_seconds_output=dec,
                 input_tokens=lv["prompt_tokens"], output_tokens=lv["output_tokens"],
-                cached_tokens=lv["cached_tokens"], utilization=u,
-                margin=0.0)
+                cached_tokens=lv["cached_tokens"],
+                usd_per_gpu_hour=self.rate_per_gpu_hour,
+                utilization=u, margin=0.0)
             gsr = price_direct_mod.gpu_seconds_per_request(
                 ext, dec, lv["prompt_tokens"], lv["output_tokens"],
                 m.in_per_request, m.out_per_request)

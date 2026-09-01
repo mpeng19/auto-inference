@@ -29,6 +29,34 @@ Every artifact lands in `root_dir`: the raw sweep, the priced curve, a report,
 and two figures — where the SLO stops us, and what that costs against market
 share.
 
+## Setup, from a fresh clone
+
+```bash
+uv sync                    # dependencies
+uv run modal token new     # your own Modal account -- nothing here is shared
+make deploy                # push the runner
+make test                  # 112 tests, no GPU, no network
+```
+
+That is the whole setup. No Hugging Face token is needed: the default
+checkpoint is Apache-2.0 and ungated. No account-specific names are baked in —
+the Modal volumes are created on first use in whichever workspace you are
+logged into. Override any of it if you want to:
+
+```bash
+export SIMULATOR_HF_SECRET=huggingface     # only for a gated model
+export SIMULATOR_APP_NAME=my-app
+export SIMULATOR_MARKET_DATA=/path/to/snapshot.json
+```
+
+To price a **different model**, set `model=` and pull that model's market data
+with `make market` — the snapshot supplies the demand denominator and the
+provider board, and both are model-specific.
+
+Start with **`docs/example.ipynb`**, which runs the whole thing end to end
+against a stored sweep in a few seconds. `docs/examples/baseline-1xh100/` is
+what a real run leaves behind.
+
 ## The method
 
 1. **Sweep offered load** on real coding-agent traffic rescaled to the
@@ -68,7 +96,8 @@ docs/HANDOFF.md         the running log; read §6b-§6d for the settled method
 ## Commands
 
 ```
-make test                          # 44 unit tests, no GPU
+make test                          # 112 unit tests, no GPU, no network
+make lint                          # ruff
 make deploy                        # push the runner
 make run     ROOT=runs/baseline    # full evaluation
 make submit  ROOT=runs/baseline    # start it and walk away
@@ -87,5 +116,14 @@ Measured: GPU-seconds per token class, latency percentiles, cache hit rate,
 running batch, market prices and volumes.
 
 Assumed, and reported with every result because they cannot be measured from
-inside the harness: **$3.00/GPU-hour** and **50% utilisation**. Utilisation is
-the single largest lever on the answer — at 25% every price doubles.
+inside the harness: the **GPU rate** and the **utilisation**. Both are fields on
+`Simulator`, and `sim.assumptions()` returns the complete set.
+
+Rates live in `simulator/costs.py`, keyed by provider — `gpu_provider=None`
+gives the agreed $3.00/hr H100 default, `gpu_provider="nebius-committed"` gives
+$2.50. Serverless retail (Modal's $3.95) is in the catalog but refused as a
+serving basis unless you pass `allow_retail_rate=True`: it is what we pay to
+run experiments, and pricing a serving business against it would flatter every
+competitor by ~30%.
+
+Utilisation is the single largest lever — at 25% every price doubles.

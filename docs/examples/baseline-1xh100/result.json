@@ -1,0 +1,296 @@
+{
+  "ok": true,
+  "reason": "",
+  "n_star": 12,
+  "stack_digest": "d5158b2d1dd6",
+  "curve": [
+    {
+      "n_users": 4,
+      "meets_slo": true,
+      "binding": null,
+      "n_requests": 12,
+      "goodput_rps": 0.037317976500471854,
+      "batch": 2.44,
+      "hit_rate": 0.6784,
+      "gpu_s_per_request": 12.196922110399555,
+      "effective_in_per_m": 0.04240673663422779,
+      "out_per_m": 9.372371686770613,
+      "bill_per_1k": 20.328203517332597,
+      "share_per_node": 0.002532671327344582,
+      "capacity_per_day": 3541.8771726980244,
+      "checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 494.8585271835327,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 14.670363401042746,
+          "limit": 25.0,
+          "ok": true,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 14.280277664427873,
+          "limit": 20.0,
+          "ok": true,
+          "note": "median provider's published p50 throughput"
+        }
+      ],
+      "warnings": [
+        "p90 TTFT estimated from 12 completions; ~30 needed before it is a percentile rather than a maximum",
+        "p90 TPOT estimated from 12 completions; ~30 needed before it is a percentile rather than a maximum"
+      ]
+    },
+    {
+      "n_users": 8,
+      "meets_slo": true,
+      "binding": null,
+      "n_requests": 37,
+      "goodput_rps": 0.11100194019657128,
+      "batch": 3.59,
+      "hit_rate": 0.7892,
+      "gpu_s_per_request": 9.033529063952622,
+      "effective_in_per_m": 0.02554327688221529,
+      "out_per_m": 6.9997068714200985,
+      "bill_per_1k": 15.055881773254372,
+      "share_per_node": 0.003419571099198728,
+      "capacity_per_day": 4782.184204441784,
+      "checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 523.2263088226317,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 17.869928962916227,
+          "limit": 25.0,
+          "ok": true,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 16.88535024245544,
+          "limit": 20.0,
+          "ok": true,
+          "note": "median provider's published p50 throughput"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "n_users": 12,
+      "meets_slo": true,
+      "binding": null,
+      "n_requests": 45,
+      "goodput_rps": 0.12506185319123558,
+      "batch": 5.02,
+      "hit_rate": 0.7484,
+      "gpu_s_per_request": 7.340911623685717,
+      "effective_in_per_m": 0.029437268380616763,
+      "out_per_m": 5.602100721792951,
+      "bill_per_1k": 12.234852706142862,
+      "share_per_node": 0.004208032529801047,
+      "capacity_per_day": 5884.827690966015,
+      "checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 571.3999748229982,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 20.75354290232898,
+          "limit": 25.0,
+          "ok": true,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 19.32753626156518,
+          "limit": 20.0,
+          "ok": true,
+          "note": "median provider's published p50 throughput"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "n_users": 16,
+      "meets_slo": false,
+      "binding": "mean TPOT",
+      "n_requests": 59,
+      "goodput_rps": 0.1667624621333983,
+      "batch": 5.79,
+      "hit_rate": 0.6818,
+      "gpu_s_per_request": 7.145187102512668,
+      "effective_in_per_m": 0.035374316575331355,
+      "out_per_m": 5.386085486405113,
+      "bill_per_1k": 11.908645170854445,
+      "share_per_node": 0.00432330105113708,
+      "capacity_per_day": 6046.027819874492,
+      "checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 562.4392509460449,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 23.52148231221826,
+          "limit": 25.0,
+          "ok": true,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 21.996934012260095,
+          "limit": 20.0,
+          "ok": false,
+          "note": "median provider's published p50 throughput"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "n_users": 24,
+      "meets_slo": false,
+      "binding": "mean TPOT",
+      "n_requests": 78,
+      "goodput_rps": 0.20243387036704674,
+      "batch": 8.37,
+      "hit_rate": 0.5733,
+      "gpu_s_per_request": 5.929637544585851,
+      "effective_in_per_m": 0.04626582990295721,
+      "out_per_m": 4.302131081074598,
+      "bill_per_1k": 9.882729240976419,
+      "share_per_node": 0.005209558708874112,
+      "capacity_per_day": 7285.43687117005,
+      "checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 1157.6087951660154,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 29.05201464755125,
+          "limit": 25.0,
+          "ok": false,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 26.72924612349225,
+          "limit": 20.0,
+          "ok": false,
+          "note": "median provider's published p50 throughput"
+        },
+        {
+          "label": "good_frac",
+          "stat": "frac",
+          "metric": "slo",
+          "value": 0.9743589743589743,
+          "limit": 0.99,
+          "ok": false,
+          "note": "share of requests meeting every bound"
+        }
+      ],
+      "warnings": []
+    }
+  ],
+  "priced_at": {
+    "n_users": 12,
+    "meets_slo": true,
+    "binding": null,
+    "n_requests": 45,
+    "goodput_rps": 0.12506185319123558,
+    "batch": 5.02,
+    "hit_rate": 0.7484,
+    "gpu_s_per_request": 7.340911623685717,
+    "effective_in_per_m": 0.029437268380616763,
+    "out_per_m": 5.602100721792951,
+    "bill_per_1k": 12.234852706142862,
+    "share_per_node": 0.004208032529801047,
+    "capacity_per_day": 5884.827690966015,
+    "checks": [
+      {
+        "label": "p90 TTFT",
+        "stat": "p90",
+        "metric": "ttft",
+        "value": 571.3999748229982,
+        "limit": 2818.0,
+        "ok": true,
+        "note": "median provider's published p90 latency"
+      },
+      {
+        "label": "p90 TPOT",
+        "stat": "p90",
+        "metric": "tpot",
+        "value": 20.75354290232898,
+        "limit": 25.0,
+        "ok": true,
+        "note": "interactive-serving guidance -- our choice"
+      },
+      {
+        "label": "mean TPOT",
+        "stat": "mean",
+        "metric": "tpot",
+        "value": 19.32753626156518,
+        "limit": 20.0,
+        "ok": true,
+        "note": "median provider's published p50 throughput"
+      }
+    ],
+    "warnings": []
+  },
+  "rank": {
+    "rank_bill": 9,
+    "rank_eff_in": 1,
+    "of": 12
+  },
+  "artifacts": {}
+}

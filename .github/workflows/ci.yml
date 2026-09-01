@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+
+      # Lint before tests: it caught two real breakages that the suite could
+      # not, because nothing offline exercises the server lifecycle.
+      - name: lint
+        run: uv run ruff check .
+
+      # The suite must never touch the network or a GPU. conftest enforces it
+      # at the socket layer; this is the belt to that braces.
+      - name: test
+        run: uv run pytest -q
+        env:
+          SIMULATOR_OFFLINE: "1"
+
+      - name: package builds and imports
+        run: |
+          uv build
+          uv run python -c "import simulator; print(simulator.__version__)"
+
+      # The runner is the one module that cannot be exercised without a Modal
+      # account, so at minimum prove it is importable and well-formed.
+      - name: runner is well-formed
+        run: uv run python -c "import simulator.runner.modal_runner as r; print(r.APP_NAME)"

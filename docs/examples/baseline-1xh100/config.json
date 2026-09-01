@@ -1,0 +1,70 @@
+{
+  "digest": "748b37ed4124",
+  "stack": "stock SGLang",
+  "stack_digest": "d5158b2d1dd6",
+  "serving": {
+    "model": "Qwen/Qwen3.8-27B-FP8",
+    "gpu": "H100",
+    "n_gpu": 1,
+    "tp_size": 1,
+    "dp_size": 1,
+    "ep_size": null,
+    "mem_fraction_static": 0.85,
+    "max_total_tokens": null,
+    "max_running_requests": 256,
+    "chunked_prefill_size": 8192,
+    "schedule_policy": "fcfs",
+    "schedule_conservativeness": 1.0,
+    "enable_prefix_caching": true,
+    "enable_metrics": true,
+    "context_length": null,
+    "extra_args": []
+  },
+  "levels": [
+    4,
+    8,
+    12,
+    16,
+    24
+  ],
+  "seconds_per_level": 120.0,
+  "repeats": 1,
+  "n_sessions": 300,
+  "canaries": true,
+  "slo": {
+    "bounds": [
+      {
+        "metric": "ttft",
+        "stat": "p90",
+        "limit_ms": 2818.0,
+        "note": "median provider's published p90 latency"
+      },
+      {
+        "metric": "tpot",
+        "stat": "p90",
+        "limit_ms": 25.0,
+        "note": "interactive-serving guidance -- our choice"
+      },
+      {
+        "metric": "tpot",
+        "stat": "mean",
+        "limit_ms": 20.0,
+        "note": "median provider's published p50 throughput"
+      }
+    ],
+    "min_good_frac": 0.99,
+    "max_failed": 0
+  },
+  "assumptions": {
+    "rate_per_gpu_hour": 3.0,
+    "gpu_provider": null,
+    "cost_basis": "$3.00/GPU-hr (H100, agreed default basis)",
+    "utilisation": 0.5,
+    "margin": 0.0,
+    "market_as_of": "2026-08-31",
+    "market_requests_per_day": 1398474.857142857,
+    "in_per_request": 20582.81134427046,
+    "out_per_request": 2075.819686592876
+  },
+  "note": "stock SGLang on 1xH100 -- the baseline every diff is measured against"
+}

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from simulator.price.direct import COST_BASES, DEFAULT_BASIS, DEFAULT_MARGIN, DEFAULT_UTILISATION
+from simulator.costs import CATALOG, rate
+from simulator.price.direct import DEFAULT_MARGIN, DEFAULT_UTILISATION
 
 
 @dataclass(frozen=True)

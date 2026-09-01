@@ -1,8 +1,17 @@
 # The product is `simulator`. Everything below is a thin wrapper over it.
-.PHONY: test lint run submit collect rescore ls spend research-test help
+.PHONY: test lint fix notebook run submit collect rescore ls deploy spend market help
 
 test:            ## unit tests, no GPU, no network
 	uv run pytest -q
+
+lint:            ## ruff over the product; research/ is an archive, left as written
+	uv run ruff check .
+
+fix:             ## apply the lint fixes ruff is confident about
+	uv run ruff check --fix .
+
+notebook:        ## run docs/example.ipynb end to end and save its outputs
+	uv run jupyter nbconvert --to notebook --execute --inplace docs/example.ipynb
 
 run:             ## full evaluation: submit, wait, write artifacts (25-60 GPU-min)
 	uv run simulate run --root $(ROOT) --mkdir $(ARGS)

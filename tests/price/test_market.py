@@ -136,14 +136,10 @@ def test_pricing_defaults_are_the_agreed_basis():
     """
     import pathlib
 
-    from simulator.price.direct import (
-        COST_BASES,
-        DEFAULT_BASIS,
-        DEFAULT_MARGIN,
-        DEFAULT_UTILISATION,
-    )
+    from simulator.costs import rate
+    from simulator.price.direct import DEFAULT_MARGIN, DEFAULT_UTILISATION
 
-    assert COST_BASES[DEFAULT_BASIS][0] == 3.00
+    assert rate() == 3.00
     assert DEFAULT_UTILISATION == 0.50
     assert DEFAULT_MARGIN == 0.0          # break-even; margin stated separately
 
@@ -152,7 +148,7 @@ def test_pricing_defaults_are_the_agreed_basis():
     # DEFAULT_BASIS to the agreed $3.00/50%/break-even changed nothing that ran.
     root = pathlib.Path(__file__).resolve().parents[1] / "src" / "simulator"
     for f in sorted(root.rglob("*.py")):
-        if f.name == "direct.py":
+        if f.name in ("direct.py", "costs.py"):
             continue
         src = f.read_text()
         for banned in ('basis="nebius', "utilization=0.6", "margin=0.25",
@@ -277,14 +273,15 @@ def test_default_environment_is_one_h100_on_the_target_model():
     still while costing ~1.9x per token, because decode is bandwidth-bound.
     """
     from simulator.config import ServingConfig
-    from simulator.price.direct import COST_BASES, DEFAULT_BASIS, DEFAULT_UTILISATION
+    from simulator.costs import rate
+    from simulator.price.direct import DEFAULT_UTILISATION
     from simulator.specs import HARDWARE
 
     sc = ServingConfig()
     assert sc.model == "Qwen/Qwen3.8-27B-FP8"
     assert (sc.gpu, sc.n_gpu) == ("H100", 1)
     assert not sc.validate(), sc.validate()      # tp=1 needs no --ep
-    assert COST_BASES[DEFAULT_BASIS][0] == 3.00
+    assert rate() == 3.00
     assert DEFAULT_UTILISATION == 0.50
     # the model's FP8 weights must fit with room for a usable KV pool
     from simulator.specs import MODELS
