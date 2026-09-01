@@ -891,6 +891,10 @@ def traces(name: str = ""):
     print(json.dumps(d["summary"], indent=2))
 
 
+
+class _SkipPhaseB(Exception):
+    """Control flow, not an error: phase B was deliberately not run."""
+
 @app.function(
     image=image, gpu="L40S", cpu=16.0,
     volumes={"/cache": hf_cache, "/results": results_vol},
@@ -1125,6 +1129,15 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
             # cost. Default well above N*, and allow an explicit override.
             ok_lv = [l["n_users"] for l in rec["levels"] if l["meets_slo"]]
             n_star = max(ok_lv) if ok_lv else max(levels)
+            # Phase B is a cross-check now, not a dependency: the device timer
+            # gives the phase split directly, and the NNLS decomposition is
+            # needed only to re-blend at somebody else's hit rate, which SS5e
+            # says not to do. `sat_users < 0` skips it, which is what a long
+            # single-level confirmation run at N* wants -- there the mixes are
+            # ~15 minutes of GPU spent answering a question already answered.
+            if sat_users < 0:
+                print("\n-- phase B skipped (sat_users < 0) --", flush=True)
+                raise _SkipPhaseB
             sat_users = sat_users or max(32, n_star * 4)
             print(f"\n-- attribution mixes at N={sat_users} "
                   f"(2x N*={n_star}), saturated on purpose --", flush=True)
@@ -1240,6 +1253,11 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                 print(f"  identifiability check failed: {e}", flush=True)
 
             rec["status"] = "ok"
+        except _SkipPhaseB:
+            # Not a failure: phase A ran and its levels carry the phase-split
+            # counters that pricing actually uses.
+            rec["status"] = "ok"
+            rec["mixes"] = []
         except Exception as e:
             rec["status"] = "failed"
             rec["failure"] = f"{type(e).__name__}: {e}"

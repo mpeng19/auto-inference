@@ -84,8 +84,9 @@ def cmd_frontier(a) -> int:
         cpu=float(max(16, 4 * n)),
         timeout=60 * 60 * (3 if n > 1 else 2),
     )
+    sat = -1 if getattr(a, "no_phase_b", False) else a.sat_users
     call = fn.spawn(asdict(sc), levels, asdict(sl),
-                    a.seconds, a.repeats, a.note, a.trace_scale, a.sat_users,
+                    a.seconds, a.repeats, a.note, a.trace_scale, sat,
                     a.target_in, a.target_out)
     print(f"spawned  call_id={call.object_id}")
     print(f"  model   {sc.model.split('/')[-1]} on {sc.n_gpu}x{sc.gpu}")
@@ -243,6 +244,11 @@ def main() -> int:
     f.add_argument("--model", default="", help="override the model to serve")
     f.add_argument("--gpu", default="", help="override GPU type, e.g. H100")
     f.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
+    f.add_argument("--no-phase-b", dest="no_phase_b", action="store_true",
+                   help="skip the saturated attribution mixes. Phase B is a "
+                        "cross-check on the device timer, not an input to the "
+                        "price, so a long single-level confirmation run at N* "
+                        "does not need it.")
     f.add_argument("--sat-users", dest="sat_users", type=int, default=0,
                    help="concurrency for the cost-attribution mixes "
                         "(0 = max(32, 4*N*)); must be enough to saturate decode")
