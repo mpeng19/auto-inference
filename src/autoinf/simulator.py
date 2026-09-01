@@ -643,3 +643,12 @@ def fidelity(obs: list[Observation] | None = None) -> dict:
             "across_tp_all": validate_loo_affine(obs),
             "anomalous_tp": sorted(TP_ANOMALY),
             "n_observations": len(obs)}
+
+
+# Prospective out-of-sample test, 2026-09-01: prediction sealed before the run
+# (docs/prediction-2026-09-01.json). n_gpu=2 at 6k context -- absent from
+# training. Predicted 4.996e-04, measured 5.878e-04: **-15.0%, a marginal
+# FAIL**. So quote 15% as the fidelity outside the training envelope; the 2-3%
+# leave-one-out figure is interpolation and is optimistic.
+PROSPECTIVE_2026_09_01 = Observation(
+    n_gpu=2, batch=59.9, context=6000, gpu_s_out=5.878e-04)

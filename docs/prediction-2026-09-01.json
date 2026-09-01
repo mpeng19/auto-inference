@@ -22,5 +22,13 @@
     "40": 0.0006479030101492627,
     "60": 0.000499083929174448
   },
-  "pass_criterion": "within 15% at the batch actually observed"
+  "pass_criterion": "within 15% at the batch actually observed",
+  "outcome": {
+    "batch_observed": 59.9,
+    "predicted": 0.0004996,
+    "measured": 0.0005878,
+    "rel_error": -0.15,
+    "verdict": "FAIL (marginal)",
+    "run": "1788226262-frontier-24021fa48953.json"
+  }
 }

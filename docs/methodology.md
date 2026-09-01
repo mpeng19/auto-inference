@@ -295,6 +295,36 @@ the intended win.
 the weight read plus per-step overhead, it dominates at the batch sizes we
 actually run, and unlike the KV term there is headroom in it.
 
+### 3.3.4 Prospective test — FAILED at -15%, and that is the real number
+
+Leave-one-out is out-of-sample across configurations, but every held-out point
+still sits inside the convex hull of the rest, and all seven come from one
+apparatus and one SGLang build. So a prediction was **sealed in git before the
+confirming run** (`docs/prediction-2026-09-01.json`, commit `a70f3ae`) for a
+combination absent from training: **n_gpu=2 at 6k context** (the n=2 training
+point is at 22.7k; every 6k point is n=1).
+
+    batch observed   59.9
+    PREDICTED        4.996e-04 GPU-s per output token
+    MEASURED         5.878e-04
+    error            -15.0%        criterion: within 15%
+    VERDICT          FAIL (marginal)
+
+The model **under-predicts cost** one step outside its envelope. So the honest
+fidelity statement is:
+
+    within the training envelope   2-3%   (leave-one-out, §3.3.3)
+    one step outside it            15%    (prospective, this section)
+
+Quote the second number. The first is optimistic for exactly the reason this
+test was run: interpolation is easier than extrapolation, and LOO cannot
+detect an error shared by every training point.
+
+Direction of the miss is informative: predicting *too cheap* at a new
+(n_gpu, context) pair suggests `tp_decay` is too small — TP loses more than
+`n**-0.29` at short context, where the fixed per-step term dominates and
+per-step synchronisation is a larger share of the total. Untested.
+
 ### 3.4 How the inputs to the fit are measured
 
 The per-token costs come from **rate-form NNLS regression** over saturated

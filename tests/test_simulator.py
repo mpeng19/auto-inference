@@ -375,3 +375,21 @@ def test_littles_law_flags_a_client_that_falls_behind():
     d = littles_law_drift(real)
     assert not d["consistent"], d
     assert d["drift"] > 1.5
+
+
+def test_prospective_point_is_the_honest_fidelity_number():
+    """A sealed prediction missed by 15%; LOO said 2-3%. Keep both visible.
+
+    Every LOO hold-out sits inside the convex hull of the rest, so it measures
+    interpolation. The prospective point sits outside and is the number to
+    quote.
+    """
+    from autoinf.simulator import (ALL_OBSERVATIONS, PROSPECTIVE_2026_09_01 as P,
+                                   fit_affine, fidelity)
+
+    m = fit_affine([o for o in ALL_OBSERVATIONS if o.n_gpu != 8])
+    pred = m.gpu_s_out(P.model, P.gpu, P.n_gpu, P.batch, P.context)
+    err = abs(pred - P.gpu_s_out) / P.gpu_s_out
+    assert 0.10 < err < 0.20, err                      # the miss, pinned
+    assert err > 3 * fidelity()["fixed_gpu"]["mean_abs_error"]
+    assert pred < P.gpu_s_out, "miss direction was under-prediction"
