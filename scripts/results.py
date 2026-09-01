@@ -342,3 +342,101 @@ def tiers(name: str):
                 ok = v <= lim
                 print(f"   p{q} {kind.upper():<5} {v:>8.1f} ms  vs {lim:>7.1f} ms"
                       f"   {'ok' if ok else 'FAIL by %.0f%%' % ((v/lim-1)*100)}")
+
+
+def _spec(s: str) -> tuple[str, float]:
+    """'p90:2818' -> ('p90', 2818.0). Blank or 'none' disables the bound."""
+    if not s or s.lower() in ("none", "off", "-"):
+        return ("p50", float("inf"))
+    q, _, lim = s.partition(":")
+    q = q if q.startswith("p") else "p" + q
+    return (q, float(lim))
+
+
+@app.local_entrypoint()
+def rescore(name: str, ttft: str = "p90:2818", tpot: str = "p50:20"):
+    """Re-judge a finished sweep at a different SLO, and price it there.
+
+    Every level stores its full percentile set (p50/p90/p95/p99) precisely so
+    that changing which order statistic the frontier is judged at costs
+    nothing. A sweep is 25 GPU-minutes; re-reading it is free.
+
+    It also lifts a restriction `SLO.tiers()` bakes in: there, TTFT and TPOT
+    must share a percentile. The market gives us a p90 for TTFT (published
+    latency percentiles) and only a p50 for TPOT (throughput percentiles run
+    the wrong way -- p99 throughput is the FASTEST 1%), so the two bounds
+    genuinely live at different quantiles.
+
+        uv run modal run scripts/results.py::rescore --name X \
+            --ttft p90:2818 --tpot p50:20
+    """
+    from autoinf.pricing import price_direct
+
+    tq, tlim = _spec(ttft)
+    pq, plim = _spec(tpot)
+    r = _get.remote(name)
+    n_gpu = (r.get("serving") or {}).get("n_gpu", 1)
+    print(f"judging: {tq} TTFT <= {tlim:.0f} ms   and   {pq} TPOT <= {plim:.1f} ms"
+          f"   ({n_gpu}x{(r.get('serving') or {}).get('gpu', '?')})\n")
+
+    print(f"{'users':>6}{'n req':>7}{'goodput':>9}{'batch':>7}"
+          f"{tq + ' TTFT':>11}{pq + ' TPOT':>11}{'hit':>7}{'':>8}")
+    print("-" * 66)
+    passing: list[dict] = []
+    for lv in r.get("levels", []):
+        tt = (lv.get("ttft_ms") or {}).get(tq)
+        tp = (lv.get("tpot_ms") or {}).get(pq)
+        nreq = (lv.get("ttft_ms") or {}).get("n", 0)
+        b = (lv.get("batch") or {}).get("running") or {}
+        ok = (tt is not None and tp is not None and tt <= tlim and tp <= plim
+              and lv.get("n_failed", 0) == 0)
+        if ok:
+            passing.append(lv)
+        print(f"{lv['n_users']:>6}{nreq:>7}{lv['goodput_rps']:>9.2f}"
+              f"{(b.get('mean') or 0):>7.1f}{(tt or 0):>11.0f}{(tp or 0):>11.1f}"
+              f"{(lv.get('cache_hit_rate') or 0):>7.2f}"
+              f"{'  OK' if ok else '  MISS':>8}")
+
+    if not passing:
+        print("\nno level met this SLO")
+        return
+    star = max(passing, key=lambda l: l["n_users"])
+    sb = (star.get("batch") or {}).get("running") or {}
+    print(f"\nN* = {star['n_users']} users   goodput {star['goodput_rps']:.2f} rps"
+          f"   cache hit {star['cache_hit_rate']:.3f}"
+          f"   batch {sb.get('mean', 0):.1f}")
+
+    ctr = star.get("server_counters") or {}
+    ext = ctr.get("sglang:forward_execution_seconds_total[extend]")
+    dec = ctr.get("sglang:forward_execution_seconds_total[decode]")
+    if ext is None or dec is None:
+        print("  no phase-split counters on this level; cannot price it")
+        return
+    p = price_direct(gpu_seconds_input=ext, gpu_seconds_output=dec,
+                     input_tokens=star["prompt_tokens"],
+                     output_tokens=star["output_tokens"],
+                     cached_tokens=star["cached_tokens"])
+    print(f"\n  extend {ext:.1f} GPU-s over {star['prompt_tokens']:,.0f} input tokens")
+    print(f"  decode {dec:.1f} GPU-s over {star['output_tokens']:,.0f} output tokens")
+    print(f"\n  effective input  ${p.effective_in_per_m:.4f}/M")
+    print(f"  output           ${p.out_per_m:.4f}/M")
+    print(f"  basis: ${p.usd_per_gpu_hour:.2f}/GPU-hr, "
+          f"{p.utilization:.0%} utilisation, break-even")
+
+    # Rank against each provider's REALISED effective price -- the one they
+    # actually achieve at their own hit rate. Re-blending everyone to a common
+    # hit rate would erase the thing being optimised (SS5e): caching well is
+    # part of serving well, and Venice and Cloudflare realising 0.0% on the
+    # same model and the same traffic is a serving-stack difference, not a
+    # workload difference.
+    from autoinf.modal_app import MARKET_AS_OF, MARKET_REALISED
+    board = sorted([(n, e, h) for n, e, h, _ in MARKET_REALISED] +
+                   [("** us **", p.effective_in_per_m, p.hit_rate)],
+                   key=lambda r: r[1])
+    ours = 1 + sum(1 for _, e, _ in board if e < p.effective_in_per_m)
+    print(f"\n  realised effective input price, OpenRouter {MARKET_AS_OF}")
+    print(f"  {'#':>3}  {'provider':<12}{'eff-in $/M':>12}{'hit':>8}")
+    for i, (n, e, h) in enumerate(board, 1):
+        print(f"  {i:>3}  {n:<12}{e:>12.4f}{h:>8.3f}"
+              + ("   <--" if n == "** us **" else ""))
+    print(f"\n  rank {ours} of {len(board)}")
