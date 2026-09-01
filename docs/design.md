@@ -214,6 +214,39 @@ plausible-looking prices, and reporting nothing is better.
 says TP=8 should manage 6.2ms. It is calibrated for this model, this GPU, this
 workload shape. Re-measure if any changes, and treat a change as a finding.
 
+### 3.5 Experiment-design rules, each earned by a wasted run
+
+Three failures in this project share one shape: **an experiment launched
+without first checking it could produce the signal it was looking for.**
+
+**Rule 1 — the model is fixed; the GPU is not.** All serving-physics
+measurement is on `Qwen/Qwen3.8-27B-FP8`. Cost per token varies with batch only
+through the weight read, and a 4B carries 4 GB of weights against this model's
+23 GB, so batching and cache behaviour sit in a different regime entirely. A
+batch sweep was launched on the 4B dev model to save money; its predicted cost
+variation was **1.21x over a 2.2x batch range — inside the 8% fit noise**, so
+it was unresolvable by construction and was cancelled before completing. The
+dev model is for harness validation only (noise floor, determinism, load
+generator). Enforced by `simulator.TARGET_MODEL` / `assert_target_model`.
+
+**Rule 2 — check the effect exceeds the noise before spending.**
+`simulator.effect_size()` computes predicted variation for a planned sweep and
+refuses anything under 4x the fit noise. A 2x threshold was tried first and let
+the bad dev-model experiment through: 21% effect against +-8% per endpoint is a
+signal-to-noise of 1.8, enough to notice a difference but not to *fit an
+exponent*, which is what we are doing.
+
+**Rule 3 — check the independent variable can actually move.** A sweep raising
+offered load 8x to vary batch produced 21.8 -> 42.7 (and only 1.05x among
+points that passed the fit gate), because batch is a memory ceiling, not a
+function of load (§8.2). Reading `schedule_policy.py` first would have shown
+this for free. Prefer reading the source to buying a data point.
+
+**Corollary — the cheapest experiment is often not the informative one.** Rules
+1 and 3 both came from optimising for GPU cost before checking whether the
+result would answer the question. A run that cannot resolve its effect costs
+its full price and returns nothing.
+
 ### 3.4 How the inputs to the fit are measured
 
 The per-token costs come from **rate-form NNLS regression** over saturated
