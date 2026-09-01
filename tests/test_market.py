@@ -146,3 +146,38 @@ def test_pricing_defaults_are_the_agreed_basis():
         assert 'basis="nebius-h100-committed"' not in src, f
         assert "utilization=0.6" not in src, f
         assert "margin=0.25" not in src, f
+
+
+def test_price_direct_needs_no_decomposition():
+    """Hit rate is an outcome, so the cached/uncached split is unnecessary.
+
+    Splitting input cost exists only to re-blend at a competitor's hit rate.
+    At our own, effective input price is input GPU-seconds over input tokens --
+    and caching better simply lowers it, which is the point.
+    """
+    from autoinf.pricing import price_direct
+
+    # Same work, same tokens, but the second system caches better: fewer of the
+    # input tokens needed prefill, so it spent less GPU time on them.
+    poor = price_direct(gpu_seconds_input=100.0, gpu_seconds_output=400.0,
+                        input_tokens=20_583_000, output_tokens=2_076_000,
+                        cached_tokens=0.30 * 20_583_000)
+    good = price_direct(gpu_seconds_input=40.0, gpu_seconds_output=400.0,
+                        input_tokens=20_583_000, output_tokens=2_076_000,
+                        cached_tokens=0.85 * 20_583_000)
+    assert good.effective_in_per_m < poor.effective_in_per_m
+    assert good.hit_rate > poor.hit_rate
+    assert good.out_per_m == poor.out_per_m        # output untouched by caching
+    # break-even by default: no margin folded into a cost figure
+    assert good.margin == 0.0 and good.utilization == 0.50
+
+
+def test_price_direct_rejects_impossible_inputs():
+    import pytest
+
+    from autoinf.pricing import price_direct
+
+    with pytest.raises(ValueError):
+        price_direct(1.0, 1.0, 0, 100, 0)                  # no input tokens
+    with pytest.raises(ValueError):
+        price_direct(1.0, 1.0, 100, 100, 0, utilization=0)  # divide by zero

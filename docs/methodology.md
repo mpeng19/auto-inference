@@ -571,6 +571,57 @@ single-stream TPS directly. At batch ~1 the KV term vanishes and TPS reads
 `f_weights x bandwidth` almost directly, with none of the four assumptions
 above. Alibaba's own Qwen API is the natural reference. ~$1.
 
+## 5e. Cache hit rate is an OUTCOME, not a control
+
+Earlier sections compare our effective input price to a provider's *at their
+hit rate*. That was the wrong default and is superseded.
+
+Hit rate is `min(what the traffic offers, what the system captures)`, and on
+this marketplace it is overwhelmingly the second term: same model, same
+traffic, Novita realises **87.4%** while Venice and Cloudflare realise
+**0.0%** — they have not implemented caching. **Caching well is serving well.**
+Re-blending our price to a competitor's hit rate normalises away precisely the
+thing the project exists to improve.
+
+**So the headline number is unmatched**: our effective input price at the hit
+rate we achieve, against theirs at the rate they achieve. Matched comparison
+survives as a *diagnostic* — it isolates cost-per-token from cache achievement,
+which is useful for explaining a gap, but it is not the number to quote.
+
+### This removes most of the apparatus
+
+At our own hit rate,
+
+    effective input price = input GPU-seconds / input tokens x rate / utilisation
+
+is directly measurable (`pricing.price_direct`). Splitting input cost into
+cached and uncached is needed **only** to re-blend at someone else's rate. Drop
+the matching and these all go with it:
+
+- the four-mix phase B and its NNLS solve
+- `identifiability()` and the `usable()` gate over three token classes
+- the per-sequence-versus-per-context confound of §3.3.1, and the two-context
+  run that would have been needed to break it
+
+What remains: sweep A with the device timer, phase-split GPU time, done.
+
+### What gets harder
+
+The hit rate becomes **load-bearing** rather than normalised away, so it has to
+be earned on representative traffic. Ours comes from replaying TraceLab, which
+is Claude Code specifically, while the marketplace mixes pi, Hermes Agent,
+LangChain and others. Two things make it defensible — the traffic demonstrably
+supports high reuse (Novita extracts 87.4% from it), and we rescaled the replay
+to the market's measured token shape (§5.1) — but it is now the assumption to
+defend rather than the one we sidestepped.
+
+### And it promotes hit rate to a first-class optimisation target
+
+Alongside `f_weights`. Levers, none of which need a kernel: `--schedule-policy
+lpm` (longest-prefix-match queue ordering), cache-aware routing across
+replicas, a larger KV pool via `--mem-fraction-static`, and eviction policy in
+`radix_cache.py` — which we already carry as an overlay.
+
 ## 6. Assumptions
 
 ### 6.1 Verified against external data

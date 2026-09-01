@@ -455,3 +455,84 @@ def fleet_utilisation(cv_single: float, n_models: int, sigma: float = 2.0) -> fl
     """Utilisation an N-model fleet holds, given one model's burstiness."""
     cv = cv_single / (n_models ** 0.5)
     return 1.0 / (1.0 + sigma * cv)
+
+
+# ── pricing without decomposition: hit rate as an outcome, not a control ──
+
+@dataclass(frozen=True)
+class DirectPrice:
+    """Prices read straight off measured totals, with no regression.
+
+    `effective_in` here is what we would actually charge, at the cache hit rate
+    our system actually achieved -- not re-blended to match a competitor.
+    """
+    effective_in_per_m: float
+    out_per_m: float
+    hit_rate: float
+    input_tokens: float
+    output_tokens: float
+    gpu_seconds_input: float
+    gpu_seconds_output: float
+    basis: str
+    usd_per_gpu_hour: float
+    utilization: float
+    margin: float
+
+    @property
+    def bill_per_1k_requests(self) -> float:
+        raise NotImplementedError("needs a request count; use bill_per_request")
+
+    def bill_per_request(self, in_tok: float, out_tok: float) -> float:
+        return (self.effective_in_per_m * in_tok
+                + self.out_per_m * out_tok) / 1e6
+
+
+def price_direct(gpu_seconds_input: float, gpu_seconds_output: float,
+                 input_tokens: float, output_tokens: float,
+                 cached_tokens: float,
+                 basis: str = DEFAULT_BASIS,
+                 utilization: float = DEFAULT_UTILISATION,
+                 margin: float = DEFAULT_MARGIN) -> DirectPrice:
+    """Effective input price at the hit rate the system actually achieved.
+
+    **Cache hit rate is an outcome we optimise, not a control we hold fixed.**
+    Providers on the same marketplace traffic realise anywhere from 0.0% to
+    87.4%, so it is overwhelmingly a property of the serving system -- caching
+    well *is* serving well. Re-blending our price to a competitor's hit rate
+    would normalise away exactly the thing we are trying to improve.
+
+    That also makes the decomposition unnecessary. Splitting input cost into
+    cached and uncached is required only to re-blend at somebody else's hit
+    rate; at our own,
+
+        effective input price = input GPU-seconds / input tokens x rate / util
+
+    is directly measurable. No mixes, no NNLS, no identifiability gate, and no
+    per-sequence-versus-per-context confound.
+
+    The price of that simplicity: the hit rate becomes load-bearing, so it has
+    to be earned on representative traffic rather than normalised away.
+
+    `gpu_seconds_input` / `gpu_seconds_output` come from the device timer's
+    phase split (`SGLANG_ENABLE_METRICS_DEVICE_TIMER=1`); wall-clock GPU
+    seconds are not a valid substitute below saturation, because idle time
+    would be charged to whatever tokens happened to flow.
+    """
+    if basis not in COST_BASES:
+        raise KeyError(f"unknown cost basis {basis!r}; have {sorted(COST_BASES)}")
+    if not 0 < utilization <= 1:
+        raise ValueError(f"utilisation must be in (0, 1], got {utilization}")
+    if input_tokens <= 0 or output_tokens <= 0:
+        raise ValueError("need positive token counts")
+    usd_hr, _ = COST_BASES[basis]
+    per_s = usd_hr / 3600.0
+    scale = per_s / utilization * (1.0 + margin) * 1e6
+    return DirectPrice(
+        effective_in_per_m=gpu_seconds_input / input_tokens * scale,
+        out_per_m=gpu_seconds_output / output_tokens * scale,
+        hit_rate=cached_tokens / input_tokens,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        gpu_seconds_input=gpu_seconds_input,
+        gpu_seconds_output=gpu_seconds_output,
+        basis=basis, usd_per_gpu_hour=usd_hr,
+        utilization=utilization, margin=margin)
