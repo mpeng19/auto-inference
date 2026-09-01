@@ -26,8 +26,19 @@ from matplotlib.lines import Line2D
 # 8xH100, market workload (run 1788203369): users, goodput rps, TTFT p99, TPOT p99
 SWEEP = [(8, 0.29, 684, 8.1), (16, 0.55, 649, 10.2), (32, 0.88, 778, 21.1),
          (64, 1.58, 1066, 37.8), (128, 2.20, 1061, 82.9)]
-N_GPU, OUT_TOK = 8, 2076
+N_GPU, OUT_TOK, WINDOW_S = 8, 2076, 120.0
 TTFT_MAX, TPOT_MAX = 2000.0, 50.0
+
+# A p99 needs ~100 completions to be a percentile rather than a maximum. At 8
+# users only ~35 requests finish in the window, so "p99 TTFT" there is the
+# single worst request -- an extreme order statistic. That is why the TTFT
+# series wanders (684 -> 649 -> 778) instead of rising: the low-concurrency
+# points are noise. Marked hollow on the chart rather than silently plotted.
+MIN_COMPLETIONS_FOR_P99 = 100
+
+
+def _reliable(goodput: float) -> bool:
+    return goodput * WINDOW_S >= MIN_COMPLETIONS_FOR_P99
 
 THEME = {
     "light": dict(surface="#fcfcfb", ink="#0b0b0b", ink2="#52514e", muted="#898781",
@@ -37,7 +48,7 @@ THEME = {
 }
 
 
-def _panel(ax, xs, ys, labels, bound, side, xlabel, held_i, t):
+def _panel(ax, xs, ys, labels, bound, side, xlabel, held_i, t, solid=None):
     """One trade-off panel with a constraint boundary."""
     lo, hi = min(xs), max(xs)
     span = (hi - lo) or hi * 0.2
@@ -73,8 +84,14 @@ def _panel(ax, xs, ys, labels, bound, side, xlabel, held_i, t):
     order = sorted(range(len(xs)), key=lambda i: xs[i])   # path in x order
     ax.plot([xs[i] for i in order], [ys[i] for i in order],
             color=t["series"], lw=2, zorder=3, solid_capstyle="round")
-    ax.scatter(xs, ys, s=64, color=t["series"], edgecolor=t["surface"],
-               linewidth=2, zorder=4)                      # 2px surface ring
+    # Hollow marker = too few completions for p99 to mean anything (see
+    # MIN_COMPLETIONS_FOR_P99). Shape, not colour, so it survives CVD.
+    solid = [True]*len(xs) if solid is None else solid
+    for x, y, ok in zip(xs, ys, solid):
+        ax.scatter([x], [y], s=64,
+                   color=t["series"] if ok else t["surface"],
+                   edgecolor=t["surface"] if ok else t["series"],
+                   linewidth=2, zorder=4)                  # 2px surface ring
 
     # The SLO-holding level: distinct SHAPE, not a second hue.
     ax.scatter([xs[held_i]], [ys[held_i]], s=290, facecolor="none",
@@ -113,11 +130,18 @@ def render(mode: str, out: pathlib.Path) -> pathlib.Path:
     for ax in axes:
         ax.set_facecolor(t["surface"])
 
+    solid = [_reliable(r[1]) for r in SWEEP]
+    # TPOT averages over hundreds of tokens per request, so it is stable even
+    # at 35 completions; only the TTFT percentile needs the caveat.
     _panel(axes[0], [1000 / r[3] for r in SWEEP], agg, users,
            1000 / TPOT_MAX, "left", "p99 decode rate per user  (tokens/second)",
            held, t)
     _panel(axes[1], [r[2] for r in SWEEP], agg, users,
-           TTFT_MAX, "right", "p99 time to first token  (ms)", held, t)
+           TTFT_MAX, "right", "p99 time to first token  (ms)", held, t,
+           solid=solid)
+    axes[1].annotate("hollow: <100 completions,\nso p99 is a maximum",
+                     (0.97, 0.05), xycoords="axes fraction", color=t["muted"],
+                     fontsize=8, ha="right", va="bottom")
 
     axes[0].set_ylabel("aggregate output tokens/second per GPU",
                        color=t["ink2"], fontsize=9.5, labelpad=10)
