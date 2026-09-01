@@ -402,6 +402,57 @@ Our original 2s p99 SLO is met by nobody on the board; it capped N* at 4.
 
 ---
 
+## 5a. Why the "#1 rank" is not a finding — read before quoting any price
+
+We run **stock SGLang 0.5.18 with no diffs applied**, yet the model says we
+would rank first on effective input price by ~3x. That should be treated as a
+warning, not a result.
+
+**The comparison is our COST against their PRICE.** Those are different
+quantities. Against every provider's realised effective input price, at their
+own hit rate:
+
+    provider     their eff-in   their hit   our raw cost   multiple
+    Novita            $0.1272       87.4%        $0.0126      10.1x
+    Chutes            $0.1439       65.4%        $0.0228       6.3x
+    Parasail          $0.1773       57.5%        $0.0264       6.7x
+    CoreWeave         $0.1988       80.5%        $0.0158      12.6x
+    Reka              $0.2257       41.4%        $0.0339       6.7x
+
+Everyone charges 6-13x raw GPU cost. **A provider at 30% utilisation with a 2x
+margin lands at 6.7x** — entirely ordinary. The gap is utilisation, margin and
+overhead, not serving efficiency, and we have built no serving efficiency: no
+`srt/` diff has been applied.
+
+**What our cost basis omits that a real provider pays for:**
+
+- redundancy for an uptime SLA (Chutes 99.74%, Parasail 99.97%)
+- provisioning for **peak**, not mean — daily volume swings 3.0B to 42.8B (14x)
+- failed and retried requests, cold starts, model swaps
+- gateway, load balancer, control plane, egress, weight storage
+- engineering and on-call labour, multi-region presence
+
+The peak-vs-mean point is the largest: a 14x swing means capacity sized for
+peak runs far below 60% mean utilisation, and **utilisation is already the
+assumption every price rests on** (§6.3).
+
+**Our serving may be worse than theirs, not better.** Decode runs at **47% of
+the memory-bandwidth roofline**. We have no measurement of a competitor's, but
+47% is not a figure that suggests we are ahead of specialists.
+
+### What the simulator is actually for
+
+Not absolute price prediction — that needs utilisation and overheads we cannot
+observe. Its value is **differential**: it isolates `f_weights`, the fraction
+of bandwidth the fixed per-step read achieves, which is a property of the
+serving stack alone. Utilisation, margin, GPU price and overheads all cancel
+when comparing two configurations of the same deployment.
+
+So the question the harness can answer is *"did this diff move `f_weights` from
+0.47 toward 0.70?"* — measurable to 2-3% (§3.3.3) and independent of every
+unverifiable business assumption. The question it cannot answer is *"would we
+beat Chutes?"*
+
 ## 6. Assumptions
 
 ### 6.1 Verified against external data
