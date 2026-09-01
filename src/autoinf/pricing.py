@@ -34,7 +34,15 @@ COST_BASES: dict[str, tuple[float, str]] = {
     "nebius-h200-preemptible": (2.45, "preemptible"),
     "modal-h100": (3.95, "serverless retail -- for our own spend, NOT a serving cost basis"),
 }
-DEFAULT_BASIS = "nebius-h100-committed"
+# Agreed with the project stakeholder 2026-09-01: price at $3.00/GPU-hr and
+# 50% utilisation. Both are decisions, not estimates -- $3.00 sits between
+# Nebius committed ($2.50) and list on-demand ($3.85), covering a realistic
+# on-demand/preemptible mix; 50% is close to the 48% mean/peak this model's
+# own traffic implies for a single-model deployment sized for peak.
+COST_BASES["agreed-2026-09"] = (3.00, "agreed basis: on-demand/preemptible mix")
+DEFAULT_BASIS = "agreed-2026-09"
+DEFAULT_UTILISATION = 0.50
+DEFAULT_MARGIN = 0.0                 # report break-even; margin is stated separately
 
 
 @dataclass(frozen=True)
@@ -324,13 +332,19 @@ def conditioning(obs: list[Observation]) -> dict:
 
 
 def prices(attr: Attribution, basis: str = DEFAULT_BASIS, n_gpu: int = 1,
-           utilization: float = 0.6, margin: float = 0.25) -> dict:
+           utilization: float = DEFAULT_UTILISATION,
+           margin: float = DEFAULT_MARGIN) -> dict:
     """Convert GPU-seconds per token into $/M tokens.
 
     `utilization` is the fraction of paid capacity actually serving traffic.
     Idle GPUs still bill, so cost per token scales as 1/utilisation -- at 40%
     versus 80% the price doubles for an identical stack. There is no way to
     measure it here; it is a property of the traffic a marketplace sends.
+
+    Defaults are the agreed basis: **$3.00/GPU-hr, 50% utilisation, no
+    margin**, so what comes back is a BREAK-EVEN price -- the lowest we could
+    charge without losing money. Margin is a business overlay applied
+    afterwards and stated separately, never folded into a cost figure.
     """
     if basis not in COST_BASES:
         raise KeyError(f"unknown cost basis {basis!r}; have {sorted(COST_BASES)}")
