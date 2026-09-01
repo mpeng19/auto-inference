@@ -38,7 +38,11 @@ INTERESTING = (
     # use this: a level held for 90s with an idle GPU consumes 90 wall-seconds
     # but very little compute, and charging the idle time to the few tokens
     # processed makes them look enormously expensive.
+    # Real GPU time per forward pass, labelled by phase. Requires
+    # SGLANG_ENABLE_METRICS_DEVICE_TIMER=1 in the server env (see
+    # modal_app._server_env); without it the counter is never incremented.
     "sglang:forward_execution_seconds_total",
+    "sglang:dp_cooperation_forward_execution_seconds_total",
     "sglang:estimated_flops_per_gpu_total",
     "sglang:estimated_read_bytes_per_gpu_total",
     "sglang:prompt_tokens_total",

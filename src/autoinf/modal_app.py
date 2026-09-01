@@ -68,6 +68,25 @@ image = (
 app = modal.App(APP_NAME)
 
 
+def _server_env() -> dict:
+    """Environment for the SGLang server process.
+
+    `SGLANG_ENABLE_METRICS_DEVICE_TIMER` turns on a CUDA-event timer around
+    every forward pass, which emits `sglang:forward_execution_seconds_total`
+    labelled by phase. That is **actual GPU time**, not wall clock -- the
+    numerator cost attribution really wants.
+
+    Without it that counter is declared and never incremented (envs.py defaults
+    it to False), which is why an early attempt to read it returned zeros and
+    we fell back to regressing over workload mixes. The regression exists to
+    work around a flag being off.
+    """
+    import os
+    env = dict(os.environ)
+    env["SGLANG_ENABLE_METRICS_DEVICE_TIMER"] = "1"
+    return env
+
+
 def _provenance() -> dict:
     """Everything that must be recorded for a result to be interpretable later."""
     out = {"sglang_version": SGLANG_VERSION, "cuda_tag": CUDA_TAG}
@@ -171,7 +190,8 @@ def bench(serving: dict, workloads: list[dict], slo: dict, note: str = "",
     log_path = "/tmp/sglang.log"
     t_launch = time.perf_counter()
     with open(log_path, "wb") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                env=_server_env())
         try:
             # 2400s outer bound was far too generous: a stalled load consumed
             # all of it. 900s covers the worst observed real load (505s) with
@@ -710,7 +730,8 @@ def humans(n_users: int = 40, duration_s: float = 300.0, arrival_rps: float = 2.
                             "backend": backend}}
     log_path = "/tmp/sglang-humans.log"
     with open(log_path, "wb") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                env=_server_env())
         try:
             rec["model_load_s"] = round(asyncio.run(wait_until_ready(
                 SERVER_URL, 2400, proc=proc, log_path=log_path)), 1)
@@ -939,7 +960,8 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
     log_path = "/tmp/sglang-frontier.log"
 
     with open(log_path, "wb") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                env=_server_env())
         try:
             rec["model_load_s"] = round(asyncio.run(wait_until_ready(
                 SERVER_URL, 900, proc=proc, log_path=log_path, stall_s=420)), 1)
