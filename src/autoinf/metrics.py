@@ -85,6 +85,7 @@ def _stats(xs: list[float]) -> dict:
         "n": len(xs),
         "mean": sum(xs) / len(xs),
         "p50": percentile(xs, 50),
+        "p90": percentile(xs, 90),
         "p95": percentile(xs, 95),
         "p99": percentile(xs, 99),
         "max": max(xs),

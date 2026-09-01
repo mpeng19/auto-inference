@@ -1059,10 +1059,29 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                         "goodput_rps": m["goodput_rps"],
                         "throughput_rps": m["throughput_rps"],
                         "good_frac": m["good_frac"],
+                        # Keep every percentile, not just p99. Which one the
+                        # SLO is judged at is a choice we have changed twice,
+                        # and re-running a 25-minute sweep to see a different
+                        # order statistic is pure waste.
+                        "ttft_ms": m["ttft_ms"], "tpot_ms": m["tpot_ms"],
                         "ttft_p99_ms": (m["ttft_ms"] or {}).get("p99"),
                         "tpot_p99_ms": (m["tpot_ms"] or {}).get("p99"),
                         "n_failed": m["n_failed"],
-                        "meets_slo": bool(m["good_frac"] >= 0.99 and m["n_failed"] == 0),
+                        # Every tier must hold, not just the loosest. With a
+                        # p90 tier present this is a genuinely stricter test:
+                        # a level can satisfy a 45 ms p99 while badly missing a
+                        # 25 ms p90, which is the case a single threshold hides.
+                        "meets_slo": bool(
+                            m["good_frac"] >= 0.99 and m["n_failed"] == 0
+                            and all(
+                                (m["ttft_ms"] or {}).get(f"p{q}", 0) <= tt
+                                and (m["tpot_ms"] or {}).get(f"p{q}", 0) <= tp
+                                for q, tt, tp in sl.tiers())),
+                        "slo_tiers": [
+                            {"percentile": q, "ttft_limit": tt, "tpot_limit": tp,
+                             "ttft": (m["ttft_ms"] or {}).get(f"p{q}"),
+                             "tpot": (m["tpot_ms"] or {}).get(f"p{q}")}
+                            for q, tt, tp in sl.tiers()],
                         # Token mix for cost attribution.
                         "prompt_tokens": p_tok, "cached_tokens": c_tok,
                         "uncached_tokens": max(0.0, p_tok - c_tok),

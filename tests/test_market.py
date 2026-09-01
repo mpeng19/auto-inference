@@ -217,3 +217,28 @@ def test_forward_time_is_already_gpu_seconds():
     assert "gpu_seconds_input=ext * n_gpu" not in src
     assert "gpu_seconds_output=dec * n_gpu" not in src
     assert "gpu_seconds_input=ext," in src
+
+
+def test_slo_tiers_are_stricter_than_a_single_p99():
+    """A p90 tier catches what a p99 threshold alone cannot.
+
+    Industry guidance for interactive serving sets both a p90 the typical user
+    feels and a looser p99 for the tail. A level can satisfy a 45 ms p99 while
+    badly missing a 25 ms p90 -- "usually slow, rarely terrible" -- and a
+    single threshold reports that as passing.
+    """
+    from autoinf.config import SLO
+
+    single = SLO(ttft_ms=1000, tpot_ms=45)
+    two = SLO(ttft_ms=1000, tpot_ms=45, ttft_p90_ms=400, tpot_p90_ms=25)
+    assert single.tiers() == [(99, 1000, 45)]
+    assert two.tiers() == [(90, 400, 25), (99, 1000, 45)]
+
+    # a measurement that passes p99 but fails p90
+    measured = {"ttft_ms": {"p90": 380, "p99": 900},
+                "tpot_ms": {"p90": 32, "p99": 41}}
+    ok = lambda slo: all(measured["ttft_ms"][f"p{q}"] <= tt
+                         and measured["tpot_ms"][f"p{q}"] <= tp
+                         for q, tt, tp in slo.tiers())
+    assert ok(single), "p99 alone should accept it"
+    assert not ok(two), "the p90 tier should reject it"

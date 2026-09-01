@@ -286,9 +286,35 @@ class WorkloadConfig:
 
 @dataclass(frozen=True)
 class SLO:
-    """Latency targets. Goodput counts only requests meeting *both*."""
+    """Latency targets. Goodput counts only requests meeting *both*.
+
+    `percentile` is which order statistic the frontier is judged at. It is a
+    real choice, not a detail: a p99 on a 90-second window with few completions
+    is effectively a maximum (we measured "p99" on 35 samples), whereas a p90
+    is a genuine percentile at the same sample count. Tightening the level and
+    loosening the percentile can describe the same service quality with far
+    less measurement noise.
+    """
     ttft_ms: float = 500.0
     tpot_ms: float = 40.0               # mean inter-token latency per request
+    percentile: int = 99
+
+    # A second, tighter tier. Industry guidance for interactive serving sets
+    # BOTH: a p90 the typical user feels, and a looser p99 for the tail. A
+    # single p99 threshold cannot express "usually snappy, occasionally slow",
+    # which is the actual product requirement. For a mid-size model the quoted
+    # bands are p90 TTFT 300-500 ms / p99 800-1500 ms, and p90 TPOT 15-30 ms /
+    # p99 35-50 ms -- with p99 TPOT above 60 ms said to visibly stutter.
+    ttft_p90_ms: float | None = None
+    tpot_p90_ms: float | None = None
+
+    def tiers(self) -> list[tuple[int, float, float]]:
+        """(percentile, ttft_ms, tpot_ms), tightest first."""
+        out = []
+        if self.ttft_p90_ms is not None and self.tpot_p90_ms is not None:
+            out.append((90, self.ttft_p90_ms, self.tpot_p90_ms))
+        out.append((self.percentile, self.ttft_ms, self.tpot_ms))
+        return out
 
     def digest(self) -> str:
         return _digest(asdict(self))

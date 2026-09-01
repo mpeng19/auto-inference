@@ -71,7 +71,8 @@ def cmd_frontier(a) -> int:
         for p_ in problems:
             print("  !", p_)
         return 1
-    sl = SLO(ttft_ms=a.ttft_ms, tpot_ms=a.tpot_ms)
+    sl = SLO(ttft_ms=a.ttft_ms, tpot_ms=a.tpot_ms,
+             ttft_p90_ms=a.ttft_p90 or None, tpot_p90_ms=a.tpot_p90 or None)
     levels = [int(x) for x in a.levels.split(",") if x.strip()]
     # ServingConfig.n_gpu only sets SGLang's --tp-size; it does not allocate
     # anything. The deployed frontier is declared with one L40S, so asking for
@@ -89,7 +90,9 @@ def cmd_frontier(a) -> int:
     print(f"spawned  call_id={call.object_id}")
     print(f"  model   {sc.model.split('/')[-1]} on {sc.n_gpu}x{sc.gpu}")
     print(f"  levels  {levels}  x {a.seconds:.0f}s  x {a.repeats} repeat(s)")
-    print(f"  SLOs    TTFT p99 < {a.ttft_ms:.0f}ms, TPOT p99 < {a.tpot_ms:.0f}ms")
+    print(f"  SLOs    TTFT p99 < {a.ttft_ms:.0f}ms, TPOT p99 < {a.tpot_ms:.0f}ms"
+          + (f"  |  p90 TTFT < {a.ttft_p90:.0f}ms, p90 TPOT < {a.tpot_p90:.0f}ms"
+             if a.ttft_p90 else ""))
     if a.conservativeness:
         print(f"  sched   conservativeness {a.conservativeness}")
     if a.mem_fraction:
@@ -229,7 +232,12 @@ def main() -> int:
     f.add_argument("--levels", default="1,2,4,8,16,32,64,128")
     f.add_argument("--seconds", type=float, default=90.0)
     f.add_argument("--repeats", type=int, default=1)
-    f.add_argument("--ttft-ms", dest="ttft_ms", type=float, default=1000.0)
+    f.add_argument("--ttft-ms", dest="ttft_ms", type=float, default=1000.0,
+                   help="p99 TTFT limit")
+    f.add_argument("--ttft-p90", dest="ttft_p90", type=float, default=0.0,
+                   help="p90 TTFT limit; industry guidance 300-500ms")
+    f.add_argument("--tpot-p90", dest="tpot_p90", type=float, default=0.0,
+                   help="p90 TPOT limit; industry guidance 15-30ms")
     f.add_argument("--tpot-ms", dest="tpot_ms", type=float, default=50.0)
     f.add_argument("--note", default="frontier")
     f.add_argument("--model", default="", help="override the model to serve")
