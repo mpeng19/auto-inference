@@ -165,7 +165,11 @@ class Simulator:
     schedule_conservativeness: float = 1.0
 
     # the measurement
-    levels: tuple[int, ...] = (4, 8, 12, 16, 24)
+    # Multiplicative, because the quantities being measured are: batch, cost
+    # per token and throughput all move with the ratio of one level to the
+    # next, not the difference. A linear sweep spends most of its GPU time
+    # re-measuring the same regime.
+    levels: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
     seconds_per_level: float = 120.0
     repeats: int = 1
     n_sessions: int = 300
