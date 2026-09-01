@@ -396,3 +396,48 @@ def rank_vs_market(eff: float, market: list[tuple[str, float, float, float | Non
         "best_competitor_price": round(scored[0][1], 4),
         "table": [{"provider": n, "eff_in": round(e, 4)} for n, e in scored],
     }
+
+
+# ── utilisation from burstiness, instead of an assumed constant ──────────
+
+def burst_utilisation(daily_volumes: list[float], sigma: float = 2.0) -> dict:
+    """Utilisation a single-model deployment achieves, sized for peak.
+
+    A provider serving one model must provision for its peak or shed traffic
+    at the peak, so it runs at roughly mean/peak. Measured on this model's
+    OpenRouter volume (17 days) that is **48%** -- derived from the traffic,
+    not assumed.
+
+    A multi-model fleet does better for a reason that has nothing to do with
+    how much of *this* model it serves: GPUs are fungible, so what matters is
+    fleet utilisation, and uncorrelated demands add in quadrature. With N
+    similar, weakly-correlated models the aggregate coefficient of variation
+    falls as 1/sqrt(N), so peak/mean approaches 1 and utilisation approaches
+    100%. **That, not scale in any single model, is the incumbent advantage.**
+
+        models on fleet    aggregate cv    peak/mean    utilisation
+                      1            0.51         2.03            49%
+                     10            0.16         1.33            75%
+                    100            0.05         1.10            91%
+
+    Two caveats, both making our 48% optimistic: the series is daily, so
+    intra-day bursts are invisible; and real model demands are positively
+    correlated (they share business hours), so a fleet's benefit is smaller
+    than 1/sqrt(N) suggests -- but so is ours if we ever multiplex.
+    """
+    import statistics as st
+    if len(daily_volumes) < 3:
+        return {"available": False, "reason": "need >= 3 days"}
+    mean = st.mean(daily_volumes)
+    peak = max(daily_volumes)
+    cv = st.pstdev(daily_volumes) / mean
+    return {"available": True, "mean": mean, "peak": peak,
+            "peak_over_mean": round(peak / mean, 2), "cv": round(cv, 3),
+            "single_model_utilisation": round(mean / peak, 3),
+            "sigma": sigma}
+
+
+def fleet_utilisation(cv_single: float, n_models: int, sigma: float = 2.0) -> float:
+    """Utilisation an N-model fleet holds, given one model's burstiness."""
+    cv = cv_single / (n_models ** 0.5)
+    return 1.0 / (1.0 + sigma * cv)

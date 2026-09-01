@@ -94,3 +94,31 @@ def test_traffic_is_input_dominated():
     in_rev = MARKET_INPUT_OUTPUT_RATIO * MARKET_WEIGHTED_IN
     out_rev = 1 * 2.866
     assert in_rev > out_rev, (in_rev, out_rev)
+
+
+def test_burst_utilisation_is_derived_not_assumed():
+    """Utilisation for a single-model deployment comes from the traffic.
+
+    Sizing for peak means running at mean/peak. On this model's 17-day
+    OpenRouter series that is ~48%, which replaces the 60% that earlier
+    price tables simply assumed.
+    """
+    import json
+    import pathlib
+
+    from autoinf.pricing import burst_utilisation, fleet_utilisation
+
+    f = pathlib.Path("data/market-qwen-qwen3.8-27b.json")
+    if not f.exists():
+        import pytest
+        pytest.skip("market snapshot not present")
+    v = [r["total_prompt_tokens"] for r in json.loads(f.read_text())["daily"]]
+    b = burst_utilisation(v)
+    assert b["available"]
+    assert 0.40 < b["single_model_utilisation"] < 0.60, b
+    assert b["peak_over_mean"] > 1.8
+
+    # A fleet beats it purely through uncorrelated peaks, not through serving
+    # more of this model.
+    assert fleet_utilisation(b["cv"], 1) < 0.60
+    assert fleet_utilisation(b["cv"], 100) > 0.85
