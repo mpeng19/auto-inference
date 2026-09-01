@@ -285,3 +285,18 @@ def test_discriminate_refuses_mixed_gpu_counts():
 
     with pytest.raises(ValueError, match="one GPU count"):
         discriminate(SWEEP_2026_08_31)
+
+
+def test_batch_predictor_is_documented_as_context_limited():
+    """It over-predicts ~2.4x at 6k context; the docstring must say so.
+
+    Recorded as a test because the failure is silent: the predictor returns a
+    confident integer either way, and the 1.77 factor was fitted at 22.7k.
+    """
+    from autoinf.simulator import (CALIBRATED_CONTEXT, predict_batch,
+                                   RESERVATION_FACTOR)
+
+    assert 20_000 < CALIBRATED_CONTEXT < 25_000
+    assert predict_batch("Qwen/Qwen3.8-27B-FP8", "H100", 1, 6000,
+                         mem_fraction=0.90) > 2 * 23.3
+    assert "calibrated" in predict_batch.__doc__.lower()

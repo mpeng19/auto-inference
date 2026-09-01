@@ -378,14 +378,27 @@ SWEEP_2026_08_31 = [
 # admission. Since cost falls with batch, that gap is the largest identified
 # saving in the stack -- see docs/design.md §8.2.
 
-RESERVATION_FACTOR = 1.77   # calibrated on TP 1/2/4; scheduler reserve + rounding
+# Calibrated on TP 1/2/4 at ~22.7k context ONLY. It does not transfer: at 6k
+# context the implied charge is 2.1-2.3 GB/sequence against 2.8-3.2 GB at
+# 22.7k, so a 3.8x change in context moves the charge only 1.4x. Most of the
+# per-sequence charge is therefore context-*independent* and larger than either
+# the linear state (0.155 GB) or the decode reservation (~0.26 GB) accounts
+# for. That residual is unexplained, so `predict_batch` is only trusted near
+# 20k context; outside that, measure the batch with `BatchSampler`.
+RESERVATION_FACTOR = 1.77
+CALIBRATED_CONTEXT = 22_659
 
 
 def predict_batch(model: str, gpu: str, n_gpu: int, context: int,
                   mem_fraction: float = 0.85,
                   reservation: float = RESERVATION_FACTOR,
                   max_running_requests: int = 256) -> int:
-    """Largest batch the KV pool admits, per SGLang's admission rule."""
+    """Largest batch the KV pool admits, per SGLang's admission rule.
+
+    Only calibrated near `CALIBRATED_CONTEXT`; see `RESERVATION_FACTOR`. At 6k
+    context it over-predicts ~2.4x. Measure batch rather than predicting it
+    when the context is far from that.
+    """
     m, hw = MODELS[model], HARDWARE[gpu]
     usable = hw.hbm_bytes * n_gpu * mem_fraction - m.active_params * WEIGHT_BYTES
     if usable <= 0:
