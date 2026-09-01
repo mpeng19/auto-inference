@@ -1071,6 +1071,7 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                         "collapse": detect_collapse(res),
                         "client_health": client_health(res),
                         "batch": batch,
+                        "server_counters": ctr,
                     }
                     rec["levels"].append(lvl)
                     print(f"  N={n_users:<5} rep{rep}  goodput {lvl['goodput_rps']:>7.2f}"
@@ -1189,6 +1190,11 @@ def frontier(serving: dict, levels: list[int], slo: dict, seconds_per_level: flo
                     "n_failed": m["n_failed"],
                     "client_health": client_health(res)["verdict"],
                     "batch": batch,
+                    # Keep the raw counter diff, not just the token columns.
+                    # `forward_execution_seconds_total` is the independent
+                    # check on the regression's denominator (wall clock x GPUs)
+                    # and was being discarded here.
+                    "server_counters": ctr,
                 }
                 rec.setdefault("mixes", []).append(row)
                 g = max(row["gpu_seconds"], 1e-9)

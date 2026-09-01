@@ -191,3 +191,50 @@ def mixes(name: str):
                           ("mix", "n_users", "gpu_seconds", "uncached_tokens",
                            "cached_tokens", "output_tokens", "cache_hit_rate")}
                          | {"batch_mean": b.get("mean")}))
+
+
+@app.local_entrypoint()
+def forward_time(name: str):
+    """Compare NNLS attribution against SGLang's own forward-pass GPU time.
+
+    Two independent measurements of the same quantity, sharing no machinery:
+
+      * NNLS regresses total GPU-seconds against token counts over four
+        workload mixes with deliberately different ratios. Denominator is wall
+        clock x GPU count.
+      * `sglang:forward_execution_seconds_total` is CUDA-event time around each
+        forward pass, labelled by phase. It needs no mixes and no regression.
+
+    Agreement validates both far more strongly than either alone, because a
+    shared error is implausible. Disagreement localises which assumption in the
+    regression is wrong -- most likely that wall clock equals work time even at
+    saturation.
+
+    Requires SGLANG_ENABLE_METRICS_DEVICE_TIMER=1 (see modal_app._server_env).
+    """
+    r = _get.remote(name)
+    mixes = r.get("mixes", [])
+    if not mixes:
+        print("no phase-B mixes in this run")
+        return
+
+    print(f"{'mix':<10}{'GPU-sec (wall)':>16}{'forward GPU-sec':>18}{'busy frac':>11}")
+    print("-" * 56)
+    any_fwd = False
+    for m in mixes:
+        ctr = m.get("server_counters") or {}
+        fwd = sum(v for k, v in ctr.items()
+                  if "forward_execution_seconds" in k and "dp_cooperation" not in k)
+        any_fwd = any_fwd or fwd > 0
+        g = m.get("gpu_seconds", 0.0)
+        print(f"{m['mix']:<10}{g:>16.1f}{fwd:>18.1f}"
+              f"{(fwd / g if g else 0):>11.3f}")
+
+    if not any_fwd:
+        print("\n  forward_execution_seconds_total is still zero.")
+        print("  Either the env var did not reach the server process, or the")
+        print("  counter is per-scheduler and needs --enable-metrics-for-all-schedulers.")
+        return
+    print("\n  busy frac = forward GPU-time / wall GPU-time. At saturation the")
+    print("  regression assumes this is ~1.0; anything well below it means wall")
+    print("  clock overstates work and every per-token cost is inflated by 1/frac.")
