@@ -545,6 +545,42 @@ Recorded because they were all presented as findings before being checked.
 
 ---
 
+## 6a. Direction: this becomes an API the auto-research harness calls
+
+Stated 2026-09-01. Not to be built yet — recorded so the shape is not
+foreclosed by decisions made now.
+
+The eventual consumer is the auto-research loop: an agent proposes a diff to
+SGLang's `srt/`, and wants back a price without knowing anything about mixes,
+NNLS or Modal. So the surface is roughly
+
+    evaluate(diff_or_config) -> {effective_in, out, n_star, hit_rate, ...}
+
+Pieces that already exist and should be kept API-shaped:
+
+- `ServingConfig.digest()` — a stable content hash, so identical requests can
+  be served from cache instead of re-running 20 GPU-minutes.
+- `overlays/` with staleness detection — how a diff is applied and provenance
+  recorded. A run that cannot attribute itself to a specific version of the
+  serving code is worthless to a search loop.
+- `.spawn()` + results Volume — runs already outlive the caller, which any
+  async API needs.
+- `usable()` — the gate that refuses to return a price from a bad fit. An
+  automated caller cannot sanity-check a number, so refusing must stay the
+  default rather than a warning.
+
+Two things to settle before productionising: a run takes **~20-25 min**, so the
+API is necessarily asynchronous (submit, poll, collect); and a search loop will
+want variance, not just a point estimate — the noise floor is measured on the
+dev model (goodput CV 0.0003) but not on the target.
+
+**Deliberately deferred:** `ignore_eos: true` forces exact output lengths,
+making runs deterministic and canaries bitwise-reproducible. Real generations
+stop at EOS at varying lengths, so our output-length distribution is a point
+mass where reality has a spread — which matters for the p99 tail, and the tail
+is what sets N*. Reproducibility is worth more than realism while hill-climbing;
+expose it as an argument when the research environment settles.
+
 ## 7. Commands
 
     make test                 # 118 local tests, no GPU
