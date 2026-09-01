@@ -344,13 +344,29 @@ def tiers(name: str):
                       f"   {'ok' if ok else 'FAIL by %.0f%%' % ((v/lim-1)*100)}")
 
 
-def _spec(s: str) -> tuple[str, float]:
-    """'p90:2818' -> ('p90', 2818.0). Blank or 'none' disables the bound."""
+def _spec(s: str) -> list[tuple[str, float]]:
+    """'p90:2818,mean:20' -> [('p90', 2818.0), ('mean', 20.0)].
+
+    A list because a real SLO constrains more than one order statistic of the
+    same metric -- "usually snappy, rarely terrible" needs a middle and a tail,
+    and which pair is meaningful depends on how many completions the window
+    actually produced. Blank or 'none' disables the bound entirely.
+    """
     if not s or s.lower() in ("none", "off", "-"):
-        return ("p50", float("inf"))
-    q, _, lim = s.partition(":")
-    q = q if q.startswith("p") else "p" + q
-    return (q, float(lim))
+        return []
+    out = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        q, _, lim = part.partition(":")
+        q = q.strip()
+        # `mean` and `max` are stored alongside the percentiles; everything
+        # else is a percentile, with or without the leading p.
+        if q not in ("mean", "max") and not q.startswith("p"):
+            q = "p" + q
+        out.append((q, float(lim)))
+    return out
 
 
 @app.local_entrypoint()
@@ -372,30 +388,47 @@ def rescore(name: str, ttft: str = "p90:2818", tpot: str = "p50:20"):
     """
     from autoinf.pricing import price_direct
 
-    tq, tlim = _spec(ttft)
-    pq, plim = _spec(tpot)
+    tspec, pspec = _spec(ttft), _spec(tpot)
     r = _get.remote(name)
     n_gpu = (r.get("serving") or {}).get("n_gpu", 1)
-    print(f"judging: {tq} TTFT <= {tlim:.0f} ms   and   {pq} TPOT <= {plim:.1f} ms"
+    bounds = ([f"{q} TTFT <= {v:g} ms" for q, v in tspec]
+              + [f"{q} TPOT <= {v:g} ms" for q, v in pspec])
+    print(f"judging: {'  and  '.join(bounds)}"
           f"   ({n_gpu}x{(r.get('serving') or {}).get('gpu', '?')})\n")
 
+    cols = ([f"{q} TTFT" for q, _ in tspec] + [f"{q} TPOT" for q, _ in pspec])
     print(f"{'users':>6}{'n req':>7}{'goodput':>9}{'batch':>7}"
-          f"{tq + ' TTFT':>11}{pq + ' TPOT':>11}{'hit':>7}{'':>8}")
-    print("-" * 66)
+          + "".join(f"{c:>11}" for c in cols) + f"{'hit':>7}{'':>8}")
+    print("-" * (44 + 11 * len(cols)))
     passing: list[dict] = []
     for lv in r.get("levels", []):
-        tt = (lv.get("ttft_ms") or {}).get(tq)
-        tp = (lv.get("tpot_ms") or {}).get(pq)
+        vals, ok = [], lv.get("n_failed", 0) == 0
+        for kind, spec in (("ttft_ms", tspec), ("tpot_ms", pspec)):
+            for q, lim in spec:
+                v = (lv.get(kind) or {}).get(q)
+                vals.append(v)
+                ok = ok and v is not None and v <= lim
         nreq = (lv.get("ttft_ms") or {}).get("n", 0)
         b = (lv.get("batch") or {}).get("running") or {}
-        ok = (tt is not None and tp is not None and tt <= tlim and tp <= plim
-              and lv.get("n_failed", 0) == 0)
         if ok:
             passing.append(lv)
         print(f"{lv['n_users']:>6}{nreq:>7}{lv['goodput_rps']:>9.2f}"
-              f"{(b.get('mean') or 0):>7.1f}{(tt or 0):>11.0f}{(tp or 0):>11.1f}"
-              f"{(lv.get('cache_hit_rate') or 0):>7.2f}"
-              f"{'  OK' if ok else '  MISS':>8}")
+              f"{(b.get('mean') or 0):>7.1f}"
+              + "".join(f"{(v or 0):>11.1f}" for v in vals)
+              + f"{(lv.get('cache_hit_rate') or 0):>7.2f}"
+              + f"{'  OK' if ok else '  MISS':>8}")
+    # A "p99" is only a tail if there are enough completions to have one. At 45
+    # requests it is the single worst, which is a maximum wearing a percentile's
+    # name -- and a frontier decided by one request is not a frontier.
+    for lv in r.get("levels", []):
+        n = (lv.get("ttft_ms") or {}).get("n", 0)
+        for q, _ in tspec + pspec:
+            if q.startswith("p") and q != "pmean":
+                need = 1 / (1 - int(q[1:]) / 100)
+                if n and n < 3 * need:
+                    print(f"  ! N={lv['n_users']}: {q} on {n} requests"
+                          f" -- needs ~{3*need:.0f} to be a percentile, not a max")
+                break
 
     if not passing:
         print("\nno level met this SLO")

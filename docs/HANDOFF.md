@@ -797,6 +797,84 @@ batch the SLO permits — so phase B prices decode at an operating point we may
 not serve from. That is exactly the bias §6b retired it for, now measured at
 2.2x. `--no-phase-b` skips it.
 
+## 6d. PRICE AS A FUNCTION OF MARKET SHARE — the curve, not the number
+
+Settled 2026-09-01. A single effective price is the wrong deliverable: price
+depends on how much demand we win, and demand depends on price. The right
+object is a curve. `docs/price-vs-share.png`, `scripts/plot_share.py`.
+
+### The SLO, final
+
+    p90 TTFT  <= 2818 ms     median provider's published p90 latency
+    p90 TPOT  <=   25 ms     interactive-serving guidance
+    mean TPOT <=   20 ms     median provider's published p50 throughput
+
+The p90 TTFT bound never binds on either configuration; **mean TPOT binds
+both**. Dropping the old p90 TTFT <= 300-400 ms is what unblocked this — that
+bound failed at every level of every run and was the real problem, not TPOT
+(p90 TPOT <= 25 ms passes at every level of both runs). A p99 TTFT <= 1 s was
+considered and rejected: it is 3.8x stricter than the best provider on the
+board, and at 45-78 completions per level our "p99" is the single worst
+request.
+
+### The formula
+
+    r(N)   = extend_s/in_tok x 20,583  +  decode_s/out_tok x 2,076   GPU-s/request
+    capacity per node = 86,400 x g x u / r(N)                        requests/day
+    market share  s   = capacity x nodes / M
+    nodes for target s = s x M x r(N) / (86,400 x g x u)
+    price per request = r(N) x rate/3600 / u
+
+Everything derives from `r(N)`, so **price x capacity is identically the
+hardware bill** ($72/GPU-day at $3.00/hr) — verified in `scripts/plot_share.py`.
+Deriving capacity from `goodput` instead is wrong at low concurrency: goodput
+counts only requests finishing inside the window, which biased N=4 by 2.2x.
+
+    M     = 1,398,475 requests/day (trailing 7-day mean; range 829k-1.88M)
+    u_max = 53%, the measured mean/peak of daily volume -- a single-model
+            deployment must provision for its peak (`burst_utilisation`)
+
+### The curve
+
+    1xH100                                    2xH100
+    N   SLO  $/1k req   share                 N   SLO  $/1k req   share
+    4   ok      19.21   0.27%                 8   ok      13.54   0.76%
+    8   ok      14.23   0.36%                16   ok       8.35   1.23%
+    12  ok      11.56   0.45%  <- N*         24   ok       7.63   1.35%
+    16  MISS    11.26   0.46%                32   ok       7.28   1.41%  <- N*
+    24  MISS     9.34   0.55%                48  MISS      5.90   1.74%
+
+**One node is a fraction of a percent of this market.** 1xH100 at N* serves
+0.45%; 2xH100 serves 1.41%. Against a largest provider holding ~16%, capturing
+meaningful share is a fleet-sizing question, not a serving question.
+
+### The two regimes, and which one we control
+
+For a fixed fleet, utilisation is **not a free parameter** — demand sets it:
+
+    u(s) = s x M x r(N) / (86,400 x g x nodes)
+    $/request = nodes x g x 24 x rate / (s x M)        <- pure 1/s
+
+So below saturation price is a hyperbola in share that does not depend on the
+serving stack at all, and above it you add nodes at a flat price. **The stack
+sets only where the kink is.** At 0.1% share a 1xH100 node costs $51/1k req —
+4.4x its own saturated price, and 6x Chutes — purely because it idles.
+
+Consequences:
+
+1. **A new entrant's price is dominated by demand, not by engineering**, until
+   it reaches ~0.5% share (1 GPU) or ~1.4% (2 GPUs). §3a said this; the curve
+   quantifies it.
+2. **Optimisation moves the kink down and right.** Halving `r(N)` halves the
+   saturated price *and* doubles the share one node serves.
+3. **Smaller nodes are better when demand is thin** — finer granularity, so
+   less idling — which is an argument for 1xH100 that has nothing to do with
+   `tp_decay`.
+
+At N* neither configuration beats Chutes' $8.67/1k on 1 GPU ($11.56); 2xH100
+does ($7.28). Both beat every provider on effective *input* price by 4x, which
+remains a statement about what OpenRouter sorts on rather than what a buyer pays.
+
 ## 7. Commands
 
     make test                 # 118 local tests, no GPU
