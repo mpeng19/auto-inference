@@ -247,6 +247,54 @@ this for free. Prefer reading the source to buying a data point.
 result would answer the question. A run that cannot resolve its effect costs
 its full price and returns nothing.
 
+### 3.3.3 Attempt 3: affine step time — ACCEPTED, 2-3% error
+
+The fixed-GPU batch sweep (1xH100, mem-fraction 0.45/0.65/0.90, batches
+3.06/12.70/23.30 — a **7.6x range with the n_gpu confound finally broken**)
+settled it. Neither earlier model was right; the truth is between them:
+
+    step(B) = 14.59ms + 0.1505ms * B        residuals < 0.3ms
+
+Term by term against roofline at 1xH100, 6k context:
+
+    fixed term  14.59ms   vs weights/BW  6.89ms   ->  47% of bandwidth
+    slope      0.1505ms   vs per-seq/BW  0.164ms  -> ~100% of bandwidth
+
+**The per-sequence KV read is at the bandwidth bound. Only the fixed per-step
+cost is off, by 2.1x.** That is why the earlier tests disagreed: at small batch
+the fixed term dominates and the system looks constant-step; at large batch the
+KV term dominates and it looks roofline. The three-point discriminator returned
+a dead tie (log-margin 0.007) for exactly this reason.
+
+The model, with `f_kv` pinned at the roofline it was measured at, leaving one
+free parameter for the fixed term plus one for TP scaling:
+
+    step = [W/(BW*f_w) + per_seq(ctx)*batch/(BW*f_kv)] / (n_gpu * n_gpu**-tp_decay)
+    f_w = 0.475    f_kv = 1.00    tp_decay = 0.29
+
+Leave-one-out over all 7 measured configurations:
+
+    fixed GPU count (batch + context physics)   mean  2%   worst  4%
+    across TP 1/2/4                             mean  3%   worst  7%
+    across TP 1/2/4/8 (incl. anomaly)           mean 12%   worst 33%
+
+    for comparison, on the same 7 points:
+      constant-step  mean 15%      roofline  mean 16%      null  mean 31%
+
+**At fixed GPU count the model is essentially exact across a 7.6x batch range
+and a 3.8x context range, with one free parameter.** The batch-and-context
+physics is solved.
+
+**TP=8 is flagged, not fitted.** It requires g=0.36 where the TP 1/2/4 trend
+gives 0.55 — a 35% shortfall *on top of* its batch under-fill (§8.2). So TP=8
+has two distinct problems, and smoothing them into a scaling law would hide
+both. `test_tp8_is_flagged_not_fitted` fails if the gap ever closes, which is
+the intended win.
+
+**The 2.1x gap on the fixed term is now the whole optimisation target.** It is
+the weight read plus per-step overhead, it dominates at the batch sizes we
+actually run, and unlike the KV term there is headroom in it.
+
 ### 3.4 How the inputs to the fit are measured
 
 The per-token costs come from **rate-form NNLS regression** over saturated
