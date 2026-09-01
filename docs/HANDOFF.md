@@ -704,6 +704,99 @@ Kept as a cross-check, not a dependency: on run `1788247497` the two methods
 agreed to 3% on uncached input and 0% on output, and `busy_frac` came back
 0.98-1.00, confirming wall-clock was a valid denominator at saturation.
 
+## 6c. THE 1xH100 BASELINE — run `1788287578`, 2026-09-01
+
+The first number produced entirely by the settled method: real traffic, market
+SLOs, phase-split device timer, priced at N*, on the standard environment.
+
+    model    Qwen/Qwen3.8-27B-FP8    hardware  1 x H100 @ $3.00/GPU-hr
+    traffic  20,583 in / 2,076 out   basis     50% utilisation, break-even
+    SLO      p90 TTFT <= 2818 ms     and       p50 TPOT <= 20 ms
+
+    users  n req  goodput  batch  p90 TTFT  p50 TPOT   hit
+        4     12     0.04    2.4       495      14.3  0.68   OK
+        8     37     0.11    3.6       523      16.7  0.79   OK
+       12     45     0.13    5.0       571      19.5  0.75   OK   <- N*
+       16     59     0.17    5.8       562      21.6  0.68   MISS
+       24     78     0.20    8.4      1158      26.4  0.57   MISS
+
+**TPOT binds, TTFT is nowhere near binding** — p90 TTFT peaks at 1158 ms
+against a 2818 ms limit while p50 TPOT crosses 20 ms between 12 and 16 users.
+
+At N* = 12, from `forward_execution_seconds_total` split by category:
+
+    extend   12.1 GPU-s over   683,084 input tokens ->  17.7 us/token
+    decode  367.2 GPU-s over   109,244 output tokens ->  3.36 ms/token
+    cache hit 0.748                                     ratio 190x
+
+    effective input   $0.0294/M          output   $5.60/M
+
+### Rank depends entirely on which number you score
+
+    effective input price (OpenRouter's own sort)     rank  1 of 12
+      us $0.0294  vs Novita $0.1272, Chutes $0.1439
+
+    whole bill at 20,583 in / 2,076 out               rank  9 of 12
+      us $12.24/1k req  vs Chutes $8.67, Novita $8.85
+
+**Input is 5.0% of our bill.** We are 4.3x below the cheapest provider on the
+metric the leaderboard sorts by, and 41% above the cheapest on what a buyer
+actually pays. §3c predicted this — output is 70-81% of the bill on real
+traffic — but it is now measured on the standard environment rather than
+inferred. Any claim of "top 5" has to say which of the two it means.
+
+For scale, rescoring the 2xH100 run `1788276846` at the same SLO gives $6.25/1k
+req, which would rank **1st on the whole bill**. 1xH100 remains the baseline for
+the reason in §6b (`tp_decay` drops out), but it is not the deployment.
+
+### Why: the KV read runs at ~1/4 of memory bandwidth
+
+Two independent routes to the step model, and they agree:
+
+    client TPOT vs sampled batch      step = 9.45 ms + 2.034 ms x B   r2 0.998
+    client TPOT vs device-timer batch step = 10.44 ms + 1.585 ms x B  r2 0.995
+
+(the second infers batch as `output_tokens / decode_GPU_s x TPOT`, using no
+sampler at all). Against roofline at 20,583 context — weights 23.1 GB, per-seq
+state 1.504 GB, HBM 3.35 TB/s:
+
+    roofline    step = 6.89 ms + 0.449 ms x B
+    -> fixed term at 0.66-0.73 of bandwidth
+    -> per-seq KV term at **0.22-0.28** of bandwidth
+
+**The slope is what a TPOT SLO converts into money.** A 20 ms budget minus a
+~10 ms fixed cost leaves ~10 ms for the batch term, so batch = 10/slope:
+
+    f_kv    slope    batch @ 20 ms    output $/M
+    0.22   2.04 ms            5.2          6.45
+    0.40   1.12 ms            9.4          3.55
+    0.60   0.75 ms           14.1          2.36
+    1.00   0.45 ms           23.5          1.42
+
+Reaching 0.60 would put the whole bill at ~$7.2/1k req — first on the board.
+**This is the first optimisation target with a quantified payoff.**
+
+Note this contradicts the calibration in `simulator.py`, which found the KV term
+**at roofline** (`f_kv = 1.00`) on a 1xH100 batch sweep at **6k context**. Same
+model, same GPU, 3.4x the context, and the term falls 4.5x. Either bytes_per_seq
+under-counts at long context or effective bandwidth on the KV read degrades with
+it (paging/fragmentation are the obvious suspects). **Unresolved, and it is the
+single most useful thing to resolve**, because the whole table above rests on
+the roofline denominator being right.
+
+### Phase B, one last time
+
+The NNLS cross-check was **rejected** (r2 0.894 < 0.90) — `usable()` doing its
+job. Where it can be compared it splits the difference the way §6b predicts:
+
+    uncached input   direct 7.03e-05  vs NNLS 6.27e-05   1.12x  agree
+    output           direct 3.36e-03  vs NNLS 1.52e-03   2.21x  disagree
+
+The mixes ran at N=32 where the decode mix reached batch 15.4 — three times the
+batch the SLO permits — so phase B prices decode at an operating point we may
+not serve from. That is exactly the bias §6b retired it for, now measured at
+2.2x. `--no-phase-b` skips it.
+
 ## 7. Commands
 
     make test                 # 118 local tests, no GPU
