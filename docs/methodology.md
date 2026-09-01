@@ -483,6 +483,52 @@ So the question the harness can answer is *"did this diff move `f_weights` from
 unverifiable business assumption. The question it cannot answer is *"would we
 beat Chutes?"*
 
+## 5b. Utilisation, bounded — and the worry was backwards
+
+Utilisation cannot be *fitted* from price. A power law of share against price
+over 20 provider-snapshots gives **R^2 = -0.36** — worse than predicting the
+mean, so price does not determine share well enough to build on.
+
+But it can be **bounded**, which needs no model. Every provider holding >1%
+share, across both snapshots, sits between **1.7% and 20.6%** (median 12.2%).
+Against 17.9B input tokens/day and our measured capacities:
+
+    share    tokens/day    1 GPU    2 GPU    4 GPU    8 GPU
+     5.0%         0.90B     100%      89%      55%      32%
+     7.5%         1.34B     100%     100%      82%      48%
+    10.0%         1.79B     100%     100%     100%      64%
+    20.6%         3.69B     100%     100%     100%     100%
+
+**Even the smallest share any real provider holds saturates a 1-2 GPU node.**
+So §3a's demand-limitation conclusion was an artefact of sizing at 8xH100. At
+the node size the cost model prefers we are **capacity-limited**, and the
+question becomes how large a node we can fill, not whether we can fill one.
+
+What this still cannot say is *where* in the 1.7-20.6% range a new entrant
+lands — that is the part price does not predict.
+
+## 5c. Margin should not be inside the cost model
+
+Margin was carried as 25% throughout. It is dead weight for the engineering
+question and actively misleading in comparisons:
+
+- **It cancels** in every internal comparison (TP=2 vs TP=8, before-diff vs
+  after-diff), so it can only distort, never inform.
+- **It is a free parameter that moves conclusions.** 1.25x vs 2.0x flipped
+  "we rank #1" into "we lose to Chutes" with no change to any measurement.
+- **It is not ours to choose** when comparing against a competitor whose own
+  margin is unobservable.
+
+**Report break-even instead** (margin = 1.0): the lowest price that does not
+lose money. The comparison then becomes "is our break-even below their price?",
+which needs no guess about anyone's profit target:
+
+    our break-even eff-in, 2xH100 @ 100% util, hit 65.4%:   $0.0228/M
+    Chutes' published effective input price:                $0.1439/M
+
+Margin belongs at the end as an explicitly stated business overlay, never
+buried inside a cost figure.
+
 ## 6. Assumptions
 
 ### 6.1 Verified against external data
