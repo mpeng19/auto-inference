@@ -435,5 +435,12 @@ def effect_size(model: str, context: int, batch_lo: float, batch_hi: float,
     return {"model": model, "cost_ratio": round(ratio, 3),
             "batch_ratio": round(batch_hi / batch_lo, 2),
             "weight_frac_at_lo_batch": round((W / batch_lo) / hi, 3),
-            "resolvable": bool(ratio - 1.0 > 2 * FIT_NOISE),
+            # Require the effect to be 4x the per-point noise. At 2x, the
+            # rejected dev-model sweep (1.21x over 2.2x batch) would have
+            # passed: 21% effect against +-8% on each endpoint is a
+            # signal-to-noise of ~1.9, which is not enough to *fit a
+            # functional form*, only to notice a difference. We are measuring
+            # an exponent, not testing for a difference.
+            "resolvable": bool(ratio - 1.0 > 4 * FIT_NOISE),
+            "snr": round((ratio - 1.0) / (FIT_NOISE * 2 ** 0.5), 2),
             "noise_floor": FIT_NOISE}
