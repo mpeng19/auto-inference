@@ -3,7 +3,9 @@ import pathlib
 
 import pytest
 
-DATA = pathlib.Path(__file__).parent / "data"
+# Anchored to this file, so `pytest` works from the repo root, from `src/`,
+# from a service directory, or against a single test path.
+DATA = pathlib.Path(__file__).parent / "tests" / "data"
 
 
 @pytest.fixture

@@ -36,16 +36,20 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/simulator"]
-# The market snapshot is package data, not repo data -- see price.market.
-artifacts = ["src/simulator/data/*.json"]
+# The market snapshot is package data, not repo data (see price.market), and the
+# tests ship with it so an installed copy can be verified: `pytest --pyargs simulator`.
+artifacts = ["src/simulator/data/*.json", "src/simulator/tests/data/*.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# Tests live beside the code they test. Every test directory is a package
+# (`__init__.py`), so pytest imports them through `simulator.*` rather than by
+# path -- which is what makes `pytest <any path>` work from any directory.
+testpaths = ["src/simulator"]
 
 [tool.ruff]
 src = ["src"]
-include = ["src/**/*.py", "tests/**/*.py", "ops/**/*.py"]
+include = ["src/**/*.py", "monitor/**/*.py"]
 line-length = 90
 target-version = "py312"
 
@@ -59,4 +63,5 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # Tests say what they mean; a lambda or a magic number in an assertion is fine.
-"tests/**" = ["E731", "B011"]
+"**/tests/**" = ["E731", "B011"]
+"**/conftest.py" = ["E731", "B011"]

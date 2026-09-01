@@ -16,8 +16,12 @@ import pytest
 
 import simulator
 
+# Product modules only: a test module importing itself proves nothing, and the
+# point here is that every shipped module is importable on its own.
 MODULES = sorted(
     m.name for m in pkgutil.walk_packages(simulator.__path__, "simulator.")
+    if ".tests" not in m.name and not m.name.rsplit(".", 1)[-1].startswith("test_")
+    and not m.name.endswith(".conftest")
 )
 
 

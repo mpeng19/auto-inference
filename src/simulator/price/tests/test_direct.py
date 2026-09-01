@@ -120,8 +120,10 @@ def test_a_named_provider_changes_the_whole_bill(tmp_path):
 
     d = tmp_path / "r"
     d.mkdir()
-    rec = json.loads((pathlib.Path(__file__).resolve().parents[1]
-                      / "data" / "sweep-1xh100.json").read_text())
+    import simulator
+
+    rec = json.loads((pathlib.Path(simulator.__file__).parent / "tests" / "data"
+                      / "sweep-1xh100.json").read_text())
     lv = (4, 8, 12, 16, 24)
     default = Simulator(root_dir=d, n_gpu=1, levels=lv).analyse(rec)
     nebius = Simulator(root_dir=d, n_gpu=1, levels=lv,

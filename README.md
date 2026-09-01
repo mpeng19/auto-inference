@@ -83,12 +83,15 @@ src/simulator/          the product
   api.py                Simulator, EvalResult  <- start here
   stack.py              InferenceStack: diffs to sglang, carried by value
   slo.py                bounds that name their own order statistic
+  costs.py              $/GPU-hour by provider
   config.py specs.py    serving config and model/hardware specs
   workload/             request loading and sanitisation (TraceLab -> market mix)
   measure/              load generation, latency, server counters, canaries
   price/                GPU-seconds -> price -> market share
   runner/               where a sweep executes (Modal, one entrypoint)
   artifacts/            report and figures written into root_dir
+  conftest.py           shared fixtures for every test below
+  */tests/              tests live beside the service they test
 monitor/                Modal spend monitoring
 docs/methodology.md     how the method was arrived at, and every negative result
 docs/example.ipynb      minimal end-to-end notebook
@@ -100,6 +103,12 @@ docs/examples/          what a finished run leaves behind
 ```
 make test                          # 112 unit tests, no GPU, no network
 make lint                          # ruff
+
+# tests sit beside the code, and every test directory is a package, so any
+# of these resolve from any working directory:
+pytest src/simulator/price                 # one service
+pytest src/simulator/tests/test_slo.py     # one file
+pytest --pyargs simulator                  # an installed copy, no repo needed
 make deploy                        # push the runner
 make run     ROOT=runs/baseline    # full evaluation
 make submit  ROOT=runs/baseline    # start it and walk away

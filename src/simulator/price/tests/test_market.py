@@ -146,9 +146,14 @@ def test_pricing_defaults_are_the_agreed_basis():
     # No module outside `price.direct` may restate the basis. The original bug
     # was `launch.py` and `modal_app.price` hardcoding $2.50/60%/25%, so moving
     # DEFAULT_BASIS to the agreed $3.00/50%/break-even changed nothing that ran.
-    root = pathlib.Path(__file__).resolve().parents[1] / "src" / "simulator"
+    import simulator
+
+    root = pathlib.Path(simulator.__file__).parent
     for f in sorted(root.rglob("*.py")):
-        if f.name in ("direct.py", "costs.py"):
+        # `costs.py` owns the rates and `direct.py` owns the default; tests are
+        # allowed to name a literal because asserting on one is the point.
+        if f.name in ("direct.py", "costs.py") or "tests" in f.parts \
+                or f.name.startswith("test_"):
             continue
         src = f.read_text()
         for banned in ('basis="nebius', "utilization=0.6", "margin=0.25",
