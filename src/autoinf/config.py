@@ -43,8 +43,15 @@ class ServingConfig:
     #   Qwen/Qwen3-8B-FP8                  L40S   $1.95/hr    41k ctx
     #   Qwen/Qwen3-30B-A3B-Instruct-2507-FP8  H100  $3.95/hr  MoE, decode-bound
     #   Qwen/Qwen3-235B-A22B-Instruct-2507-FP8  8xH100  $31.60/hr
-    model: str = "Qwen/Qwen3-4B-Instruct-2507-FP8"
-    gpu: str = "L40S"
+    # Standard experiment environment, agreed 2026-09-01: ONE H100 at an
+    # assumed $3.00/GPU-hr. Chosen over the cheaper A100 80GB because Ampere
+    # (SM80) has no FP8 tensor cores and this checkpoint is block-quantised
+    # FP8 -- it would dequantise to bf16, measuring a different machine.
+    # Chosen over L40S because decode is bandwidth-bound: L40S is half the
+    # hourly price and ~1.9x the cost per token, and holds only ~12
+    # conversations of KV against the H100's ~30.
+    model: str = "Qwen/Qwen3.8-27B-FP8"
+    gpu: str = "H100"
     n_gpu: int = 1
 
     # ── parallelism ──────────────────────────────────────────────

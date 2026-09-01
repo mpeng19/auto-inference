@@ -243,3 +243,26 @@ def test_slo_tiers_are_stricter_than_a_single_p99():
                          for q, tt, tp in slo.tiers())
     assert ok(single), "p99 alone should accept it"
     assert not ok(two), "the p90 tier should reject it"
+
+
+def test_default_environment_is_one_h100_on_the_target_model():
+    """The agreed experiment environment, pinned so it cannot drift.
+
+    A100 80GB is cheaper per hour but has no FP8 (SM80), and L40S is cheaper
+    still while costing ~1.9x per token, because decode is bandwidth-bound.
+    """
+    from autoinf.config import ServingConfig
+    from autoinf.flops import HARDWARE
+    from autoinf.pricing import COST_BASES, DEFAULT_BASIS, DEFAULT_UTILISATION
+
+    sc = ServingConfig()
+    assert sc.model == "Qwen/Qwen3.8-27B-FP8"
+    assert (sc.gpu, sc.n_gpu) == ("H100", 1)
+    assert not sc.validate(), sc.validate()      # tp=1 needs no --ep
+    assert COST_BASES[DEFAULT_BASIS][0] == 3.00
+    assert DEFAULT_UTILISATION == 0.50
+    # the model's FP8 weights must fit with room for a usable KV pool
+    from autoinf.flops import MODELS
+    m = MODELS[sc.model]
+    kv = HARDWARE["H100"].hbm_bytes * 0.85 - m.active_params
+    assert kv / m.bytes_per_seq(20_583) > 20, "too few conversations fit"
