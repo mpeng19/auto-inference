@@ -529,6 +529,48 @@ which needs no guess about anyone's profit target:
 Margin belongs at the end as an explicitly stated business overlay, never
 buried inside a cost figure.
 
+## 5d. RETRACTED: "our decode may be ahead of most providers"
+
+Claimed on 2026-09-01 from an inference that solved each provider's implied
+`f_weights` out of their published token-share and per-stream throughput. The
+claim does not hold. Four things the inference did not model, any one of which
+flips it:
+
+1. **Speculative decoding.** Emits several tokens per forward pass, so
+   published TPS can exceed the one-token-per-step bound the whole step model
+   assumes. Widely used; we do not use it.
+2. **Multiple nodes per provider.** The solve assumed one deployment each. If
+   Novita runs 10 nodes the per-node batch is 9.85, not 98.5, and every
+   inferred quantity changes.
+3. **Quantisation.** They may serve Q4/AWQ at roughly half our FP8 bytes.
+4. **`tp_decay = 0.29`** is fitted on our stack and was applied to theirs.
+
+It was a bound, and it was read as a measurement.
+
+**What survives, and it is the useful part.** Our `f_weights = 0.47` is
+measured on our own stack at 2-3% fidelity and needs no comparison to stand.
+In absolute terms it is poor:
+
+    1xH100, FP8, batch=1     roofline   6.89 ms/token = 145 TPS
+                             ours      14.66 ms/token =  68 TPS
+    RTX 3090 at Q4           roofline  14.42 ms/token =  69 TPS
+
+**Our H100 single-stream speed is about an RTX 3090's theoretical ceiling**,
+on a card with 3.6x the bandwidth. A tuned decode path should reach 60-80% of
+roofline. We run stock SGLang with no diffs, so this is what one should expect
+-- and it is the headroom the whole optimisation programme targets.
+
+**Reading published TPS figures.** They are not comparable without knowing the
+operating point: 381 TPS reported on a 3090 is *prefill*, not decode; 133 TPS
+is ~2x that card's Q4 decode roofline and therefore implies speculative
+decoding; and provider TPS spanning 27-83 mostly reflects **batch size**, not
+efficiency, since batch 1 gives the best latency and the worst cost per token.
+
+**What would settle it:** call a provider's API with a short prompt and measure
+single-stream TPS directly. At batch ~1 the KV term vanishes and TPS reads
+`f_weights x bandwidth` almost directly, with none of the four assumptions
+above. Alibaba's own Qwen API is the natural reference. ~$1.
+
 ## 6. Assumptions
 
 ### 6.1 Verified against external data
