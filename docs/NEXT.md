@@ -28,10 +28,16 @@ baseline accuracy. Both come from one stock run. Do this first and alone, so a
 failure is attributable.
 
 ```bash
-mkdir -p runs/baseline-2026-09-02
-uv run simulate run --root runs/baseline-2026-09-02 \
-  --levels 4,8,12,16,24 --seconds 120 --n-gpu 1
+mkdir -p runs/baseline runs/baseline-screen
+uv run simulate run --root runs/baseline --levels 4,8,12,16,24 --seconds 120 --n-gpu 1
+# stock at the fleet's *screen* tier, on the same grid a screen uses
+uv run simulate run --root runs/baseline-screen --levels 8,12 --seconds 60 --n-gpu 1
 ```
+
+Two runs, because a screen is not a small full sweep: its price carries
+warm-up that 120 s levels amortise, and stock priced ~15% higher at screen
+tier on 2026-09-02. A screen is compared with stock measured the same way or
+it can never be promoted.
 
 Check, in order:
 
@@ -48,7 +54,9 @@ Check, in order:
    factor of two of $0.029/M and $5.60/M. Wildly different means something
    structural changed, not that we got faster.
 
-Record the two numbers. They are the fleet's `--baseline`; the quality map is what makes the gate fire at all.
+Record the three numbers. They are the fleet's `--baseline`, and `harness start`
+refuses to run without all of them: each missing one is a way the fleet runs
+all night and learns nothing.
 
 ## Step 2 — three agents, overnight (~8h, cap $60)
 
@@ -61,7 +69,7 @@ uv run harness --session night-1 start \
   --agents 3 --evals 2 --model sonnet \
   --budget 60 --agent-budget 20 --max-attempts 3 \
   --root agents/night-1 \
-  --baseline '{"bill_per_1k": <from step 1>, "quality": {"gsm8k": <from step 1>}}' \
+  --baseline '{"bill_per_1k": <full>, "quality": {"gsm8k": <acc>}, "screen": {"bill_per_1k": <screen>}}' \
   --seed "raise the decode batch the SLO permits" \
   --seed "reduce per-sequence KV bytes read per decode step" \
   --seed "improve prefix cache hit rate under load"
