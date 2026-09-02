@@ -70,8 +70,11 @@ class Workspace:
     def runs(self) -> pathlib.Path:
         return self.root / "runs"
 
-    def run_dir(self, attempt: int = 0) -> pathlib.Path:
-        d = self.runs / f"attempt-{attempt:03d}"
+    def run_dir(self, attempt: int = 0, suffix: str = "") -> pathlib.Path:
+        """Where one evaluation writes. Created here, because the simulator
+        refuses to invent its own output directory; `suffix` names a second
+        measurement of the same attempt (`-rep1`)."""
+        d = self.runs / f"attempt-{attempt:03d}{suffix}"
         d.mkdir(parents=True, exist_ok=True)
         return d
 

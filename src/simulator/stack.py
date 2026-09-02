@@ -134,18 +134,31 @@ class InferenceStack:
                    upstream_sha=d.get("upstream_sha", {}), label=d.get("label", ""))
 
     # ── application, inside the container ───────────────────────────────
-    def apply(self, allow_stale: bool = False) -> dict:
+    def apply(self, allow_stale: bool = False, root: pathlib.Path | None = None) -> dict:
         """Write the stack over the installed sglang package.
 
         Returns provenance for the run record: a result that cannot be
         attributed to a specific version of the serving code is worthless to a
         search loop.
+
+        **Starts from stock, every time.** The container that runs this is
+        reused between calls, so whatever the previous stack wrote is still
+        on disk. Until 2026-09-02 nothing put it back: each evaluation ran on
+        top of the last one's diff, a stock run in a warm container was not
+        stock, and a stack touching a file the previous one touched was
+        refused as stale. `restored` in the provenance says what was undone.
         """
-        import sglang
-        root = sglang_root()
-        prov: dict = {"sglang_version": getattr(sglang, "__version__", "unknown"),
+        if root is None:
+            root = sglang_root()
+        try:
+            import sglang
+            version = getattr(sglang, "__version__", "unknown")
+        except ImportError:
+            version = "unknown"
+        prov: dict = {"sglang_version": version,
                       "digest": self.digest, "label": self.label,
-                      "stock": self.is_stock, "applied": [], "stale": []}
+                      "stock": self.is_stock, "applied": [], "stale": [],
+                      "restored": restore_stock(root)}
         if self.is_stock:
             return prov
 
@@ -179,6 +192,17 @@ class InferenceStack:
             _git_apply(root, rel, patch)
             prov["applied"].append(rel + " (patch)")
         return prov
+
+
+def restore_stock(root: pathlib.Path) -> list[str]:
+    """Put back every file `_backup` saved. Returns what was restored."""
+    out = []
+    for b in sorted(root.rglob("*.stock")):
+        dst = b.with_name(b.name[: -len(".stock")])
+        if not dst.exists() or dst.read_bytes() != b.read_bytes():
+            shutil.copy2(b, dst)
+            out.append(str(dst.relative_to(root)))
+    return out
 
 
 def _backup(dst: pathlib.Path) -> None:

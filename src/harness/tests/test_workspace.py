@@ -94,6 +94,14 @@ def test_stack_carries_upstream_hashes(ws):
     assert st.upstream_sha[P] == ws.source.sha(P)
 
 
+def test_run_dirs_exist_before_the_simulator_needs_them(ws):
+    """The replicate of a win failed all night as 'infra' because its run
+    directory was a string with a suffix, never a directory."""
+    assert ws.run_dir(1).is_dir()
+    rep = ws.run_dir(1, "-rep1")
+    assert rep.is_dir() and rep.name == "attempt-001-rep1"
+
+
 def test_stack_refuses_to_build_from_a_broken_workspace(ws):
     ws.edit(P, "def broken(:\n")
     with pytest.raises(ValueError, match="not a valid stack"):

@@ -246,7 +246,7 @@ class IterativeAgent:
         req = EvalRequest(stack=stack, agent_id=self.agent_id, idea_id=idea.id,
                           attempt=n, tier=tier, priority=self.priority,
                           replicate=replicate,
-                          run_dir=str(self.workspace.run_dir(n)) + rep,
+                          run_dir=str(self.workspace.run_dir(n, rep)),
                           label=f"{idea.title} #{n} ({tier}{rep})")
         ticket = self.evals.submit(req)         # returns immediately, always
         self._report(status="queued", eval_ticket=ticket.id, attempt=n,
