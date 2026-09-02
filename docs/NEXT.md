@@ -108,6 +108,25 @@ What matters:
 - Did anything reach memory, and can a second agent read it back?
 - Did any diff fail `preflight` or the quality gate, and was that correct?
 
+## What the first night found (2026-09-02)
+
+- **The frontier is quantised to the grid, and that manufactures wins.**
+  A no-op diff scored 18% below baseline: N=12 held 20 ms mean TPOT in its
+  sweep (19.x ms) and missed in stock's (22.0 ms), so N* moved from 8 to 12
+  and every other number matched stock to the cent. August's $12.23 and
+  September's $14.96 for stock are the same flip. The harness now replicates
+  a claimed win and keeps the worse run, which halves the false-win rate but
+  does not remove it. The real fix is in the simulator: interpolate N* where
+  the fitted SLO curve crosses the limit and price there, instead of taking
+  the last passing level. `simulate rescore` could then re-judge every sweep
+  from the night without a GPU. Decide this before believing any win.
+- **A screen is not a small full sweep.** Stock prices ~15% higher at screen
+  tier; screens must be judged against stock measured the same way.
+- **GSM8K is noisy at n=50** (62% and 70% on stock, same items); at n=100 it
+  has held 69-70%. The gate is 10 points.
+- **Spend must land per attempt**, or the dashboard and the budget are blind
+  for an entire idea.
+
 ## Known gaps, worth fixing before scaling to ten
 
 - **No profile is captured by default.** `--profile-level` exists and is

@@ -98,6 +98,13 @@ class AgentBudget:
     # sweep. Above zero on purpose: a screen is noisy, and confirming
     # break-even candidates is how the queue fills with nothing.
     screen_promise_pct: float = -1.0
+    # A full-tier result that clears the noise floor is measured again and
+    # the worse of the two is kept. The frontier is quantised to the level
+    # grid, and a level sitting on the SLO line passes or fails on noise:
+    # on 2026-09-02 a no-op diff scored 18% below baseline because N=12
+    # held 20 ms mean TPOT in its sweep and not in stock's. One extra sweep
+    # per claimed win is the cheapest defence against recording that.
+    replicate_wins: bool = True
     # Infrastructure failures are retried unchanged, but not forever: a
     # persistently broken runner would otherwise consume the whole budget
     # rediscovering that it is broken.

@@ -186,6 +186,17 @@ class IterativeAgent:
                 attempts.append(att)          # keep the screen in the record
                 att = full
 
+            # A win is measured twice. See AgentBudget.replicate_wins.
+            if (att.tier == "full" and att.ok and budget.replicate_wins
+                    and att.delta.get("bill_per_1k_pct", 0.0) <= -self.NOISE_PCT):
+                again, waited = self._measure(stack, idea, trace, rationale, n,
+                                              "full", brief, tuple(attempts),
+                                              replicate=1)
+                idle += waited
+                spent += again.cost_usd
+                attempts.append(att)
+                att = self._worse(att, again)
+
             # Infrastructure failures are retried unchanged; a rejected
             # hypothesis is not -- it costs the same and says the same.
             if not att.ok and att.failure == "infra":
@@ -223,18 +234,20 @@ class IterativeAgent:
                             idle_s=round(idle, 2))
 
     def _measure(self, stack, idea: Idea, trace: str, rationale: str, n: int,
-                 tier: str, brief: Brief, history: tuple[Attempt, ...]
-                 ) -> tuple[Attempt, float]:
+                 tier: str, brief: Brief, history: tuple[Attempt, ...],
+                 replicate: int = 0) -> tuple[Attempt, float]:
         """Submit, work while it runs, collect. Returns (attempt, seconds idle).
 
         `idle` counts only the time left over after the agent ran out of useful
         things to do. Keeping it near zero is the entire justification for the
         evaluation queue existing.
         """
+        rep = f"-rep{replicate}" if replicate else ""
         req = EvalRequest(stack=stack, agent_id=self.agent_id, idea_id=idea.id,
                           attempt=n, tier=tier, priority=self.priority,
-                          run_dir=str(self.workspace.run_dir(n)),
-                          label=f"{idea.title} #{n} ({tier})")
+                          replicate=replicate,
+                          run_dir=str(self.workspace.run_dir(n)) + rep,
+                          label=f"{idea.title} #{n} ({tier}{rep})")
         ticket = self.evals.submit(req)         # returns immediately, always
         self._report(status="queued", eval_ticket=ticket.id, attempt=n,
                      activity=f"attempt {n}: submitted a {tier} run")
@@ -309,6 +322,16 @@ class IterativeAgent:
             if k in metrics and isinstance(base, (int, float)) and base:
                 out[f"{k}_pct"] = round((metrics[k] - base) / base * 100, 2)
         return out
+
+    @staticmethod
+    def _worse(a: Attempt, b: Attempt) -> Attempt:
+        """Of two measurements of the same code, the one to believe. A failed
+        replicate is the verdict; otherwise the higher bill."""
+        if not b.ok:
+            return b
+        if not a.ok:
+            return a
+        return b if b.metrics.get("bill_per_1k", 0) > a.metrics.get("bill_per_1k", 0) else a
 
     @staticmethod
     def _improved(att: Attempt, best: Attempt | None) -> bool:

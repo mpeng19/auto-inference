@@ -50,14 +50,20 @@ class EvalRequest:
     idea_id: str = ""
     attempt: int = 0
     tier: Tier = "full"
+    # A deliberate re-measurement of the same code. 0 is the first run; a
+    # replicate is a different key on purpose, because the point of it is
+    # to pay for the same measurement twice.
+    replicate: int = 0
     priority: int = 0               # higher runs sooner; ties broken FIFO
     run_dir: str = ""
     label: str = ""
 
     @property
     def dedup_key(self) -> str:
-        """Same code, same tier -> same measurement. Never pay twice."""
-        return f"{getattr(self.stack, 'digest', '')}:{self.tier}"
+        """Same code, same tier -> same measurement. Never pay twice --
+        unless asked to (`replicate`)."""
+        key = f"{getattr(self.stack, 'digest', '')}:{self.tier}"
+        return f"{key}:r{self.replicate}" if self.replicate else key
 
 
 @dataclass(frozen=True)

@@ -267,6 +267,35 @@ def test_agents_keep_working_while_gpus_are_saturated(tmp_path, stock_dir,
         "an agent studied with no evaluation in flight -- it was not overlapped"
 
 
+def test_a_win_is_measured_twice_and_the_worse_run_counts(
+        tmp_path, stock_dir, memory, context):
+    """A no-op diff scored -18% on 2026-09-02 because a level on the SLO line
+    passed in its sweep and not in stock's. One sweep is not a result."""
+    from harness.contracts import Attempt, EvalRequest
+
+    run = FakeRunner(mode="improving")      # every run beats the last
+    broker = EvalBroker(run, capacity=2)
+    agent = _agent_factory(tmp_path, stock_dir, memory, context, broker)("a01", None)
+    out = agent.run(Idea(title="chunk", hypothesis="tune chunk", targets=(P,)),
+                    AgentBudget(max_attempts=1, patience=1, screen_first=True))
+    broker.shutdown()
+    assert run.tiers == ["screen", "full", "full"], run.tiers
+    assert len(out.attempts) == 3                 # screen, full, replicate
+    assert out.best is not None
+    # the replicate scored lower (better); the first, worse, run is kept
+    assert out.best.metrics["bill_per_1k"] == 12.23 - 2
+
+    stack = None
+    a = EvalRequest(stack=stack, tier="full")
+    assert a.dedup_key != EvalRequest(stack=stack, tier="full", replicate=1).dedup_key
+
+    good = Attempt(ok=True, metrics={"bill_per_1k": 10.0})
+    bad = Attempt(ok=True, metrics={"bill_per_1k": 12.0})
+    failed = Attempt(ok=False, failure="quality")
+    assert IterativeAgent._worse(good, bad) is bad
+    assert IterativeAgent._worse(good, failed) is failed
+
+
 def test_verdicts_have_a_noise_floor():
     """A 0.9% screen improvement was recorded as a win on night-2; the next
     agent's brief then said the idea worked. Inside the measurement's own
