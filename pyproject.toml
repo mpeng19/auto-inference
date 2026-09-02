@@ -7,6 +7,7 @@ dependencies = [
     "mcp>=2.1.1",
     "modal>=1.5.5",
     "numpy>=2.5.2",
+    "pypdf>=6.16.2",
     "textual>=8.2.8",
     "uvloop>=0.22.1",
 ]

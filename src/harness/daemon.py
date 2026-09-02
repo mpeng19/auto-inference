@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field
 from .agent import ClaudeCodeProposer, IterativeAgent, SimulatorEvaluator, Workspace
 from .context import JsonlContext
 from .contracts import AgentBudget, FleetBudget, FleetSpec, Idea
+from .ideas import SqliteIdeaBank
 from .memory import SqliteMemory
 from .orchestration import EvalBroker, Fleet
 from .session import SqliteSessionStore, default_store_path
@@ -51,6 +52,13 @@ class FleetConfig:
     screen_seconds: float = 60.0
     baseline: dict = field(default_factory=dict)
     seeds: tuple[str, ...] = ()     # free-text hypotheses to start from
+    # Where ideas come from once the seeds run out. Empty: the agents seed
+    # themselves, which produced one-line knob tweaks. A path: records are
+    # claimed from the bank, one per agent, least similar first.
+    bank: str = ""
+    # "tune" asks for the smallest edit; "build" hands over a mechanism and
+    # expects a kernel-scale change with a design note and workbench checks.
+    mode: str = "tune"
     # Two separate fakes, because they cost different things. `dry_run` skips
     # the GPU (dollars); `fake_agents` skips Claude Code (subscription usage).
     # A flag named "dry run" that still spawns ten real agents is a trap.
@@ -142,6 +150,7 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     store = store or SqliteSessionStore(default_store_path())
     memory = SqliteMemory(root / "memory.db")
     context = JsonlContext(root / "traces", session_id=cfg.session_id)
+    bank = SqliteIdeaBank(cfg.bank) if cfg.bank else None
 
     if cfg.dry_run:
         runner = _fake_runner
@@ -152,6 +161,7 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     broker = EvalBroker(runner, capacity=cfg.eval_capacity)
     fleet = Fleet(None, broker, store=store, session_id=cfg.session_id,
                   root=str(root))
+    fleet.bank = bank
 
     def make_agent(agent_id: str, fl: Fleet):
         ws = Workspace(root / agent_id, agent_id=agent_id)

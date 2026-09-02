@@ -10,6 +10,7 @@ that gets rewritten repeatedly stays coherent.
     ContextService         the transcript behind any one of those claims
     EvalService            the queue in front of the GPUs
     AgentService           one idea, iterated
+    IdeaBankService        where ideas of the right size come from, claimed one per agent
     OrchestrationService   N of those, kept diverse and inside a budget
 """
 from .agent import (
@@ -31,6 +32,7 @@ from .evaluation import (
     QueueStats,
     Tier,
 )
+from .ideas import BankStatus, IdeaBankService, IdeaRecord, Scale
 from .memory import Brief, Experiment, Finding, Hit, MemoryService, Recall, Relation
 from .orchestration import (
     AgentState,
@@ -48,6 +50,7 @@ from .session import (
 )
 
 __all__ = [
+    "BankStatus", "IdeaBankService", "IdeaRecord", "Scale",
     # shared
     "Provenance", "digest", "new_id", "now",
     # memory

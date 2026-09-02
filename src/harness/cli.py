@@ -48,6 +48,13 @@ def _resolve(store, session_id: str):
 
 # ── start ────────────────────────────────────────────────────────────────
 
+def _bank_path(value: str) -> str:
+    if value == "__default__":
+        from .ideas import default_bank_path
+        return str(default_bank_path())
+    return value
+
+
 def cmd_start(a) -> int:
     session_id = a.session or f"sess-{int(time.time())}"
     root = pathlib.Path(a.root or (pathlib.Path.cwd() / "agents" / session_id))
@@ -58,6 +65,7 @@ def cmd_start(a) -> int:
         seed_model=a.seed_model, gpu=a.gpu, n_gpu=a.n_gpu,
         agent_max_attempts=a.max_attempts, agent_max_usd=a.agent_budget,
         dry_run=a.dry_run, fake_agents=a.fake_agents, note=a.note,
+        bank=_bank_path(a.bank) if a.bank else "", mode=a.mode,
         seeds=tuple(s for s in (a.seed or [])),
         baseline=json.loads(a.baseline) if a.baseline else {})
     cfg_path = root / "fleet.json"
@@ -207,6 +215,64 @@ def cmd_tool(a) -> int:
     return tools.main(a.action, a)
 
 
+# ── ideas ────────────────────────────────────────────────────────────────
+
+def cmd_ideas(a) -> int:
+    """The bank the fleet draws from. Filling it is a one-time cost per
+    source; the fleet then claims records one per agent."""
+    from .ideas import SqliteIdeaBank, default_bank_path
+
+    bank = SqliteIdeaBank(a.bank or default_bank_path())
+    if a.action == "list":
+        rows = bank.list(status=a.status or None, scale=a.scale or None)
+        if a.json:
+            from dataclasses import asdict
+            print(json.dumps([asdict(r) for r in rows], indent=1))
+            return 0
+        print(f"{bank.path}: {bank.count()} records, {bank.count('available')} available")
+        for r in rows:
+            who = f" [{r.claimed_by}]" if r.claimed_by else ""
+            print(f"  {r.id}  {r.scale:12s} {r.status:9s}{who}  {r.title[:60]}  ({r.source})")
+        return 0
+    if a.action == "show":
+        r = bank.get(a.arg)
+        if r is None:
+            print(f"no record {a.arg}")
+            return 1
+        from dataclasses import asdict
+        print(json.dumps(asdict(r), indent=1))
+        return 0
+    if a.action == "search":
+        for r in bank.search(a.arg, k=a.k):
+            print(f"  {r.id}  {r.scale:12s} {r.status:9s}  {r.title[:70]}")
+        return 0
+    if a.action == "import":
+        n = bank.import_jsonl(a.arg, source_default=a.source)
+        print(f"imported {n} records from {a.arg} -> {bank.path}")
+        return 0
+    if a.action == "release":
+        bank.release(a.arg)
+        print(f"released {a.arg}")
+        return 0
+    if a.action == "extract-pdf":
+        from .ideas import pdf as book
+        from .ideas.llm import ask_with
+        n = book.harvest(bank, a.arg, ask_with(a.model), book=a.source or "",
+                         size=a.pages, progress=lambda m: print(m, flush=True))
+        print(f"{n} records from {a.arg} -> {bank.path}")
+        return 0
+    if a.action == "arxiv":
+        from .ideas import arxiv
+        from .ideas.llm import ask_with
+        queries = (a.arg,) if a.arg else arxiv.DEFAULT_QUERIES
+        seen, added = arxiv.harvest(bank, ask_with(a.model), queries=queries,
+                                    per_query=a.k)
+        print(f"{seen} papers seen, {added} records added -> {bank.path}")
+        return 0
+    print(f"unknown action {a.action}")
+    return 2
+
+
 # ── traces ───────────────────────────────────────────────────────────────
 
 def cmd_traces(a) -> int:
@@ -271,6 +337,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--gpu", default="H100")
     s.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
     s.add_argument("--root", default="")
+    s.add_argument("--bank", nargs="?", const="__default__", default="",
+                   help="claim ideas from the bank (default path when given no value)")
+    s.add_argument("--mode", choices=["tune", "build"], default="tune",
+                   help="build: kernel-scale ideas with a design note and workbench checks")
     s.add_argument("--seed", action="append", help="a starting hypothesis; repeatable")
     s.add_argument("--baseline", default="", help='JSON from stock sweeps: {"bill_per_1k": 14.96, "quality": {"gsm8k": 0.66}, "screen": {"bill_per_1k": 17.3}}')
     s.add_argument("--dry-run", dest="dry_run", action="store_true",
@@ -305,6 +375,21 @@ def main(argv: list[str] | None = None) -> int:
     tl.add_argument("-k", type=int, default=8)
     tl.add_argument("--json", action="store_true")
     tl.set_defaults(fn=cmd_tool)
+
+    ideas = sub.add_parser("ideas", help="the idea bank: fill it, inspect it")
+    ideas.add_argument("action", choices=["list", "show", "search", "import", "release",
+                                          "extract-pdf", "arxiv"])
+    ideas.add_argument("arg", nargs="?", default="",
+                       help="id | query | jsonl path | pdf path")
+    ideas.add_argument("--bank", default="", help="database path (default: shared)")
+    ideas.add_argument("--status", default="", help="list: filter")
+    ideas.add_argument("--scale", default="", help="list: filter")
+    ideas.add_argument("--source", default="", help="import/extract-pdf: source label")
+    ideas.add_argument("--model", default="opus", help="extract-pdf/arxiv: claude model")
+    ideas.add_argument("--pages", type=int, default=20, help="extract-pdf: window size")
+    ideas.add_argument("-k", type=int, default=25, help="search: hits; arxiv: per query")
+    ideas.add_argument("--json", action="store_true")
+    ideas.set_defaults(fn=cmd_ideas)
 
     tr = sub.add_parser("traces", help="list, read, or export agent traces")
     tr.add_argument("action", choices=["list", "show", "export"])

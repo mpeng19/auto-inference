@@ -782,3 +782,47 @@ def test_host_sleep_is_reported_not_hidden():
         assert fleet._slept_s == 4 * 3600
     finally:
         broker.shutdown()
+
+
+def test_agents_claim_distinct_ideas_from_the_bank(tmp_path):
+    """Seeds run out; the bank hands each agent a different mechanism and
+    hears back what happened to it."""
+    import time
+
+    from harness.contracts import AgentOutcome, Attempt, IdeaRecord
+    from harness.ideas import SqliteIdeaBank
+
+    bank = SqliteIdeaBank(tmp_path / "ideas.db")
+    for t, m, sc in (("fused decode attention", "fuse qk softmax pv in one kernel", "kernel"),
+                     ("int8 KV cache", "store kv in int8 with per-head scales", "memory")):
+        bank.add(IdeaRecord(title=t, mechanism=m, hypothesis=f"{t} lowers cost", scale=sc))
+    got = {}
+
+    class Agent:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        def propose(self, seed=None, live_ideas=()):
+            raise AssertionError("must not self-seed while the bank has records")
+
+        def run(self, idea, budget):
+            got[self.agent_id] = idea
+            return AgentOutcome(agent_id=self.agent_id, idea=idea, stop="no_progress",
+                                attempts=(Attempt(idea_id=idea.id, ok=True,
+                                                  experiment_id="exp_9"),), cost_usd=0.0)
+
+    broker = EvalBroker(lambda r: (True, {}, ""), capacity=1)
+    fleet = Fleet(lambda a, f: Agent(a), broker)
+    fleet.bank = bank
+    fleet.start(FleetSpec(fleet_budget=FleetBudget(max_agents=2, max_usd_total=5)))
+    try:
+        for _ in range(200):
+            if bank.count("available") == 0 and bank.count("claimed") == 0:
+                break
+            time.sleep(0.02)
+        assert len(got) == 2
+        assert {i.seeded_by for i in got.values()} == {r.id for r in bank.list()}
+        assert all(r.status == "tried" and r.experiment_ids == ("exp_9",) for r in bank.list())
+    finally:
+        fleet.stop()
+        broker.shutdown()

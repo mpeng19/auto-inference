@@ -35,6 +35,21 @@ from ..contracts.orchestration import AgentState, FleetSpec, FleetState
 from ..contracts.session import AgentView, Command, SessionView, TokenUse
 
 
+def _design_note(rec) -> str:
+    """What a build-mode agent is handed with the idea: the record, as prose."""
+    parts = [f"Mechanism: {rec.mechanism}"]
+    if rec.expected_gain:
+        parts.append(f"Expected gain: {rec.expected_gain}")
+    if rec.risks:
+        parts.append(f"Risks: {rec.risks}")
+    if rec.prerequisites:
+        parts.append(f"Prerequisites: {rec.prerequisites}")
+    if rec.source:
+        parts.append(f"Source: {rec.source}" + (f" ({rec.source_title})" if rec.source_title else "")
+                     + (f" {rec.url}" if rec.url else ""))
+    return "\n".join(parts)
+
+
 def _tokens(text: str) -> set[str]:
     return {w for w in "".join(c if c.isalnum() else " " for c in text.lower()).split()
             if len(w) > 3}
@@ -255,6 +270,36 @@ class Fleet:
         started = self._state.started_at
         return not (started and time.time() - started > b.max_wall_s)
 
+    # ── the idea bank ───────────────────────────────────────────────────
+    bank = None          # IdeaBankService, set by the daemon when one is configured
+
+    def claim_from_bank(self, agent_id: str) -> Idea | None:
+        """A record no one else holds, least like what is live or tried.
+        Diversity here is a property of the claim, not of the agents."""
+        if self.bank is None:
+            return None
+        with self._lock:
+            live = tuple(i.hypothesis + " " + i.title for i in self._live_ideas)
+            scales = tuple(getattr(i, "scale", "") for i in self._live_ideas)
+            tried = tuple(o.idea.hypothesis for o in self._completed[-20:])
+        rec = self.bank.claim(agent_id, avoid=live + tried, live_scales=scales)
+        if rec is None:
+            return None
+        idea = rec.as_idea()
+        if hasattr(idea, "design"):
+            idea = replace(idea, design=_design_note(rec))
+        with self._lock:
+            self._live_ideas.append(idea)
+        return idea
+
+    def _bank_outcome(self, out: AgentOutcome) -> None:
+        if self.bank is None or not out.idea.seeded_by.startswith("bank_"):
+            return
+        exp = out.best.experiment_id if out.best else ""
+        exp = exp or next((a.experiment_id for a in out.attempts if a.experiment_id), "")
+        with contextlib.suppress(Exception):
+            self.bank.record_outcome(out.idea.seeded_by, exp, status="tried")
+
     def claim_idea(self, agent_id: str, proposed: Idea) -> Idea | None:
         with self._lock:
             for other in self._live_ideas:
@@ -381,12 +426,18 @@ class Fleet:
             self.report(agent_id, status="thinking", activity="choosing an idea")
             agent: AgentService = self.make_agent(agent_id, self)
             seed = seeds.pop(0) if seeds else None
+            banked = None
+            if seed is None and self.bank is not None:
+                banked = self.claim_from_bank(agent_id)
+                if banked is None:
+                    self.report(agent_id, status="done", note="idea bank is empty")
+                    break
             try:
-                idea = agent.propose(seed=seed, live_ideas=self.live_ideas())
+                idea = banked or agent.propose(seed=seed, live_ideas=self.live_ideas())
             except Exception as e:
                 self.report(agent_id, status="failed", note=f"propose: {e}")
                 break
-            if self.claim_idea(agent_id, idea) is None:
+            if banked is None and self.claim_idea(agent_id, idea) is None:
                 # Backs off, then gives up on being different. Diversity is a
                 # heuristic, not a correctness property, and an agent that
                 # re-seeds forever costs a model call per spin while producing
@@ -415,6 +466,7 @@ class Fleet:
                     self._live_ideas = [i for i in self._live_ideas if i.id != idea.id]
                 continue
             self._record_outcome(out)
+            self._bank_outcome(out)
             self.report(agent_id, status="idle",
                         attempts_total=slot.view.attempts_total + len(out.attempts),
                         idle_s=out.idle_s,
