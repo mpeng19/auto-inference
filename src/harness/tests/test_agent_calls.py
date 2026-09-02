@@ -1,0 +1,357 @@
+"""What an agent call costs in time, and what happens when it should stop.
+
+Three failures from the night of 2026-09-02, one test group each.
+
+**The tools were refused.** Every agent write-up contained "This command needs
+your approval to run (it's a harness tool...)": `--permission-mode acceptEdits`
+auto-approves edits and nothing else, so in headless mode every `harness tool`
+call was denied and the agents guessed instead of measuring.
+
+**The study outlived its result.** A study started when the sweep was
+submitted and ran to completion whatever happened, so an agent whose screen
+came back in five minutes spent another fifteen answering a question that had
+been answered.
+
+**A five-hour host sleep was invisible.** Nothing timed a phase, and
+`subprocess.run(timeout=...)` measures a monotonic clock that stops while the
+host sleeps -- so the calls neither timed out nor looked slow.
+"""
+import json
+import pathlib
+import threading
+import time
+from dataclasses import dataclass, field
+
+import pytest
+
+from harness import EvalBroker, IterativeAgent, Workspace
+from harness.agent.claude_code import (
+    DEFAULT_BUILD_TARGETS,
+    DEFAULT_BUILD_TIMEOUT_S,
+    CallStats,
+    ClaudeCodeProposer,
+)
+from harness.contracts import AgentBudget, Brief, Idea
+
+from .test_workspace import FakeStock
+
+P = "srt/managers/schedule_policy.py"
+
+
+def _fake_claude(tmp_path: pathlib.Path, body: str, name: str = "claude") -> str:
+    """A `claude` that is a shell script.
+
+    The real binary is never invoked by the suite: a test that spends
+    subscription usage is a test nobody runs. Everything here exercises the
+    subprocess machinery -- process groups, pipes, the JSON envelope -- which
+    is where the bugs were.
+    """
+    p = tmp_path / name
+    p.write_text("#!/bin/sh\n" + body)
+    p.chmod(0o755)
+    return str(p)
+
+
+ENVELOPE = json.dumps({
+    "type": "result", "result": "I fused the two kernels.",
+    "duration_ms": 812345, "duration_api_ms": 790000, "num_turns": 41,
+    "is_error": False, "permission_denials": [],
+    "usage": {"input_tokens": 900, "output_tokens": 120,
+              "cache_read_input_tokens": 40_000, "cache_creation_input_tokens": 5},
+})
+
+
+# ── cancellable, timed calls ──────────────────────────────────────────────
+
+def test_a_cancelled_call_dies_with_its_children_and_keeps_what_it_wrote(tmp_path):
+    """Cancelling must kill the *group*: `claude` runs tools as children, and a
+    SIGTERM to the leader alone leaves a `harness tool gpu-run` holding an
+    H100 nobody is waiting for."""
+    marker = tmp_path / "ran-to-the-end"
+    binary = _fake_claude(tmp_path, f"echo half-a-thought\nsleep 1\ntouch {marker}\n")
+    prop = ClaudeCodeProposer(binary=binary, timeout_s=30)
+
+    cancel = threading.Event()
+    threading.Timer(0.2, cancel.set).start()
+    t0 = time.time()
+    text, _ = prop._run("go", cwd=tmp_path, cancel=cancel, phase="study")
+
+    assert time.time() - t0 < 1.0, "the cancel waited for the process to finish"
+    assert prop.last_call.cancelled and not prop.last_call.timed_out
+    # Cancellation is not an error: the partial thought is the point.
+    assert "half-a-thought" in text
+    time.sleep(1.2)
+    assert not marker.exists(), "the process group survived the cancel"
+
+
+def test_a_call_past_its_limit_is_killed_and_says_so(tmp_path):
+    binary = _fake_claude(tmp_path, "sleep 5\n")
+    prop = ClaudeCodeProposer(binary=binary, timeout_s=0.4)
+    with pytest.raises(TimeoutError):
+        prop._run("go", cwd=tmp_path, phase="edit")
+    assert prop.last_call.timed_out and prop.last_call.wall_s < 5
+    assert prop.calls == [prop.last_call]
+
+
+def test_call_stats_come_off_the_json_envelope(tmp_path):
+    """Wall seconds next to the model's own duration is the whole diagnostic:
+    a big gap between them is the host, not the model."""
+    binary = _fake_claude(tmp_path, f"cat <<'JSON'\n{ENVELOPE}\nJSON\n")
+    prop = ClaudeCodeProposer(binary=binary)
+    text, use = prop._run("go", cwd=tmp_path, phase="edit")
+
+    st = prop.last_call
+    assert text == "I fused the two kernels."
+    assert (st.duration_ms, st.duration_api_ms, st.num_turns) == (812345, 790000, 41)
+    assert st.is_error is False and st.returncode == 0 and st.denials == 0
+    assert st.phase == "edit" and st.model == "sonnet"
+    assert st.wall_s >= 0 and st.started_at > 0
+    assert not st.cancelled and not st.timed_out
+    assert use.cache_read == 40_000 and use.output == 120
+    assert prop.calls == [st], "every call is kept, not just the last"
+    assert set(CallStats().as_dict()) >= {"wall_s", "duration_ms", "duration_api_ms",
+                                          "num_turns", "is_error"}
+
+
+def test_refused_tool_calls_are_counted(tmp_path):
+    """"It decided not to run preflight" and "it was told it could not" read
+    identically in a write-up. The envelope knows which it was."""
+    envelope = ENVELOPE.replace(
+        '"permission_denials": []',
+        '"permission_denials": [{"tool_name": "Bash"}, {"tool_name": "Bash"}]')
+    binary = _fake_claude(tmp_path, f"cat <<'JSON'\n{envelope}\nJSON\n")
+    prop = ClaudeCodeProposer(binary=binary)
+    prop._run("go", cwd=tmp_path)
+    assert prop.last_call.denials == 2
+
+
+def test_a_failing_call_still_raises(tmp_path):
+    binary = _fake_claude(tmp_path, "echo boom >&2\nexit 3\n")
+    prop = ClaudeCodeProposer(binary=binary)
+    with pytest.raises(RuntimeError, match="exited 3"):
+        prop._run("go", cwd=tmp_path)
+    assert prop.last_call.returncode == 3
+
+
+# ── the tools are actually allowed ────────────────────────────────────────
+
+def test_the_harness_tools_are_allowed_on_the_command_line(tmp_path):
+    """The night-3 bug: with only `--permission-mode acceptEdits` every shell
+    command was refused, so no agent ran `preflight`, `recall` or `roofline`
+    even once."""
+    dump = tmp_path / "argv.txt"
+    binary = _fake_claude(
+        tmp_path, f"printf '%s\\n' \"$@\" > {dump}\ncat <<'JSON'\n{ENVELOPE}\nJSON\n")
+    prop = ClaudeCodeProposer(binary=binary)
+    prop._run("go", cwd=tmp_path)
+    argv = dump.read_text().splitlines()
+
+    assert "--allowedTools" in argv
+    rules = argv[argv.index("--allowedTools") + 1:]
+    for rule in ("Bash(harness tool:*)", "Bash(uv run harness tool:*)",
+                 "Bash(harness tool gpu-run:*)", "Bash(harness tool equivalence:*)",
+                 "Bash(ruff:*)", "Read", "Grep", "Glob"):
+        assert rule in rules, rule
+    # Rules contain spaces, so each must survive as ONE argv token -- joining
+    # them into a list is how `Bash(harness tool *)` becomes three rules that
+    # match nothing.
+    assert "Bash(harness tool *)" in rules
+    # Additive, not a replacement: edits still come from the permission mode.
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+
+
+def test_trace_tools_are_allowed_when_a_profile_is_attached():
+    """MCP tools need permission too; offered and then refused is the same bug."""
+    cmd = ClaudeCodeProposer(mcp_config="/tmp/mcp.json")._cmd("hi", "sonnet")
+    assert "mcp__tracedb" in cmd
+    assert "mcp__tracedb" not in ClaudeCodeProposer()._cmd("hi", "sonnet")
+
+
+# ── build mode ────────────────────────────────────────────────────────────
+
+def test_build_mode_hands_over_the_design_and_the_workbench(tmp_path, stock_dir):
+    dump = tmp_path / "prompt.txt"
+    binary = _fake_claude(
+        tmp_path, f"printf '%s' \"$2\" > {dump}\ncat <<'JSON'\n{ENVELOPE}\nJSON\n")
+    ws = Workspace(tmp_path / "a01", agent_id="a01", source=FakeStock(stock_dir))
+    prop = ClaudeCodeProposer(binary=binary, mode="build")
+
+    assert prop.targets == DEFAULT_BUILD_TARGETS, "build mode starts at the kernels"
+    assert prop._edit_timeout() == DEFAULT_BUILD_TIMEOUT_S
+    assert ClaudeCodeProposer()._edit_timeout() == 900.0
+
+    idea = Idea(title="fused decode attention",
+                hypothesis="fuse the KV gather into the decode kernel",
+                design="expected gain: 12% decode time\n"
+                       "risks: fp8 accumulation drift changes what the model says",
+                targets=(P,))
+    out = prop.edit(ws, idea, Brief(text="nothing on record"), 0, ())
+    prompt = dump.read_text()
+
+    assert "DESIGN.md" in prompt, "the design note is the first deliverable"
+    assert "fuse the KV gather into the decode kernel" in prompt
+    assert "expected gain: 12% decode time" in prompt
+    assert "fp8 accumulation drift" in prompt
+    assert "srt/managers/schedule_policy.py" in prompt      # the idea's targets win
+    for tool in ("harness tool preflight", "harness tool gpu-run",
+                 "harness tool equivalence"):
+        assert tool in prompt, tool
+    assert "pip dependency" in prompt
+    assert "Multi-file diffs are expected" in prompt
+    assert out == "I fused the two kernels."
+
+
+def test_tuning_mode_is_left_alone(tmp_path, stock_dir):
+    """Build mode is a second prompt, not a replacement: `tune` is still the
+    smallest-edit job and must not start demanding design notes."""
+    dump = tmp_path / "prompt.txt"
+    binary = _fake_claude(
+        tmp_path, f"printf '%s' \"$2\" > {dump}\ncat <<'JSON'\n{ENVELOPE}\nJSON\n")
+    ws = Workspace(tmp_path / "a02", agent_id="a02", source=FakeStock(stock_dir))
+    prop = ClaudeCodeProposer(binary=binary)
+    prop.edit(ws, Idea(title="chunk", hypothesis="raise chunk", targets=(P,)),
+              Brief(text=""), 0, ())
+    prompt = dump.read_text()
+    assert "DESIGN.md" not in prompt
+    assert "smallest edit" in prompt
+
+
+def test_build_targets_exist_in_the_pinned_wheel():
+    """A menu of paths that do not exist is worse than no menu: the agent
+    spends its first ten minutes discovering that."""
+    from harness.agent.stock import CACHE_ROOT, SGLANG_VERSION
+
+    root = CACHE_ROOT / SGLANG_VERSION / "sglang"
+    if not root.is_dir():
+        pytest.skip("stock wheel is not extracted here and fetching needs the network")
+    missing = [t for t in DEFAULT_BUILD_TARGETS if not (root / t).is_file()]
+    assert not missing, f"build targets missing from SGLang {SGLANG_VERSION}: {missing}"
+
+
+# ── the loop: cancelled studies and timed phases ──────────────────────────
+
+@dataclass
+class StudyProposer:
+    """A proposer whose study blocks until it is cancelled."""
+    note: str = "I was halfway through reading the allocator"
+    entered: threading.Event = field(default_factory=threading.Event)
+    saw_cancel: bool = False
+    last_call: CallStats = field(
+        default_factory=lambda: CallStats(phase="edit", duration_ms=4200,
+                                          duration_api_ms=4000, num_turns=9,
+                                          wall_s=7.5))
+
+    def seed(self, live_ideas, brief):
+        return Idea(title="chunk", hypothesis="tune chunk", targets=(P,))
+
+    def edit(self, ws, idea, brief, attempt, history):
+        ws.edit(P, f"CHUNK = {8192 * (attempt + 2)}\n\n\nclass SchedulePolicy:\n"
+                   "    pass\n")
+        return "raised CHUNK"
+
+    def study(self, ws, idea, brief, history, cancel=None):
+        self.entered.set()
+        if cancel is not None:
+            cancel.wait(timeout=10)
+            self.saw_cancel = cancel.is_set()
+        return self.note
+
+
+def _agent(tmp_path, stock_dir, memory, context, broker, proposer):
+    ws = Workspace(pathlib.Path(tmp_path) / "a01", agent_id="a01",
+                   source=FakeStock(stock_dir))
+    return IterativeAgent(agent_id="a01", workspace=ws, memory=memory,
+                          context=context, proposer=proposer, evals=broker,
+                          baseline={"bill_per_1k": 12.23})
+
+
+def _runner(delay=0.0):
+    def run(req):
+        if delay:
+            time.sleep(delay)
+        return True, {"bill_per_1k": 12.23, "n_star": 12, "cost_usd": 1.0}, ""
+    return run
+
+
+def _turns(context, ref):
+    return list(context.read(ref))
+
+
+def test_a_study_is_cut_short_when_the_result_arrives(
+        tmp_path, stock_dir, memory, context):
+    """Studying past the result is time spent answering a question that has
+    been answered -- and it holds the attempt open while it does."""
+    prop = StudyProposer()
+    broker = EvalBroker(_runner(), capacity=1)
+    agent = _agent(tmp_path, stock_dir, memory, context, broker, prop)
+    try:
+        out = agent.run(Idea(title="chunk", hypothesis="tune chunk", targets=(P,)),
+                        AgentBudget(max_attempts=1, patience=1, screen_first=False,
+                                    replicate_wins=False))
+    finally:
+        broker.shutdown()
+
+    assert prop.entered.is_set(), "the study never ran"
+    assert prop.saw_cancel, "the study was never told the result had landed"
+    studies = [t for t in _turns(context, out.attempts[0].trace_ref)
+               if t.name == "study"]
+    assert len(studies) == 1
+    assert prop.note in studies[0].content
+    assert studies[0].content.endswith("(cut short: result arrived)")
+    assert studies[0].data["cut_short"] is True
+    # The agent was busy right up to the result: nothing to charge to idle.
+    assert out.idle_s < 1.0
+
+
+def test_a_study_that_outlives_its_budget_is_cancelled_anyway(
+        tmp_path, stock_dir, memory, context):
+    """The other direction: a study nobody stops would hold the attempt open
+    for as long as it felt like thinking."""
+    prop = StudyProposer()
+    broker = EvalBroker(_runner(delay=0.6), capacity=1)
+    agent = _agent(tmp_path, stock_dir, memory, context, broker, prop)
+    agent.COLLECT_POLL_S = 0.02
+    try:
+        out = agent.run(Idea(title="chunk", hypothesis="tune chunk", targets=(P,)),
+                        AgentBudget(max_attempts=1, patience=1, screen_first=False,
+                                    replicate_wins=False, study_timeout_s=0.05))
+    finally:
+        broker.shutdown()
+
+    studies = [t for t in _turns(context, out.attempts[0].trace_ref)
+               if t.name == "study"]
+    assert prop.saw_cancel
+    assert studies[0].data["cut_short"] is False, "it finished before the result"
+    # It stopped studying and then waited, which is what idle means.
+    assert out.idle_s > 0.0
+
+
+def test_every_turn_says_how_long_its_phase_took(
+        tmp_path, stock_dir, memory, context):
+    """A closed lid froze the fleet for five hours and the trace read exactly
+    like a slow model. Wall seconds per phase is the difference."""
+    prop = StudyProposer()
+    broker = EvalBroker(_runner(), capacity=1)
+    agent = _agent(tmp_path, stock_dir, memory, context, broker, prop)
+    try:
+        out = agent.run(Idea(title="chunk", hypothesis="tune chunk", targets=(P,)),
+                        AgentBudget(max_attempts=1, patience=1, screen_first=False,
+                                    replicate_wins=False))
+    finally:
+        broker.shutdown()
+
+    turns = _turns(context, out.attempts[0].trace_ref)
+    assert turns
+    for t in turns:
+        assert isinstance(t.data.get("elapsed_s"), (int, float)), t
+        assert t.data.get("phase"), t
+    phases = {t.data["phase"] for t in turns}
+    assert {"start", "recall", "propose", "check", "submit", "study",
+            "wait"} <= phases, phases
+
+    # A model call carries its own accounting beside the loop's wall clock,
+    # so "slow model" and "sleeping host" are distinguishable in one line.
+    propose = next(t for t in turns if t.data["phase"] == "propose")
+    assert propose.data["duration_ms"] == 4200
+    assert propose.data["num_turns"] == 9
+    assert propose.data["phase"] == "propose", "the call's own label must not win"

@@ -31,6 +31,15 @@ from .common import new_id, now
 TurnKind = Literal["prompt", "thought", "tool_call", "tool_result", "message",
                    "eval_submit", "eval_result", "error"]
 
+# Which part of an attempt a turn closes. Every turn carries one in
+# `Turn.data["phase"]`, next to `data["elapsed_s"]`, because a trace that says
+# only *what* happened cannot answer why a night produced three attempts: on
+# 2026-09-02 a five-hour host sleep and a model thinking for five hours left
+# exactly the same trace. Phases are data, not a schema -- an implementation
+# may add its own -- but these are the ones the reference loop emits.
+Phase = Literal["start", "recall", "propose", "check", "submit", "study",
+                "wait", "done"]
+
 
 @dataclass(frozen=True)
 class Turn:

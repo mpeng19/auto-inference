@@ -34,6 +34,11 @@ class Idea:
     id: str = field(default_factory=lambda: new_id("idea"))
     title: str = ""
     hypothesis: str = ""            # "X will lower cost per output token because Y"
+    # Free text from an idea bank: the mechanism worked out, the expected gain
+    # and the risks. Empty for an idea an agent seeded itself. A kernel-scale
+    # proposal cannot be carried in one sentence, and an agent handed only the
+    # sentence re-derives the design badly and spends a sweep on it.
+    design: str = ""
     targets: tuple[str, ...] = ()   # sglang paths it expects to touch
     seeded_by: str = ""             # agent id, or "human", or an experiment id
     timeline: str = "main"
@@ -109,6 +114,11 @@ class AgentBudget:
     # persistently broken runner would otherwise consume the whole budget
     # rediscovering that it is broken.
     max_infra_retries: int = 2
+    # How long the study that runs alongside an evaluation may take. It is
+    # cancelled the moment the result lands -- studying past that answers a
+    # question that has been answered -- so this only bounds the other case: a
+    # study that outlives a sweep and would otherwise hold the attempt open.
+    study_timeout_s: float = 900.0
 
 
 @runtime_checkable

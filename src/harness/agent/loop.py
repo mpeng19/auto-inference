@@ -21,10 +21,23 @@ loop while there is still budget to spend on a fresh idea.
 **No progress stops the loop.** Attempts cost ~25 GPU-minutes. Spending the
 last three to establish a dead idea more precisely is the most expensive thing
 this system can do by accident.
+
+And two things a night of real runs added:
+
+**A study ends when its result lands.** The point of studying during a sweep is
+that waiting is free; a study that outlives its evaluation is the opposite,
+and it holds the attempt open. It runs in a thread with a cancel flag now, and
+the partial thought is kept.
+
+**Every turn is timed.** A trace that records what happened but not how long
+cannot tell a slow model from a sleeping laptop -- which is exactly the
+question a five-hour gap on 2026-09-02 raised and nothing could answer.
 """
 from __future__ import annotations
 
 import contextlib
+import inspect
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from typing import Protocol
@@ -54,6 +67,11 @@ class Proposer(Protocol):
         hypothesis, or drafts the next candidate. It exists so that "waiting
         for a GPU" and "doing nothing" stop being the same state -- the whole
         point of the evaluation queue. Implementations may omit it.
+
+        May accept a keyword-only `cancel: threading.Event`, which the loop
+        sets when the result lands. Taking it is how a study stops being work
+        the moment it stops being useful; a proposer that does not take one
+        simply runs to completion and the loop waits for it.
         """
         ...
 
@@ -85,6 +103,32 @@ class IterativeAgent:
             # Telemetry must never take an experiment down.
             with contextlib.suppress(Exception):
                 self.control.report(self.agent_id, **fields)
+
+    def _append(self, trace: str, turn: Turn, *, since: float,
+                phase: str = "", call: bool = False) -> None:
+        """Append a turn, stamped with how long the phase it closes took.
+
+        Every turn the loop writes carries `elapsed_s` and a `phase`, and a
+        turn that closes a model call carries that call's own accounting too.
+        The reason is a night that produced three attempts and no explanation:
+        a closed lid had frozen the fleet for five hours, and nothing in the
+        trace could tell that apart from a model thinking slowly. Wall seconds
+        beside the model's own `duration_ms` answers it in one line -- a big
+        gap between them is the host, not the model.
+
+        Inline stamping was the alternative and it is how a phase quietly goes
+        untimed: there are nine append sites and they are added to.
+        """
+        data = {"phase": phase or turn.name or turn.kind,
+                "elapsed_s": round(time.time() - since, 3), **turn.data}
+        if call:
+            stats = getattr(self.proposer, "last_call", None)
+            with contextlib.suppress(Exception):
+                # `phase` is dropped: the call's own label duplicates the one
+                # above it, and losing the loop's would mislabel the turn.
+                data.update({k: v for k, v in stats.as_dict().items()
+                             if k != "phase"})
+        self.context.append(trace, replace(turn, data=data))
 
     def _may_continue(self) -> bool:
         """Checked where stopping is cheap: between attempts, not mid-sweep.
@@ -124,7 +168,8 @@ class IterativeAgent:
 
         trace = self.context.open(TraceMeta(
             agent_id=self.agent_id, idea_id=idea.id, model="proposer"))
-        self.context.append(trace, Turn(kind="prompt", content=idea.hypothesis))
+        self._append(trace, Turn(kind="prompt", content=idea.hypothesis),
+                     since=started, phase="start")
 
         n = 0
         while n < budget.max_attempts:
@@ -138,33 +183,42 @@ class IterativeAgent:
 
             self._report(status="thinking", attempt=n,
                          activity=f"attempt {n}: reading what the fleet knows")
+            t_phase = time.time()
             brief = self.memory.recall(Recall(
                 intent=idea.hypothesis, agent_id=self.agent_id, idea_id=idea.id))
-            self.context.append(trace, Turn(
+            self._append(trace, Turn(
                 kind="thought", name="recall", content=brief.text,
-                tokens_in=brief.est_tokens))
+                tokens_in=brief.est_tokens), since=t_phase, phase="recall")
 
             self.workspace.reset()
             self._report(activity=f"attempt {n}: writing a diff")
+            t_phase = time.time()
             try:
                 rationale = self.proposer.edit(
                     self.workspace, idea, brief, n, tuple(attempts))
             except Exception as e:
-                self.context.append(trace, Turn(kind="error", content=str(e)))
+                self._append(trace, Turn(kind="error", name="propose",
+                                         content=str(e)),
+                             since=t_phase, phase="propose", call=True)
                 stop = "error"
                 break
+            # Kept whether or not the diff survives the check: an agent that
+            # returns no diff twice in a row is either stuck or being refused,
+            # and the trace is the only place that distinction can be made.
+            self._append(trace, Turn(kind="thought", name="propose",
+                                     content=str(rationale)[:4000]),
+                         since=t_phase, phase="propose", call=True)
 
+            t_phase = time.time()
             ok, why = self.workspace.check()
+            self._append(trace, Turn(kind="tool_call" if ok else "error",
+                                     name="check", content=why or "ok",
+                                     data={"ok": ok}),
+                         since=t_phase, phase="check")
             if not ok:
                 # Free to reject here; ~6 GPU-minutes if it reaches the runner.
-                # Keep what the model said: an agent that returns no diff
-                # twice in a row is either stuck or being refused, and the
-                # trace is the only place that distinction can be made.
                 attempts.append(Attempt(idea_id=idea.id, agent_id=self.agent_id,
                                         n=n, ok=False, failure="invalid_diff"))
-                self.context.append(trace, Turn(kind="thought", name="propose",
-                                                content=str(rationale)[:4000]))
-                self.context.append(trace, Turn(kind="error", name="check", content=why))
                 n += 1
                 continue
 
@@ -173,14 +227,15 @@ class IterativeAgent:
             # Screen first, confirm what survives. Most candidates die cheaply.
             tier = "screen" if budget.screen_first else "full"
             att, waited = self._measure(stack, idea, trace, rationale, n, tier,
-                                        brief, tuple(attempts))
+                                        brief, tuple(attempts), budget=budget)
             idle += waited
             spent += att.cost_usd
 
             if (tier == "screen" and att.ok
                     and att.delta.get("bill_per_1k_pct", 0.0) <= budget.screen_promise_pct):
                 full, waited = self._measure(stack, idea, trace, rationale, n,
-                                             "full", brief, tuple(attempts))
+                                             "full", brief, tuple(attempts),
+                                             budget=budget)
                 idle += waited
                 spent += full.cost_usd
                 attempts.append(att)          # keep the screen in the record
@@ -191,7 +246,7 @@ class IterativeAgent:
                     and att.delta.get("bill_per_1k_pct", 0.0) <= -self.NOISE_PCT):
                 again, waited = self._measure(stack, idea, trace, rationale, n,
                                               "full", brief, tuple(attempts),
-                                              replicate=1)
+                                              replicate=1, budget=budget)
                 idle += waited
                 spent += again.cost_usd
                 attempts.append(att)
@@ -235,14 +290,17 @@ class IterativeAgent:
 
     def _measure(self, stack, idea: Idea, trace: str, rationale: str, n: int,
                  tier: str, brief: Brief, history: tuple[Attempt, ...],
-                 replicate: int = 0) -> tuple[Attempt, float]:
+                 replicate: int = 0,
+                 budget: AgentBudget | None = None) -> tuple[Attempt, float]:
         """Submit, work while it runs, collect. Returns (attempt, seconds idle).
 
         `idle` counts only the time left over after the agent ran out of useful
         things to do. Keeping it near zero is the entire justification for the
         evaluation queue existing.
         """
+        budget = budget or AgentBudget()
         rep = f"-rep{replicate}" if replicate else ""
+        t_phase = time.time()
         req = EvalRequest(stack=stack, agent_id=self.agent_id, idea_id=idea.id,
                           attempt=n, tier=tier, priority=self.priority,
                           replicate=replicate,
@@ -251,34 +309,26 @@ class IterativeAgent:
         ticket = self.evals.submit(req)         # returns immediately, always
         self._report(status="queued", eval_ticket=ticket.id, attempt=n,
                      activity=f"attempt {n}: submitted a {tier} run")
-        self.context.append(trace, Turn(
+        self._append(trace, Turn(
             kind="eval_submit", name=stack.digest, content=rationale,
-            data={"tier": tier, "ticket": ticket.id, "queued": self.evals.stats().queued,
-                  "diff": self.workspace.diff()[:20000]}))
+            data={"tier": tier, "ticket": ticket.id,
+                  "queued": self.evals.stats().queued,
+                  "diff": self.workspace.diff()[:20000]}),
+            since=t_phase, phase="submit")
 
         # Useful non-GPU work while the sweep runs.
         self._report(status="evaluating",
                      activity=f"attempt {n}: {tier} running; studying meanwhile")
-        study = getattr(self.proposer, "study", None)
-        if study is not None:
-            try:
-                note = study(self.workspace, idea, brief, history)
-                if note:
-                    self.context.append(trace, Turn(kind="thought", name="study",
-                                                    content=str(note)))
-            except Exception as e:              # studying must never kill a run
-                self.context.append(trace, Turn(kind="error", name="study",
-                                                content=str(e)))
-
-        t0 = time.time()
-        rec = self.evals.collect(ticket.id)
-        idle = time.time() - t0
+        t_phase = time.time()
+        rec, idle = self._study_until_result(trace, ticket, idea, brief,
+                                             history, budget)
         self._report(status="thinking", queued_s=rec.queued_s, eval_ticket="",
                      cost_delta=rec.cost_usd,
                      activity=f"attempt {n}: {tier} done"
                               + (f" ({rec.failure})" if not rec.ok else ""))
-        self.context.append(trace, Turn(kind="eval_result", name=stack.digest,
-                                        data={"tier": tier, **rec.metrics}))
+        self._append(trace, Turn(kind="eval_result", name=stack.digest,
+                                 data={"tier": tier, **rec.metrics}),
+                     since=t_phase, phase="wait")
         att = Attempt(
             idea_id=idea.id, agent_id=self.agent_id, n=n, tier=tier,
             stack_digest=stack.digest, trace_ref=trace, ok=rec.ok,
@@ -286,6 +336,113 @@ class IterativeAgent:
             metrics=rec.metrics, delta=self._delta(rec.metrics, tier),
             cost_usd=rec.cost_usd, queued_s=rec.queued_s)
         return att, idle
+
+    # How long the wait loop blocks on the broker before looking at the study
+    # again. It waits on the broker's own condition variable, so this is not a
+    # spin -- it is how often a finished study gets noticed.
+    COLLECT_POLL_S = 1.0
+    # A cancelled study is killed, not asked nicely; this is how long the loop
+    # waits for the thread to notice before giving up on its note.
+    STUDY_JOIN_S = 30.0
+    _DONE = ("done", "failed", "cancelled")
+
+    def _study_until_result(self, trace: str, ticket, idea: Idea, brief: Brief,
+                            history: tuple[Attempt, ...],
+                            budget: AgentBudget):
+        """Study while the sweep runs, and stop the moment the result lands.
+
+        The study used to run to completion and only then did the agent block
+        on `collect`, so a study that outlived its evaluation left the agent
+        answering a question the GPU had already answered -- and holding the
+        attempt open while it did. Now the study runs in a thread with a
+        cancel flag, this loop watches both, and whichever finishes first ends
+        the other. A partial thought is still worth keeping, so the note is
+        appended either way, flagged when it was cut off.
+
+        The ticket is polled rather than collected outright because `collect`
+        with a timeout reports its own timeout as a failed record -- fine to
+        wait on, not something to believe. `poll` is the verdict; `collect` is
+        just the wait.
+
+        Returns (record, idle_s), where idle is the stretch after the study
+        stopped with the result still not in. That is the number the queue
+        exists to keep near zero, so it must not count time spent studying.
+        """
+        study = getattr(self.proposer, "study", None)
+        box: dict = {}
+        cancel = threading.Event()
+        started = time.time()
+        th = None
+        if study is not None:
+            def _work():
+                try:
+                    box["note"] = self._call_study(study, idea, brief, history,
+                                                   cancel)
+                except Exception as e:          # studying must never kill a run
+                    box["error"] = str(e)
+                finally:
+                    box["ended"] = time.time()
+
+            th = threading.Thread(target=_work, daemon=True,
+                                  name=f"study-{self.agent_id}")
+            th.start()
+
+        while True:
+            rec = self.evals.poll(ticket.id)
+            if rec.status in self._DONE:
+                break
+            if th is not None and not th.is_alive():
+                rec = self.evals.collect(ticket.id)   # nothing left but to wait
+                break
+            if (th is not None and not cancel.is_set()
+                    and time.time() - started > budget.study_timeout_s):
+                cancel.set()
+            self.evals.collect(ticket.id, timeout_s=self.COLLECT_POLL_S)
+        arrived = time.time()
+
+        if th is None:
+            return rec, arrived - started
+
+        # Read before we set it: a flag already set here means the study ran
+        # past `study_timeout_s`, which is a different fact about the agent
+        # than a study the result overtook.
+        capped = cancel.is_set()
+        cut_short = th.is_alive()
+        if cut_short:
+            cancel.set()
+            th.join(timeout=self.STUDY_JOIN_S)
+        note = str(box.get("note") or "")
+        why = "study budget spent" if capped else "result arrived"
+        if cut_short:
+            note = (note + f"\n\n(cut short: {why})").strip()
+        if note:
+            self._append(trace, Turn(kind="thought", name="study", content=note,
+                                     data={"cut_short": cut_short,
+                                           "cut_short_why": why if cut_short else ""}),
+                         since=started, phase="study", call=True)
+        elif box.get("error"):
+            self._append(trace, Turn(kind="error", name="study",
+                                     content=str(box["error"])),
+                         since=started, phase="study", call=True)
+        # `ended` missing means the thread is still running, i.e. the agent is
+        # busy and owes nothing to idle.
+        return rec, max(0.0, arrived - box.get("ended", arrived))
+
+    def _call_study(self, study, idea: Idea, brief: Brief,
+                    history: tuple[Attempt, ...], cancel: threading.Event) -> str:
+        """Hand the cancel flag only to a proposer that takes one.
+
+        Checked by signature rather than by catching TypeError: a TypeError
+        raised *inside* a study would otherwise look like a signature mismatch
+        and run the whole call a second time.
+        """
+        try:
+            accepts = "cancel" in inspect.signature(study).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        if accepts:
+            return study(self.workspace, idea, brief, history, cancel=cancel)
+        return study(self.workspace, idea, brief, history)
 
     # ── guards and bookkeeping ───────────────────────────────────────────
     def divergence(self, idea: Idea, attempt: Attempt) -> float:
