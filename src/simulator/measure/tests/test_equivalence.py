@@ -316,3 +316,14 @@ def test_a_run_that_wrote_nothing_is_not_read_as_equivalent(root, monkeypatch):
     monkeypatch.setattr(Simulator, "workbench", workbench)
     rec = asyncio.run(E.measure(Simulator(root_dir=root)))
     assert not rec["ok"] and "wrote nothing" in rec["error"]
+
+
+def test_scoring_script_guards_main_for_spawned_workers():
+    """sglang.Engine spawns its scheduler, which re-imports the script; the
+    first reference run died on exactly this."""
+    from simulator.measure import equivalence as eq
+
+    src = eq.build_script("Qwen/Qwen3.8-27B-FP8", mode="reference", out_path="/results/x.json")
+    assert 'if __name__ == "__main__":' in src
+    assert src.rstrip().endswith("raise SystemExit(main())")
+    compile(src, "script.py", "exec")

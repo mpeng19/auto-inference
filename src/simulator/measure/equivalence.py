@@ -248,7 +248,12 @@ def main():
     return 0
 
 
-raise SystemExit(main())
+# Guarded because sglang.Engine starts its scheduler with the "spawn" start
+# method, which re-imports this script in the child; an unguarded call would
+# try to start a second engine from inside the first and multiprocessing
+# refuses ("_check_not_importing_main"). Cost us one reference run.
+if __name__ == "__main__":
+    raise SystemExit(main())
 '''
 
 
