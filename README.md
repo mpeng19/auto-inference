@@ -160,6 +160,26 @@ agents see the index in their prompt. A claimed win at full tier is measured
 twice and the worse run kept, because a level sitting on the SLO line passes
 or fails on noise (`docs/NEXT.md`, "What the first night found").
 
+**Reading a run.** The TUI has two tabs: `fleet` (who is doing what, with
+each agent's last price, its rank on the OpenRouter board and the market
+share one node serves at it) and `results` (every experiment, best first,
+with its diff and verdict). Press `a` to ask a question about the run; the
+answer comes from Claude Fable 5.1 over the API, reading the leaderboard,
+the best diffs and the manager's tools as cached context. The same two views
+exist as commands:
+
+```bash
+harness --session build-1 results --diff       # best first; the best diff
+harness --session build-1 ask "which attempt touched the attention backend, and what happened?"
+```
+
+**The launch line is the candidate's too.** An agent writes `serving.json`
+beside its code -- chunk size, memory fraction, scheduler policy, any extra
+server flag or environment variable; only the model, GPU count and the
+metrics switch are locked -- and it is hashed into the experiment, validated
+by preflight and applied when the server starts. Stock's launch line stays
+the baseline.
+
 **Tools agents can call.** An agent's feedback loop is otherwise one bit every
 25–60 minutes. These put signal in front of that:
 

@@ -89,3 +89,65 @@ async def test_it_survives_an_empty_store(tmp_path):
         await pilot.pause()
         await pilot.pause()
         assert "no session" in app.summary_text.lower()
+
+
+async def test_results_tab_lists_experiments_and_answers_questions(tmp_path, monkeypatch):
+    """The results tab reads memory.db under the session's root, best first,
+    and the ask box hands the question to the run's Asker."""
+    from harness.contracts import Experiment
+    from harness.memory import SqliteMemory
+    from harness.tui import app as app_mod
+
+    root = tmp_path / "agents" / "demo"
+    root.mkdir(parents=True)
+    m = SqliteMemory(root / "memory.db")
+    base = {"bill_per_1k": 12.23}
+    m.record(Experiment(agent_id="a00", idea_id="i1", verdict="win",
+                        hypothesis="fused decode attention", summary="-14%",
+                        metrics={"bill_per_1k": 10.5, "rank_bill": 3, "rank_of": 12,
+                                 "share_per_node": 0.005}, baseline_metrics=base))
+    m.record(Experiment(agent_id="a01", idea_id="i2", verdict="neutral",
+                        hypothesis="widen lpm cutoff", summary="+0.6%",
+                        metrics={"bill_per_1k": 12.3}, baseline_metrics=base))
+    s = SqliteSessionStore(tmp_path / "s.db")
+    v = SessionView(session_id="demo", phase="running", started_at=1.0, pid=1,
+                    root=str(root), target_agents=1,
+                    agents=(AgentView("a00", status="thinking", idea_title="x",
+                                      last_bill_per_1k=10.5, last_rank="3/12",
+                                      last_share_pct=0.5),))
+    s.create(v)
+    s.publish(v)
+
+    class FakeAsker:
+        def __init__(self, root, **kw):
+            self.root = root
+            self.last_usage = {"input": 10, "output": 5, "cache_read": 0}
+
+        def ask(self, q):
+            return f"about {pathlib.Path(self.root).name}: {q}"
+
+    import pathlib
+
+    import harness.ask
+    monkeypatch.setattr(harness.ask, "Asker", FakeAsker)
+    app = app_mod.FleetApp(s, "demo")
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        table = app.query_one("#table")
+        assert table.row_count == 1
+        await pilot.press("tab")
+        await pilot.pause()
+        results = app.query_one("#results")
+        assert results.row_count == 2
+        assert app.results_text.splitlines()[0].startswith("win -14.1")
+        await pilot.press("a")
+        await pilot.pause()
+        for ch in "why":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        for _ in range(20):
+            await pilot.pause()
+            if "about demo: why" in app.answer_text:
+                break
+        assert "about demo: why" in app.answer_text

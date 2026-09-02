@@ -279,6 +279,49 @@ def cmd_ideas(a) -> int:
     return 2
 
 
+# ── results and questions ────────────────────────────────────────────────
+
+def _root_of(a) -> str:
+    """The fleet root: `--root`, else the named or latest session's root."""
+    if getattr(a, "root", ""):
+        return a.root
+    v = _store(a).read(a.session or "")
+    if v is None or not v.root:
+        raise SystemExit("no fleet root: pass --root or --session")
+    return v.root
+
+
+def cmd_results(a) -> int:
+    from . import results as rs
+
+    root = _root_of(a)
+    rows = rs.leaderboard(root)
+    if a.json:
+        from dataclasses import asdict
+        print(json.dumps([asdict(r) for r in rows], indent=1))
+        return 0
+    print(rs.summary_text(root, k=a.k))
+    if a.diff and rows:
+        best = next((r for r in rows if r.delta_pct is not None), rows[0])
+        print(f"\ndiff for {best.experiment_id}:\n")
+        print(rs.diff_for(root, best) or "(no diff recorded)")
+    return 0
+
+
+def cmd_ask(a) -> int:
+    """One question about a run, answered from its data by Claude over the
+    API. `--model` defaults to Claude Fable 5.1."""
+    from .ask import Asker
+
+    asker = Asker(_root_of(a), model=a.model)
+    print(asker.ask(a.question))
+    u = asker.last_usage
+    if u:
+        print(f"\n[{u.get('input', 0):,} in, {u.get('output', 0):,} out, "
+              f"{u.get('cache_read', 0):,} cached]", file=sys.stderr)
+    return 0
+
+
 # ── traces ───────────────────────────────────────────────────────────────
 
 def cmd_traces(a) -> int:
@@ -391,6 +434,19 @@ def main(argv: list[str] | None = None) -> int:
     tl.add_argument("-k", type=int, default=8)
     tl.add_argument("--json", action="store_true")
     tl.set_defaults(fn=cmd_tool)
+
+    rz = sub.add_parser("results", help="what the run found, best first")
+    rz.add_argument("--root", default="", help="fleet root (default: the session's)")
+    rz.add_argument("-k", type=int, default=12)
+    rz.add_argument("--diff", action="store_true", help="print the best result's diff")
+    rz.add_argument("--json", action="store_true")
+    rz.set_defaults(fn=cmd_results)
+
+    ask = sub.add_parser("ask", help="ask Claude a question about a run")
+    ask.add_argument("question")
+    ask.add_argument("--root", default="", help="fleet root (default: the session's)")
+    ask.add_argument("--model", default="claude-fable-5-1")
+    ask.set_defaults(fn=cmd_ask)
 
     ideas = sub.add_parser("ideas", help="the idea bank: fill it, inspect it")
     ideas.add_argument("action", choices=["list", "show", "search", "import", "release",
