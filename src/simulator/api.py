@@ -42,6 +42,13 @@ from .workload.tracelab import MARKET_IN_PER_REQ, MARKET_OUT_PER_REQ
 
 APP_NAME = "auto-inference"
 
+# How much longer than the script's own timeout the Modal call is allowed to
+# take: pulling the image, starting the container, applying the stack. The
+# engine load is *not* in here -- it happens inside the script and so comes out
+# of `timeout_s`, which is why anything loading an engine needs a generous one
+# (3-5 minutes before the first line of the caller's own work runs).
+WORKBENCH_OVERHEAD_S = 900
+
 
 # ── results ──────────────────────────────────────────────────────────────
 
@@ -397,6 +404,81 @@ class Simulator:
     async def eval(self) -> EvalResult:
         """Submit, wait, analyse, write artifacts. The one call most callers want."""
         return await self.collect(await self.submit_async())
+
+    # ── the workbench: a GPU without a sweep ─────────────────────────────
+    def _workbench_fn(self, timeout_s: int):
+        import modal
+        # The deployed shape is already H100 + WORKBENCH_VCPU; only the ceiling
+        # moves, and it has to clear the script's own timeout with room for
+        # everything around it (`WORKBENCH_OVERHEAD_S`), or Modal would kill
+        # the container while the script still had time on the clock.
+        return modal.Function.from_name(APP_NAME, "workbench").with_options(
+            timeout=int(timeout_s) + WORKBENCH_OVERHEAD_S)
+
+    async def workbench(self, script_text: str, files: dict[str, str] | None = None,
+                        timeout_s: int = 600) -> dict:
+        """Run one script on an H100 against this stack, and keep what it said.
+
+        The inner loop for kernel work. A sweep prices a stack and takes 17-35
+        minutes; this asks whether the kernel compiles, whether it is faster,
+        whether it still computes the same thing -- none of which need a load
+        generator, a market workload or a price.
+
+        `files` are helper text files (path relative to the script's directory
+        -> text) written beside the script, which is also the working
+        directory, so `import my_helper` resolves.
+
+        Every run gets its own `workbench-<n>/` under `root_dir`, written
+        before the call is spawned so a script that hangs still leaves the
+        script text and the call id behind for someone to look at.
+        """
+        d = self._workbench_dir()
+        (d / "script.py").write_text(script_text)
+        call = await self._workbench_fn(timeout_s).spawn.aio(
+            self.stack.as_dict(), script_text, int(timeout_s), dict(files or {}))
+        (d / "call_id").write_text(call.object_id)
+
+        deadline = time.time() + timeout_s + WORKBENCH_OVERHEAD_S
+        while True:
+            try:
+                rec = await call.get.aio(timeout=0)
+                break
+            except TimeoutError as e:
+                if time.time() > deadline:
+                    raise TimeoutError(
+                        f"workbench {call.object_id} still running after "
+                        f"{timeout_s + WORKBENCH_OVERHEAD_S}s") from e
+                await asyncio.sleep(5.0)
+
+        rec = dict(rec)
+        (d / "stdout.txt").write_text(rec.get("stdout") or "")
+        (d / "stderr.txt").write_text(rec.get("stderr") or "")
+        (d / "result.json").write_text(json.dumps(rec, indent=2, default=str))
+        rec["dir"] = str(d)
+        rec["artifacts"] = {n: str(d / f) for n, f in
+                            (("script", "script.py"), ("stdout", "stdout.txt"),
+                             ("stderr", "stderr.txt"), ("result", "result.json"))}
+        return rec
+
+    def _workbench_dir(self) -> pathlib.Path:
+        """The next free `workbench-<n>/`. Numbered, not stamped: an agent
+        iterating on one kernel wants them in the order it ran them."""
+        n = 0
+        while (self.root / f"workbench-{n}").exists():
+            n += 1
+        d = self.root / f"workbench-{n}"
+        d.mkdir()
+        return d
+
+    async def equivalence(self, **kw) -> dict:
+        """Is this stack computing the same thing stock computes?
+
+        The sharper half of the quality gate, for kernel work that GSM8K cannot
+        resolve. See `measure.equivalence`; runs on the workbench, so it costs
+        minutes rather than a sweep.
+        """
+        from .measure import equivalence as eq
+        return await eq.measure(self, **kw)
 
     # ── analysis, which needs no GPU ─────────────────────────────────────
     def analyse(self, record: dict) -> EvalResult:

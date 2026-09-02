@@ -142,12 +142,28 @@ a03    evaluating  queue ordering          1   -11.7    5.60  attempt 1: screen 
 harness tool recall "raise chunked prefill"    # what the fleet already tried
 harness tool roofline --batch 12               # predicted step time and $/M
 harness tool preflight --workspace agents/a01  # parse + undefined-name check
+harness tool gpu-run bench.py --workspace .    # one script on an H100, minutes
+harness tool equivalence --workspace .         # same model, token by token?
 ```
 
 `recall` matters most — memory is injected once per attempt, but an agent with
 a surprising result should be able to *ask*. `preflight` is the cheap half of
 an evaluation: a NameError costs six GPU-minutes to find on a GPU and nothing
 to find here.
+
+`gpu-run` is what makes kernel work possible. A Triton kernel has to be asked
+whether it compiles, how fast it is and whether it still computes the same
+numbers, and none of those questions has anything to do with a price — so
+paying 17–35 minutes and a whole sweep for each of them is why an agent doing
+kernel work would otherwise get one bit an hour. It applies the workspace's
+stack in a fresh H100 container, runs one script with helper files beside it,
+and hands back stdout, stderr, the exit code and `cost_usd`. The same two
+things from the product side:
+
+```bash
+simulate workbench   --root runs/k --stack k/ probe.py
+simulate equivalence --root runs/k --stack k/
+```
 
 **Traces.** Every agent run writes append-only JSONL, one turn per line, each
 line self-contained so `cat traces/*.jsonl | loader` loses nothing.
@@ -226,6 +242,23 @@ different model, not a subtle drift.
 `canary.py` still runs, but it digests six short outputs and would miss a
 subtle numerical degradation; this is the gate that catches it.
 
+**For kernels, GSM8K is still too blunt.** Accuracy is a coarse function of the
+logits — a rewritten attention kernel can move every one of them and still get
+the same 36 of 50 answers right. `measure/equivalence.py` measures the logits
+instead, teacher forced: greedy-generate 64 tokens per prompt on *stock* once,
+cache that reference on the results volume, then score the identical sequences
+under the candidate and compare the argmax and the logprob at every position.
+Two thousand paired numbers instead of fifty booleans, in ~5–8 GPU-minutes.
+
+```
+top-1 agreement 0.9994   |dlogprob| mean 0.0021 max 0.0184
+```
+
+The thresholds — 0.97 agreement, 0.05 mean drift — are **provisional**. FP8
+greedy decoding is not bitwise deterministic, so the floor is not zero and it
+has not been measured yet: run `simulate equivalence` with no `--stack` twice
+and set them from what comes back.
+
 Set `quality_suites=("gsm8k", "mmlu")` for both. MMLU is one token per item so
 it is cheap, but a single token is a weak per-item signal; GSM8K's multi-step
 reasoning compounds a small numerical error into a wrong answer, which is the
@@ -273,7 +306,7 @@ src/simulator/          the product
   workload/             request loading and sanitisation (TraceLab -> market mix)
   measure/              load generation, latency, server counters, canaries
   price/                GPU-seconds -> price -> market share
-  runner/               where a sweep executes (Modal, one entrypoint)
+  runner/               where a run executes (Modal: sweep, workbench)
   artifacts/            report and figures written into root_dir
   conftest.py           shared fixtures for every test below
   */tests/              tests live beside the service they test

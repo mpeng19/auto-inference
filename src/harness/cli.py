@@ -11,6 +11,8 @@
     harness tool recall "raise chunked prefill"   # what the fleet already knows
     harness tool preflight --workspace agents/a01 # cheap checks before a GPU
     harness tool roofline --batch 12              # predicted step time and cost
+    harness tool gpu-run bench.py                 # one script on an H100, minutes
+    harness tool equivalence                      # same model, token by token?
     harness traces list | show <id> | export      # the debugging record
 
 `start` is asynchronous by default because a fleet runs for hours and must
@@ -365,9 +367,17 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("tui", help="live dashboard").set_defaults(fn=cmd_tui)
 
     tl = sub.add_parser("tool", help="tools for agents (and for reading runs)")
-    tl.add_argument("action", choices=["recall", "preflight", "roofline"])
-    tl.add_argument("intent", nargs="?", default="", help="recall: what you are about to do")
-    tl.add_argument("--workspace", default=".", help="preflight: the agent directory")
+    tl.add_argument("action", choices=["recall", "preflight", "roofline",
+                                       "gpu-run", "equivalence"])
+    tl.add_argument("intent", nargs="?", default="",
+                    help="recall: what you are about to do; "
+                         "gpu-run: the script to run")
+    tl.add_argument("--workspace", default=".",
+                    help="the agent directory (preflight, gpu-run, equivalence)")
+    tl.add_argument("--timeout", type=int, default=0,
+                    help="gpu-run/equivalence: seconds the script itself gets; "
+                         "0 takes the tool's own default (600s, 1800s), which "
+                         "already allows for a 3-5 minute engine load")
     tl.add_argument("--context", type=int, default=20583)
     tl.add_argument("--batch", type=int, default=12)
     tl.add_argument("--model", default="Qwen/Qwen3.8-27B-FP8")

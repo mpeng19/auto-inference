@@ -7,6 +7,8 @@ signal in front of that, cheaply.
     harness tool recall "I am about to raise chunked_prefill_size"
     harness tool preflight --workspace agents/a01
     harness tool roofline --context 20583 --batch 12
+    harness tool gpu-run bench.py --workspace agents/a01
+    harness tool equivalence --workspace agents/a01
 
 `recall` matters most. The fleet's memory is injected into the prompt once per
 attempt, but an agent that gets a surprising result mid-task should be able to
@@ -21,12 +23,20 @@ actually importing the module.
 and a batch, what step time and cost per output token should follow, both from
 first principles and from what this stack actually measures. The gap between
 those two is the optimisation headroom (`docs/methodology.md` §8.3).
+
+`gpu_run` and `equivalence` are the two that make kernel work possible at all.
+Everything above is free and everything below a sweep was, until now, a sweep:
+17-35 minutes and a price. A Triton kernel needs to be asked whether it
+compiles, how fast it is, and whether it still computes the same numbers, and
+none of those questions has anything to do with a price. Both rent an H100 for
+minutes and cost real money -- `cost_usd` comes back with the answer.
 """
 from __future__ import annotations
 
 import json
 import pathlib
 import subprocess
+import sys
 from dataclasses import dataclass
 
 # Measured on the 1xH100 baseline at the marketplace's 20,583-token context.
@@ -177,6 +187,110 @@ def _ruff() -> list[str] | None:
     return [sys.executable, "-m", "ruff"] if probe.returncode == 0 else None
 
 
+# ── the GPU workbench: minutes of H100 instead of a sweep ────────────────
+
+def _workspace_stack(workspace: str | pathlib.Path | None, source=None):
+    """(stack, artifact root, note) for a workspace, or stock if there is none.
+
+    A workspace with **no edits is stock**, not an error. `Workspace.stack()`
+    refuses that case because for a sweep it would re-measure the baseline, but
+    here it is the thing an agent should do first: find out what stock's kernel
+    costs before writing a replacement for it. The note says which was run, so
+    a result is never silently about the wrong code.
+
+    A workspace that does not **parse** is refused. That is preflight's whole
+    argument -- a GPU is an expensive place to discover a syntax error.
+    """
+    from simulator import InferenceStack
+
+    if not workspace:
+        return InferenceStack.stock(), pathlib.Path.cwd(), "no workspace: stock sglang"
+    from harness.agent.workspace import Workspace
+
+    # `source` is injectable for the same reason `preflight`'s is: so this is
+    # testable without the real 1,600-module SGLang tree. The CLI never passes one.
+    ws = Workspace(workspace, source=source)
+    if not ws.touched():
+        return (InferenceStack.stock(), ws.root,
+                "workspace has no changes: ran stock sglang")
+    ok, why = ws.check()
+    if not ok:
+        raise ValueError(why)
+    return ws.stack(), ws.root, ""
+
+
+def gpu_run(script_path: str | pathlib.Path,
+            workspace: str | pathlib.Path | None = None,
+            timeout_s: int = 600, files: dict[str, str] | None = None,
+            source=None) -> dict:
+    """Run one python script on an H100, against this workspace's stack.
+
+    The inner loop kernel work needs. The script runs in a fresh container with
+    the candidate files written over the installed sglang, its working
+    directory to itself, and `files` (path -> text) beside it for helpers.
+    Whatever it printed comes back, along with what it cost.
+
+    Returns a report rather than raising, like `preflight`: an agent in a loop
+    needs the reason as data, and a missing script or an unparseable workspace
+    should not cost a GPU to discover.
+    """
+    import asyncio
+
+    p = pathlib.Path(script_path)
+    if not p.is_file():
+        return {"ok": False, "error":
+                f"no script at {p}. gpu_run runs a python file on the GPU; "
+                "write the file first, then give this its path."}
+    try:
+        stack, root, note = _workspace_stack(workspace, source)
+    except ValueError as e:
+        return {"ok": False, "error": f"workspace is not runnable: {e}"}
+
+    from simulator import Simulator
+
+    sim = Simulator(root_dir=root, stack=stack)
+    rec = asyncio.run(sim.workbench(p.read_text(), files=files,
+                                    timeout_s=timeout_s))
+    rec["script"] = str(p)
+    rec["stack_digest"] = stack.digest
+    if note:
+        rec["note"] = note
+    return rec
+
+
+def equivalence(workspace: str | pathlib.Path | None = None,
+                timeout_s: int = 1800, min_agreement: float | None = None,
+                max_mean_dlogprob: float | None = None, source=None) -> dict:
+    """Does this stack still compute what stock computes? Token by token.
+
+    The gate GSM8K is too blunt for. A rewritten attention kernel can move
+    every logit and still get the same 36 of 50 answers right; this scores
+    ~2,000 teacher-forced positions against a cached stock reference and
+    reports how far the distribution moved. See
+    `simulator.measure.equivalence` -- including why the thresholds are
+    provisional, and why the first run of a model pays for the reference.
+    """
+    import asyncio
+
+    try:
+        stack, root, note = _workspace_stack(workspace, source)
+    except ValueError as e:
+        return {"ok": False, "error": f"workspace is not runnable: {e}"}
+
+    from simulator import Simulator
+    from simulator.measure import equivalence as eq
+
+    sim = Simulator(root_dir=root, stack=stack)
+    rec = asyncio.run(eq.measure(
+        sim, timeout_s=timeout_s,
+        min_agreement=eq.MIN_AGREEMENT if min_agreement is None else min_agreement,
+        max_mean_dlogprob=(eq.MAX_MEAN_DLOGPROB if max_mean_dlogprob is None
+                           else max_mean_dlogprob)))
+    if note:
+        rec["note"] = note
+    return rec
+
+
 def recall(intent: str, root: str | pathlib.Path | None = None, k: int = 8,
            agent_id: str = "") -> dict:
     """Ask the fleet's memory what is already known about what you are doing."""
@@ -235,6 +349,46 @@ def main(action: str, args) -> int:
         print("\n  The KV term is the one a TPOT SLO turns into money: it is "
               "per-sequence,\n  so no batch size amortises it away.")
         return 0
+
+    if action == "gpu-run":
+        rep = gpu_run(args.intent, workspace=args.workspace or None,
+                      timeout_s=args.timeout or 600)
+        if args.json:
+            print(json.dumps(rep, indent=1, default=str))
+            return 0 if rep.get("ok") else 1
+        if "error" in rep and "exit_code" not in rep:
+            print(rep["error"], file=sys.stderr)
+            return 2
+        print(("OK" if rep.get("ok") else "FAILED")
+              + f"   exit {rep.get('exit_code')}   {rep.get('elapsed_s', 0)}s"
+              + f" on {rep.get('gpu', '?')}   ${rep.get('cost_usd', 0):.3f}")
+        if rep.get("note"):
+            print(f"  note: {rep['note']}")
+        if rep.get("stdout"):
+            print(rep["stdout"].rstrip())
+        if rep.get("stderr"):
+            print("--- stderr ---", file=sys.stderr)
+            print(rep["stderr"].rstrip(), file=sys.stderr)
+        print(f"artifacts: {rep.get('dir')}")
+        return 0 if rep.get("ok") else 1
+
+    if action == "equivalence":
+        rep = equivalence(workspace=args.workspace or None,
+                          timeout_s=args.timeout or 1800)
+        if args.json:
+            print(json.dumps(rep, indent=1, default=str))
+            return 0 if rep.get("ok") and not rep.get("regressed") else 1
+        if not rep.get("ok"):
+            print(f"NOT MEASURED: {rep.get('error', 'unknown')}", file=sys.stderr)
+            return 2
+        print(rep["stack"])
+        if rep.get("note"):
+            print(f"  note: {rep['note']}")
+        print(f"  {rep['summary']}")
+        print("  " + ("REGRESSION: " + rep["why"] if rep["regressed"]
+                      else "equivalent to stock within the provisional thresholds"))
+        print(f"  spent ${rep['cost_usd']:.3f}")
+        return 1 if rep["regressed"] else 0
 
     if action == "preflight":
         rep = preflight(args.workspace)

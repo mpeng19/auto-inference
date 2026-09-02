@@ -6,6 +6,14 @@
     simulate rescore --root runs/baseline --slo ttft:p99:1000,tpot:mean:20
     simulate ls
 
+    simulate workbench   --root runs/k --stack k/ probe.py   # one script, one GPU
+    simulate equivalence --root runs/k --stack k/            # same model or not?
+
+`workbench` and `equivalence` are the inner loop for kernel work: minutes and
+one script, rather than 25-60 minutes and a price. A kernel needs to be asked
+whether it compiles and whether it still computes the same thing long before it
+is worth asking what it costs to serve.
+
 `rescore` is the one worth knowing about: it re-judges and re-prices a stored
 sweep with no GPU at all, because every level keeps its full percentile set and
 its raw counters. Changing the SLO, the cost basis or the utilisation
@@ -20,6 +28,7 @@ import pathlib
 import sys
 
 from .api import Simulator
+from .measure import equivalence
 from .slo import MARKET_SLO, SLO
 from .stack import InferenceStack
 
@@ -87,6 +96,48 @@ def cmd_profile(a) -> int:
     return 0
 
 
+def cmd_workbench(sim: Simulator, a) -> int:
+    """Run one script on an H100 against a stack. Minutes, not a sweep.
+
+    The inner loop for kernel work: does it compile, is it faster, does it
+    still compute the same thing. Everything the script printed comes back, and
+    lands in `<root>/workbench-<n>/`.
+    """
+    script = pathlib.Path(a.script)
+    if not script.is_file():
+        print(f"no script at {script}", file=sys.stderr)
+        return 2
+    rec = asyncio.run(sim.workbench(script.read_text(), timeout_s=a.timeout))
+    print(("OK" if rec.get("ok") else "FAILED")
+          + f"   exit {rec.get('exit_code')}"
+          + f"   {rec.get('elapsed_s', 0)}s on {rec.get('gpu', '?')}"
+          + f"   ${rec.get('cost_usd', 0):.3f}")
+    if rec.get("stdout"):
+        print(rec["stdout"], end="" if rec["stdout"].endswith("\n") else "\n")
+    if rec.get("stderr"):
+        print("--- stderr ---", file=sys.stderr)
+        print(rec["stderr"], file=sys.stderr)
+    print(f"artifacts: {rec.get('dir')}")
+    return 0 if rec.get("ok") else 1
+
+
+def cmd_equivalence(sim: Simulator, a) -> int:
+    """Token-level equivalence against stock: the gate GSM8K is too blunt for."""
+    rec = asyncio.run(sim.equivalence(timeout_s=a.timeout,
+                                      min_agreement=a.min_agreement,
+                                      max_mean_dlogprob=a.max_mean_dlogprob))
+    if not rec.get("ok"):
+        print(f"NOT MEASURED: {rec.get('error', 'unknown')}", file=sys.stderr)
+        print(f"  spent ${rec.get('cost_usd', 0):.3f}", file=sys.stderr)
+        return 1
+    print(f"{sim.stack.describe()}")
+    print(f"  {rec['summary']}")
+    print(f"  {'REGRESSION: ' + rec['why'] if rec['regressed'] else 'equivalent'}")
+    print(f"  reference  {rec['reference_path']}")
+    print(f"  spent      ${rec['cost_usd']:.3f}")
+    return 1 if rec["regressed"] else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="simulate", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -122,6 +173,19 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("rescore", help="re-judge a stored sweep, no GPU")
     common(r)
     r.add_argument("--sweep", default="", help="defaults to <root>/sweep.json")
+    w = sub.add_parser("workbench", help="run one script on a GPU against a stack")
+    common(w)
+    w.add_argument("script", help="a python file to run in the container")
+    w.add_argument("--timeout", type=int, default=600,
+                   help="seconds the script itself gets (an engine load is 3-5 min)")
+    e = sub.add_parser("equivalence",
+                       help="token-level equivalence against stock, no sweep")
+    common(e)
+    e.add_argument("--timeout", type=int, default=1800)
+    e.add_argument("--min-agreement", dest="min_agreement", type=float,
+                   default=equivalence.MIN_AGREEMENT)
+    e.add_argument("--max-mean-dlogprob", dest="max_mean_dlogprob", type=float,
+                   default=equivalence.MAX_MEAN_DLOGPROB)
     pr = sub.add_parser("profile", help="download and ingest a captured GPU profile")
     pr.add_argument("--dir", required=True, help="profile dir from the sweep record")
     pr.add_argument("--out", default="profiles", help="local destination")
@@ -137,7 +201,17 @@ def main(argv: list[str] | None = None) -> int:
             print(n)
         return 0
 
+    # `profile` names a captured directory, not a run: it has none of the
+    # options `_build` needs and building a Simulator for it raised
+    # AttributeError instead of downloading anything.
+    if a.cmd == "profile":
+        return cmd_profile(a)
+
     sim = _build(a)
+    if a.cmd == "workbench":
+        return cmd_workbench(sim, a)
+    if a.cmd == "equivalence":
+        return cmd_equivalence(sim, a)
     if a.cmd == "submit":
         cid = sim.submit()
         print(f"submitted  {cid}")

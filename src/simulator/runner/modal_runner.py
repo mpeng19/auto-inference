@@ -393,3 +393,196 @@ def ls(limit: int = 40) -> list[str]:
     if not os.path.isdir(d):
         return []
     return sorted(os.listdir(d))[-limit:]
+
+
+# The workbench is not a sweep, so it does not need the sweep's 16 vCPUs:
+# there is no load generator to feed, just one script driving one engine.
+# **vCPUs are billed on top of the GPU** ($0.1368/core-hour, see
+# `costs.container_rate`), so twelve idle cores would be $1.64/hour of nothing
+# on top of the H100 -- about a fifth of the bill for doing no work.
+WORKBENCH_VCPU = 4.0
+
+
+@app.function(
+    image=image, gpu="H100", cpu=WORKBENCH_VCPU,
+    volumes={"/cache": hf_cache, "/results": results_vol},
+    secrets=_hf_secret(),
+    # The ceiling, not the budget: `timeout_s` is what the script actually
+    # gets. Generous because an engine load is 3-5 minutes before a kernel
+    # script has run a single line.
+    timeout=2 * 60 * 60,
+)
+def workbench(stack: dict, script: str, timeout_s: int = 600,
+              files: dict[str, str] | None = None) -> dict:
+    """Run one script on an H100 against a candidate stack.
+
+    A sweep answers one question -- what does this cost to serve -- and takes
+    17-35 minutes to do it. Kernel work asks different questions: does this
+    Triton kernel compile, is it faster than the one it replaces, does it
+    produce the same numbers. None of those need a load generator, a market
+    workload or a price, and paying half an hour for each of them is why an
+    agent doing kernel work would otherwise get one bit an hour.
+
+    So: apply the stack the same way a sweep does, run a script, hand back what
+    it printed. `files` are extra helper text files (path -> text) written
+    beside the script; the script runs with them as its working directory, so
+    `import my_helper` works.
+
+    Returns a dict rather than raising, including when the stack is refused or
+    the script times out. A caller in a search loop needs the reason as data.
+    """
+    import os
+    import shutil
+
+    from simulator.stack import InferenceStack, sglang_root
+
+    t0 = time.perf_counter()
+    st = InferenceStack.from_dict(stack)
+    out: dict = {"ok": False, "exit_code": None, "stdout": "", "stderr": "",
+                 "elapsed_s": 0.0, "gpu": _gpu_name(), "stack": {}}
+
+    try:
+        # Restores stock first, then writes the candidate over it -- the same
+        # call the sweep makes, so a workbench result and a sweep result are
+        # about the same code.
+        out["stack"] = st.apply()
+        print("stack:", st.describe(), flush=True)
+    except Exception as e:
+        out["stderr"] = f"STACK REFUSED: {type(e).__name__}: {e}"
+        print(out["stderr"], flush=True)
+        return _bill(out, t0)
+
+    scratch = pathlib.Path(f"/tmp/workbench-{int(time.time() * 1000)}")
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True)
+    try:
+        out["files"] = _write_helpers(scratch, files or {})
+    except ValueError as e:
+        out["stderr"] = str(e)
+        return _bill(out, t0)
+    entry = scratch / "script.py"
+    entry.write_text(script)
+
+    # `import sglang` must reach the package `apply()` just wrote over, not
+    # some copy. Naming site-packages explicitly says so; the guard in
+    # `_write_helpers` covers the other end, since Python puts the script's own
+    # directory ahead of PYTHONPATH.
+    env = dict(os.environ)
+    site = str(sglang_root().parent)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [site, env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+    env.setdefault("SGLANG_ENABLE_METRICS_DEVICE_TIMER", "1")
+
+    # Containers are reused between calls, so a warm one can be holding a
+    # snapshot of /results taken before another container wrote to it. That is
+    # exactly the equivalence reference's shape -- written by one run, read by
+    # the next -- and the failure it produces is an intermittent "the reference
+    # is not there" that looks like anything but a stale mount.
+    with contextlib.suppress(Exception):
+        results_vol.reload()
+
+    s0 = time.perf_counter()
+    try:
+        r = subprocess.run(["python", str(entry)], cwd=str(scratch), env=env,
+                           capture_output=True, text=True, timeout=timeout_s)
+        out["exit_code"], out["stdout"], out["stderr"] = r.returncode, r.stdout, r.stderr
+        out["ok"] = r.returncode == 0
+    except subprocess.TimeoutExpired as e:
+        out["exit_code"] = -1
+        out["stdout"] = (e.stdout or b"").decode(errors="replace") \
+            if isinstance(e.stdout, bytes) else (e.stdout or "")
+        out["stderr"] = ((e.stderr or b"").decode(errors="replace")
+                         if isinstance(e.stderr, bytes) else (e.stderr or "")) \
+            + f"\nTIMEOUT: the script did not finish within {timeout_s}s"
+    out["elapsed_s"] = round(time.perf_counter() - s0, 2)
+    # Anything the script wrote under /results is only durable once committed;
+    # `equivalence` depends on this to cache its reference across containers.
+    with contextlib.suppress(Exception):
+        results_vol.commit()
+
+    # Tails, not the whole log: a Triton autotune run prints megabytes, and the
+    # useful part of a failure is always at the end.
+    out["stdout"], out["stderr"] = out["stdout"][-20000:], out["stderr"][-20000:]
+    print(f"script exited {out['exit_code']} after {out['elapsed_s']}s", flush=True)
+    return _bill(out, t0)
+
+
+def _bill(out: dict, t0: float) -> dict:
+    """Attach what this container cost us, at Modal's retail rate.
+
+    Billed on the whole function -- applying the stack and committing the
+    volume are container-seconds too -- not on `elapsed_s`, which is the
+    script alone. It still undercounts by the container start and image pull,
+    which Modal bills and we cannot see from in here.
+    """
+    from simulator import costs
+
+    out["container_s"] = round(time.perf_counter() - t0, 2)
+    out["cost_usd"] = round(
+        out["container_s"] * costs.container_rate("H100", 1, vcpu=WORKBENCH_VCPU)
+        / 3600.0, 4)
+    return out
+
+
+def _gpu_name() -> str:
+    try:
+        return subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            text=True).strip().splitlines()[0]
+    except Exception as e:
+        return f"unavailable: {e}"
+
+
+def _write_helpers(scratch: pathlib.Path, files: dict[str, str]) -> list[str]:
+    """Write the helper files, refusing the two ways they can lie.
+
+    A path escaping the scratch directory would write over the container, and
+    anything called `sglang` there would shadow the applied package -- Python
+    puts the script's own directory at the front of `sys.path`, ahead of the
+    PYTHONPATH that names site-packages. Both fail loudly rather than producing
+    a run that measures something other than the stack.
+    """
+    root = scratch.resolve()
+    written = []
+    for rel, text in sorted(files.items()):
+        if rel.split("/")[0].split(".")[0] == "sglang":
+            raise ValueError(
+                f"helper file {rel!r} would shadow the applied sglang package; "
+                "name it something else")
+        p = (scratch / rel).resolve()
+        if not str(p).startswith(str(root) + os.sep):
+            raise ValueError(f"helper file {rel!r} escapes the scratch directory")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        written.append(rel)
+    return written
+
+
+@app.function(image=image, volumes={"/results": results_vol}, timeout=600)
+def read_results(paths: list[str]) -> dict:
+    """Read JSON files off the results volume, by path. One call, many files.
+
+    `workbench` caps stdout at 20 KB, which is the right size for a script's
+    log and an order of magnitude too small for a teacher-forced scoring run
+    (2,000 positions x three numbers). Those land on the volume, and this is
+    how they come back -- including the equivalence reference, which is
+    computed once and then read by every candidate after it.
+    """
+    import os
+
+    results_vol.reload()          # another container wrote these, not this one
+    out: dict = {}
+    for p in paths:
+        full = p if p.startswith("/results/") else f"/results/{p.lstrip('/')}"
+        if os.path.commonpath(["/results", os.path.realpath(full)]) != "/results":
+            out[p] = {"ok": False, "error": "path escapes /results"}
+            continue
+        if not os.path.isfile(full):
+            out[p] = {"ok": False, "error": "not found"}
+            continue
+        try:
+            with open(full) as f:
+                out[p] = {"ok": True, "json": json.load(f)}
+        except Exception as e:
+            out[p] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return out
