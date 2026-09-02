@@ -56,6 +56,17 @@ def test_per_request_limits_are_the_loosest_bound():
     assert SLO(bounds=MARKET_SLO).per_request_limits() == (2818.0, 25.0)
 
 
+def test_one_straggler_does_not_reject_a_level():
+    """The 1xH100 baseline of 2026-09-02: N=8 passed every percentile bound
+    with 30% headroom and was rejected because 1 of 37 requests ran over.
+    0.99 cannot be measured from 37 samples; the floor is the 0.90 that a p90
+    bound already implies."""
+    level = {"ttft_ms": {"p90": 563.0, "n": 37}, "tpot_ms": {"mean": 16.9, "p90": 17.7},
+             "good_frac": 36 / 37, "n_failed": 0}
+    assert SLO(bounds=MARKET_SLO).judge(level).ok
+    assert not SLO(bounds=MARKET_SLO).judge({**level, "good_frac": 0.5}).ok
+
+
 def test_roundtrip_through_dict():
     s = SLO.parse("ttft:p95:1500,tpot:p90:25")
     assert SLO.from_dict(s.as_dict()).describe() == s.describe()

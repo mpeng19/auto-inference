@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--model", default="Qwen/Qwen3.8-27B-FP8")
         p.add_argument("--gpu", default="H100")
         p.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
-        p.add_argument("--levels", default="", help="e.g. 1,2,4,8,16,32")
+        p.add_argument("--levels", default="", help="e.g. 4,8,12,16,24")
         p.add_argument("--seconds", type=float, default=120.0)
         p.add_argument("--repeats", type=int, default=1)
         p.add_argument("--slo", default="", help="ttft:p90:2818,tpot:mean:20")

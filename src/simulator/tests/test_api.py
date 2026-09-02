@@ -145,8 +145,9 @@ def test_good_frac_is_a_runtime_gate_not_a_rescoring_one(root, sweep):
     """It was computed against the SLO the sweep ran with and cannot be
     recovered offline, so a rescore that relaxes the bounds can still be held
     back by it. Documented in SLO.judge; asserted here so it stays known."""
-    loose = sim(root, slo=SLO.parse("tpot:mean:9999"))
-    assert loose.analyse(sweep).n_star == 16      # N=24 held back by good_frac
+    strict = sim(root, slo=SLO(bounds=SLO.parse("tpot:mean:9999").bounds,
+                               min_good_frac=0.99))
+    assert strict.analyse(sweep).n_star == 16     # N=24 held back by good_frac
     free = sim(root, slo=SLO(bounds=SLO.parse("tpot:mean:9999").bounds,
                              min_good_frac=0.0))
     assert free.analyse(sweep).n_star == 24

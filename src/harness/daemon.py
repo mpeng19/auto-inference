@@ -45,8 +45,8 @@ class FleetConfig:
     gpu: str = "H100"
     n_gpu: int = 1
     sim_model: str = "Qwen/Qwen3.8-27B-FP8"
-    levels: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
-    screen_levels: tuple[int, ...] = (4, 8)
+    levels: tuple[int, ...] = (4, 8, 12, 16, 24)
+    screen_levels: tuple[int, ...] = (8, 12)
     seconds_per_level: float = 120.0
     screen_seconds: float = 60.0
     baseline: dict = field(default_factory=dict)
@@ -61,8 +61,8 @@ class FleetConfig:
     @classmethod
     def load(cls, path) -> FleetConfig:
         d = json.loads(pathlib.Path(path).read_text())
-        d["levels"] = tuple(d.get("levels") or (1, 2, 4, 8, 16, 32))
-        d["screen_levels"] = tuple(d.get("screen_levels") or (4, 8))
+        d["levels"] = tuple(d.get("levels") or (4, 8, 12, 16, 24))
+        d["screen_levels"] = tuple(d.get("screen_levels") or (8, 12))
         d["seeds"] = tuple(d.get("seeds") or ())
         return cls(**d)
 

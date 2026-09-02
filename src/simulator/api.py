@@ -192,7 +192,10 @@ class Simulator:
     # per token and throughput all move with the ratio of one level to the
     # next, not the difference. A linear sweep spends most of its GPU time
     # re-measuring the same regime.
-    levels: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
+    # Bracket the 1xH100 frontier (N* ~ 12 on market traffic) with a step fine
+    # enough to register a shift of it. Below 4 users a 120 s level completes
+    # ~3 requests and measures nothing.
+    levels: tuple[int, ...] = (4, 8, 12, 16, 24)
     seconds_per_level: float = 120.0
     repeats: int = 1
     n_sessions: int = 300

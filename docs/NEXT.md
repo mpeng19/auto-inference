@@ -30,7 +30,7 @@ failure is attributable.
 ```bash
 mkdir -p runs/baseline-2026-09-02
 uv run simulate run --root runs/baseline-2026-09-02 \
-  --levels 1,2,4,8,16,32 --seconds 120 --n-gpu 1
+  --levels 4,8,12,16,24 --seconds 120 --n-gpu 1
 ```
 
 Check, in order:

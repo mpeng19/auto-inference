@@ -89,7 +89,14 @@ class Verdict:
 class SLO:
     """A set of bounds, all of which must hold, plus an error floor."""
     bounds: tuple[Bound, ...] = MARKET_SLO
-    min_good_frac: float = 0.99
+    # A blow-up detector, not a second SLO. The per-request test uses the
+    # loosest bound on each metric (see per_request_limits), and a p90 bound
+    # already tolerates 10% of requests over that limit -- so 0.90 is the floor
+    # the percentile bounds imply, and anything below it is stragglers the
+    # percentiles cannot see (joint TTFT+TPOT misses, or collapse). 0.99 was
+    # wrong: one straggler in 37 completions rejected a level whose p90 sat
+    # 30% inside its limit, and 0.99 is unmeasurable below ~100 samples.
+    min_good_frac: float = 0.90
     max_failed: int = 0
 
     @classmethod
@@ -162,5 +169,5 @@ class SLO:
     def from_dict(cls, d: dict) -> SLO:
         return cls(bounds=tuple(Bound(x["metric"], x["stat"], x["limit_ms"],
                                       x.get("note", "")) for x in d["bounds"]),
-                   min_good_frac=d.get("min_good_frac", 0.99),
+                   min_good_frac=d.get("min_good_frac", 0.90),
                    max_failed=d.get("max_failed", 0))
