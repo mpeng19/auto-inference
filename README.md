@@ -135,6 +135,31 @@ a00    evaluating  prefill chunking        3   -10.3    2.60  attempt 3: full ru
 a03    evaluating  queue ordering          1   -11.7    5.60  attempt 1: screen running; studying meanwhile
 ```
 
+**Tools agents can call.** An agent's feedback loop is otherwise one bit every
+25–60 minutes. These put signal in front of that:
+
+```bash
+harness tool recall "raise chunked prefill"    # what the fleet already tried
+harness tool roofline --batch 12               # predicted step time and $/M
+harness tool preflight --workspace agents/a01  # parse + undefined-name check
+```
+
+`recall` matters most — memory is injected once per attempt, but an agent with
+a surprising result should be able to *ask*. `preflight` is the cheap half of
+an evaluation: a NameError costs six GPU-minutes to find on a GPU and nothing
+to find here.
+
+**Traces.** Every agent run writes append-only JSONL, one turn per line, each
+line self-contained so `cat traces/*.jsonl | loader` loses nothing.
+`docs/trace-schema.md` is the spec a downstream profile database can build
+against.
+
+```bash
+harness traces list                       # what exists, by session and agent
+harness traces show <id> --kind eval_submit --full
+harness traces export --out DIR           # + a manifest with line counts
+```
+
 An agent's whole interface to the code is a `Workspace`:
 
 ```python
