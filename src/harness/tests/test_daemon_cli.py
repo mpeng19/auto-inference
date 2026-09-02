@@ -152,3 +152,20 @@ def test_cli_waits_for_a_live_session(tmp_path, capsys):
         assert "target 3" in capsys.readouterr().out
     finally:
         t.join()
+
+
+def test_agents_use_the_subscription_not_an_api_key(monkeypatch):
+    """Claude Code prefers an API key over the subscription when both are set.
+
+    A real fleet run printed "claude.ai connectors are disabled because
+    ANTHROPIC_API_KEY ... takes precedence" before every call -- i.e. it was
+    quietly billing the API. The key is stripped unless asked for.
+    """
+    from harness.agent.claude_code import ClaudeCodeProposer
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-leak")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
+    assert "ANTHROPIC_API_KEY" not in ClaudeCodeProposer()._env()
+    assert "ANTHROPIC_BASE_URL" not in ClaudeCodeProposer()._env()
+    assert ClaudeCodeProposer(use_api_key=True)._env()["ANTHROPIC_API_KEY"] \
+        == "sk-should-not-leak"

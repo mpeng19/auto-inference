@@ -8,6 +8,11 @@
     harness stop                       # graceful: finish paid work, then wind up
     harness kill                       # flat: everything, now
 
+    harness tool recall "raise chunked prefill"   # what the fleet already knows
+    harness tool preflight --workspace agents/a01 # cheap checks before a GPU
+    harness tool roofline --batch 12              # predicted step time and cost
+    harness traces list | show <id> | export      # the debugging record
+
 `start` is asynchronous by default because a fleet runs for hours and must
 outlive the terminal that launched it. Everything after it talks to the session
 store, so the CLI and the TUI are just two clients of the same interface and
@@ -186,6 +191,49 @@ def _pid_from_disk(a, v) -> int:
     return int(f.read_text().strip()) if f.is_file() else 0
 
 
+def cmd_tool(a) -> int:
+    from . import tools
+    return tools.main(a.action, a)
+
+
+# ── traces ───────────────────────────────────────────────────────────────
+
+def cmd_traces(a) -> int:
+    from . import traces
+
+    if a.action == "list":
+        found = traces.find(a.root or None, session_id=a.session)
+        if not found:
+            print("no traces found", file=sys.stderr)
+            return 1
+        print(f"{'trace':<20}{'agent':<7}{'turns':>6}{'dur':>7}{'$':>7}  outcome")
+        for t in found[:a.limit]:
+            print(f"{t.trace_id:<20}{t.agent_id:<7}{t.n_turns:>6}"
+                  f"{t.duration_s:>6.0f}s{t.cost_usd:>7.2f}  {t.outcome}")
+        return 0
+
+    if a.action == "show":
+        found = [t for t in traces.find(a.root or None)
+                 if t.trace_id == a.trace_id or t.trace_id.startswith(a.trace_id)]
+        if not found:
+            print(f"no trace matching {a.trace_id!r}", file=sys.stderr)
+            return 1
+        kinds = tuple(k for k in (a.kind or "").split(",") if k)
+        for r in traces.read(found[0].path, kinds=kinds, query=a.query,
+                             limit=a.limit):
+            head = f"{r['seq']:>4} {r['kind']:<13}{(r.get('name') or '')[:16]:<17}"
+            body = (r.get("content") or "").replace("\n", " ")
+            print(head + body[:a.width])
+            if a.full and r.get("data"):
+                print(" " * 22 + json.dumps(r["data"], default=str)[:2000])
+        return 0
+
+    m = traces.export(a.out, a.root or None, session_id=a.session)
+    print(f"exported {m['traces']} traces, {m['lines']} lines -> {a.out}")
+    print(f"manifest: {pathlib.Path(a.out) / 'manifest.json'}")
+    return 0
+
+
 def cmd_tui(a) -> int:
     from .tui import run_tui
     return run_tui(store=_store(a), session_id=a.session)
@@ -232,6 +280,32 @@ def main(argv: list[str] | None = None) -> int:
     ls.set_defaults(fn=cmd_sessions)
 
     sub.add_parser("tui", help="live dashboard").set_defaults(fn=cmd_tui)
+
+    tl = sub.add_parser("tool", help="tools for agents (and for reading runs)")
+    tl.add_argument("action", choices=["recall", "preflight", "roofline"])
+    tl.add_argument("intent", nargs="?", default="", help="recall: what you are about to do")
+    tl.add_argument("--workspace", default=".", help="preflight: the agent directory")
+    tl.add_argument("--context", type=int, default=20583)
+    tl.add_argument("--batch", type=int, default=12)
+    tl.add_argument("--model", default="Qwen/Qwen3.8-27B-FP8")
+    tl.add_argument("--gpu", default="H100")
+    tl.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
+    tl.add_argument("--root", default="", help="fleet root, for recall")
+    tl.add_argument("-k", type=int, default=8)
+    tl.add_argument("--json", action="store_true")
+    tl.set_defaults(fn=cmd_tool)
+
+    tr = sub.add_parser("traces", help="list, read, or export agent traces")
+    tr.add_argument("action", choices=["list", "show", "export"])
+    tr.add_argument("trace_id", nargs="?", default="")
+    tr.add_argument("--root", default="", help="fleet root (default: ./agents)")
+    tr.add_argument("--out", default="trace-export", help="export destination")
+    tr.add_argument("--kind", default="", help="comma-separated turn kinds")
+    tr.add_argument("--query", default="", help="substring filter")
+    tr.add_argument("--limit", type=int, default=200)
+    tr.add_argument("--width", type=int, default=140)
+    tr.add_argument("--full", action="store_true", help="include the data blob")
+    tr.set_defaults(fn=cmd_traces)
     sub.add_parser("stop", help="graceful: finish paid work, then wind up").set_defaults(fn=cmd_stop)
 
     k = sub.add_parser("kill", help="flat kill: everything, now")

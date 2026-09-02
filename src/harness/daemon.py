@@ -122,7 +122,7 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     root.mkdir(parents=True, exist_ok=True)
     store = store or SqliteSessionStore(default_store_path())
     memory = SqliteMemory(root / "memory.db")
-    context = JsonlContext(root / "traces")
+    context = JsonlContext(root / "traces", session_id=cfg.session_id)
 
     if cfg.dry_run:
         runner = _fake_runner

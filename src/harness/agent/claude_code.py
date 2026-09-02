@@ -14,7 +14,13 @@ Three choices worth stating.
 
 **The subscription, not the API.** `claude` billed through a Max/Team plan is
 the cheap way to run ten agents for hours; the same traffic over the API is
-not. That is why this shells out rather than calling the SDK with a key.
+not. That is why this shells out rather than calling the SDK with a key -- and
+why it **strips `ANTHROPIC_API_KEY` from the subprocess environment**. Claude
+Code prefers an API key over the subscription when both are present, so simply
+inheriting the parent environment silently bills the wrong account. On this
+machine that key is set for unrelated reasons, and the first real fleet run
+printed "claude.ai connectors are disabled because ANTHROPIC_API_KEY ... takes
+precedence" before every call. Set `use_api_key=True` to opt in deliberately.
 
 **Model per phase, not per fleet.** Seeding an idea and reviewing a diff are
 short; writing the diff is the long, expensive part. `model` picks the default
@@ -72,6 +78,8 @@ class ClaudeCodeProposer:
     binary: str = "claude"
     permission_mode: str = "acceptEdits"
     extra_args: tuple[str, ...] = ()
+    # Off by default: an inherited API key silently bills the wrong account.
+    use_api_key: bool = False
     # Set by the agent loop so token use lands on the right dashboard row.
     on_tokens: object | None = None
     last_usage: TokenUse = field(default_factory=TokenUse)
@@ -79,6 +87,24 @@ class ClaudeCodeProposer:
     # ── invocation ───────────────────────────────────────────────────────
     def available(self) -> bool:
         return shutil.which(self.binary) is not None
+
+    AUTH_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                 "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
+                 "CLAUDE_CODE_USE_VERTEX")
+
+    def _env(self) -> dict:
+        """The subprocess environment, with API auth removed by default.
+
+        Claude Code prefers an API key over the subscription when both are
+        present, so inheriting the parent environment bills the wrong account
+        without saying so -- it only prints a warning about connectors being
+        disabled, which is easy to read past.
+        """
+        env = {**os.environ, "CLAUDE_CODE_NONINTERACTIVE": "1"}
+        if not self.use_api_key:
+            for k in self.AUTH_VARS:
+                env.pop(k, None)
+        return env
 
     def _run(self, prompt: str, cwd, model: str = "") -> tuple[str, TokenUse]:
         if not self.available():
@@ -91,8 +117,7 @@ class ClaudeCodeProposer:
                "--permission-mode", self.permission_mode,
                *self.extra_args]
         r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
-                           timeout=self.timeout_s,
-                           env={**os.environ, "CLAUDE_CODE_NONINTERACTIVE": "1"})
+                           timeout=self.timeout_s, env=self._env())
         if r.returncode != 0:
             raise RuntimeError(
                 f"claude exited {r.returncode}: {(r.stderr or r.stdout)[-800:]}")
@@ -224,6 +249,16 @@ Your previous attempts on this idea:
 
 Files you started with:
 {files}
+
+Tools available in your shell (use them; they are far cheaper than a sweep):
+  harness tool recall "<what you are about to try>"
+      what the fleet has already tried, including what failed and why
+  harness tool roofline --context 20583 --batch 12
+      predicted decode step time and $/M for a batch, from first principles
+      and from what this stack actually measures. The gap is the headroom.
+  harness tool preflight --workspace .
+      parses your edit and checks for undefined names. Run this before you
+      finish; a NameError costs six GPU-minutes to discover otherwise.
 
 Make the smallest edit that tests the hypothesis. Constraints:
   - Python must parse; a syntax error wastes a GPU sweep.

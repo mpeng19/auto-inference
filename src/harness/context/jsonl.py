@@ -12,6 +12,7 @@ benefit. The index is a small sidecar so `stats` does not have to open them.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 from collections.abc import Iterator
@@ -23,9 +24,16 @@ from ..contracts.context import Slice, TraceMeta, Turn, TurnKind
 class JsonlContext:
     """Reference implementation of `contracts.context.ContextService`."""
 
-    def __init__(self, root: str | pathlib.Path = "traces"):
+    #: Bump when a field changes meaning. Readers should refuse an unknown
+    #: major version rather than guess.
+    SCHEMA_VERSION = 1
+
+    def __init__(self, root: str | pathlib.Path = "traces",
+                 session_id: str = ""):
         self.root = pathlib.Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.session_id = session_id
+        self._seq: dict[str, int] = {}
 
     # ── layout ───────────────────────────────────────────────────────────
     def _path(self, ref: str) -> pathlib.Path:
@@ -41,8 +49,20 @@ class JsonlContext:
         return meta.id
 
     def append(self, trace_ref: str, turn: Turn) -> None:
+        m = self.meta(trace_ref)
+        self._seq[trace_ref] = seq = self._seq.get(trace_ref, -1) + 1
+        record = {
+            "v": self.SCHEMA_VERSION,
+            "trace_id": trace_ref,
+            "seq": seq,
+            "session_id": self.session_id,
+            "agent_id": getattr(m, "agent_id", ""),
+            "idea_id": getattr(m, "idea_id", ""),
+            "attempt": getattr(m, "attempt", 0),
+            **asdict(turn),
+        }
         with self._path(trace_ref).open("a") as f:
-            f.write(json.dumps(asdict(turn), default=str) + "\n")
+            f.write(json.dumps(record, default=str) + "\n")
 
     def close(self, trace_ref: str, outcome: str = "", cost_usd: float = 0.0) -> None:
         m = self.meta(trace_ref)
@@ -63,11 +83,16 @@ class JsonlContext:
         p = self._path(trace_ref)
         if not p.is_file():
             return
+        fields = {f.name for f in dataclasses.fields(Turn)}
         with p.open() as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    yield Turn(**json.loads(line))
+                if not line:
+                    continue
+                d = json.loads(line)
+                # The envelope is provenance for a downstream loader; in-process
+                # readers want the Turn back, so drop what is not part of it.
+                yield Turn(**{k: v for k, v in d.items() if k in fields})
 
     def slice(self, trace_ref: str, *, kinds: tuple[TurnKind, ...] = (),
               query: str = "", limit: int = 50) -> Slice:
