@@ -65,7 +65,7 @@ def cmd_start(a) -> int:
         seed_model=a.seed_model, gpu=a.gpu, n_gpu=a.n_gpu,
         agent_max_attempts=a.max_attempts, agent_max_usd=a.agent_budget,
         dry_run=a.dry_run, fake_agents=a.fake_agents, note=a.note,
-        bank=_bank_path(a.bank) if a.bank else "", mode=a.mode,
+        bank=_bank_path(a.bank) if a.bank else "", mode=a.mode, manager=a.manager,
         seeds=tuple(s for s in (a.seed or [])),
         baseline=json.loads(a.baseline) if a.baseline else {})
     cfg_path = root / "fleet.json"
@@ -339,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--root", default="")
     s.add_argument("--bank", nargs="?", const="__default__", default="",
                    help="claim ideas from the bank (default path when given no value)")
+    s.add_argument("--manager", action="store_true",
+                   help="review outcomes and stash reusable tools under <root>/tools/")
     s.add_argument("--mode", choices=["tune", "build"], default="tune",
                    help="build: kernel-scale ideas with a design note and workbench checks")
     s.add_argument("--seed", action="append", help="a starting hypothesis; repeatable")

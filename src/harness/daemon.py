@@ -59,6 +59,9 @@ class FleetConfig:
     # "tune" asks for the smallest edit; "build" hands over a mechanism and
     # expects a kernel-scale change with a design note and workbench checks.
     mode: str = "tune"
+    # A reviewer that turns what agents keep re-deriving into shared tools
+    # under <root>/tools/. A few model calls a night.
+    manager: bool = False
     # Two separate fakes, because they cost different things. `dry_run` skips
     # the GPU (dollars); `fake_agents` skips Claude Code (subscription usage).
     # A flag named "dry run" that still spawns ten real agents is a trap.
@@ -162,6 +165,10 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     fleet = Fleet(None, broker, store=store, session_id=cfg.session_id,
                   root=str(root))
     fleet.bank = bank
+    if cfg.manager and not cfg.fake_agents:
+        from .ideas.llm import ask_with
+        from .manager import Manager
+        fleet.manager = Manager(root, ask_with(cfg.model, cwd=root))
 
     def make_agent(agent_id: str, fl: Fleet):
         ws = Workspace(root / agent_id, agent_id=agent_id)

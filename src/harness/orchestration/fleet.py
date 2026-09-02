@@ -272,6 +272,7 @@ class Fleet:
 
     # ── the idea bank ───────────────────────────────────────────────────
     bank = None          # IdeaBankService, set by the daemon when one is configured
+    manager = None       # harness.manager.Manager, likewise
 
     def claim_from_bank(self, agent_id: str) -> Idea | None:
         """A record no one else holds, least like what is live or tried.
@@ -467,6 +468,10 @@ class Fleet:
                 continue
             self._record_outcome(out)
             self._bank_outcome(out)
+            if self.manager is not None:
+                # A model call; runs on this agent's thread, never under the lock.
+                with contextlib.suppress(Exception):
+                    self.manager.on_outcome(out)
             self.report(agent_id, status="idle",
                         attempts_total=slot.view.attempts_total + len(out.attempts),
                         idle_s=out.idle_s,
