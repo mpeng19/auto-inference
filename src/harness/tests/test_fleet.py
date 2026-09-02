@@ -267,6 +267,25 @@ def test_agents_keep_working_while_gpus_are_saturated(tmp_path, stock_dir,
         "an agent studied with no evaluation in flight -- it was not overlapped"
 
 
+def test_verdicts_have_a_noise_floor():
+    """A 0.9% screen improvement was recorded as a win on night-2; the next
+    agent's brief then said the idea worked. Inside the measurement's own
+    noise the honest verdict is neutral."""
+    from harness.contracts import Attempt
+
+    v = IterativeAgent._verdict
+    ok = lambda pct: Attempt(idea_id="i", agent_id="a", n=0, ok=True,  # noqa: E731
+                             delta={"bill_per_1k_pct": pct})
+    assert v(ok(-0.9)) == "neutral"
+    assert v(ok(-3.0)) == "win"
+    assert v(ok(+2.0)) == "neutral"
+    assert v(ok(+8.0)) == "loss"
+    assert v(Attempt(idea_id="i", agent_id="a", n=0, ok=False,
+                           failure="quality")) == "loss"
+    assert v(Attempt(idea_id="i", agent_id="a", n=0, ok=False,
+                           failure="invalid_diff")) == "invalid"
+
+
 def test_spend_is_visible_per_attempt_not_per_idea():
     """The first real fleet showed $0.00 after two sweeps because cost only
     reached the total when an idea ended. Spend reported as it happens must

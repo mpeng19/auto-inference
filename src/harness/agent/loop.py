@@ -321,10 +321,29 @@ class IterativeAgent:
         prev = best.metrics.get("bill_per_1k")
         return prev is None or cur < prev
 
+    # Run-to-run noise of the measurement itself: two stock full sweeps on
+    # 2026-09-02 differed by 0.8%, three stock-equivalent screens by 1.2%.
+    # A verdict inside that band is not a result, and memory must not tell
+    # the next agent it was.
+    NOISE_PCT = 3.0
+
+    @staticmethod
+    def _verdict(att: Attempt) -> str:
+        noise = IterativeAgent.NOISE_PCT
+        if not att.ok:
+            return "invalid" if att.failure == "invalid_diff" else "loss"
+        d = att.delta.get("bill_per_1k_pct")
+        if d is None:
+            return "neutral"
+        if d <= -noise:
+            return "win"
+        if d >= noise:
+            return "loss"
+        return "neutral"
+
     def _record(self, idea: Idea, att: Attempt, rationale: str, trace: str,
                 history: list[Attempt]) -> str:
-        verdict = ("win" if att.ok and att.delta.get("bill_per_1k_pct", 0) < 0
-                   else "loss" if att.ok else "invalid")
+        verdict = self._verdict(att)
         exp = Experiment(
             agent_id=self.agent_id, idea_id=idea.id, timeline=idea.timeline,
             hypothesis=idea.hypothesis, rationale=rationale,
