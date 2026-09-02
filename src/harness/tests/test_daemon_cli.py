@@ -72,6 +72,37 @@ def test_a_real_fleet_refuses_a_baseline_it_cannot_score_against():
                       baseline={k: v for k, v in full.items() if k != "screen"}))
 
 
+def test_build_mode_reaches_the_proposer_with_the_tool_index(tmp_path):
+    """`--mode build --bank --manager`: the proposer is built in build mode
+    and reads the manager's tool index; nothing shells out at construction."""
+    from harness.ideas import SqliteIdeaBank
+
+    bank = tmp_path / "ideas.db"
+    SqliteIdeaBank(bank)
+    cfg = FleetConfig(session_id="s1", root=str(tmp_path / "agents"), agents=1,
+                      dry_run=True, mode="build", bank=str(bank), manager=True,
+                      baseline={"bill_per_1k": 12.23, "quality": {"gsm8k": 0.69},
+                                "screen": {"bill_per_1k": 17.3}})
+    fleet, broker = build(cfg, store=SqliteSessionStore(tmp_path / "s.db"))
+    try:
+        assert fleet.bank is not None and fleet.manager is not None
+        agent = fleet.make_agent("a00", fleet)
+        assert agent.proposer.mode == "build"
+        assert agent.proposer.session_tools is not None
+        fleet.manager.stash.add("bench", "bench a kernel", "python tools/bench.py", "print(1)", 2)
+        from harness.contracts import Brief
+        assert "bench.py" in agent.proposer._brief_text(Brief(text="known"), "")
+    finally:
+        broker.shutdown()
+    import pytest as _pt
+
+    from harness.daemon import check
+    with _pt.raises(SystemExit):
+        check(FleetConfig(session_id="s2", mode="build",
+                          baseline={"bill_per_1k": 1, "quality": {"gsm8k": 0.6},
+                                    "screen": {"bill_per_1k": 1}}))
+
+
 def test_fake_agents_never_shell_out(tmp_path, monkeypatch):
     """`--fake-agents` must not spend subscription usage; the offline socket
     guard would catch a network call, but not a subprocess."""

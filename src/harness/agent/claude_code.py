@@ -206,6 +206,10 @@ class ClaudeCodeProposer:
     use_api_key: bool = False
     # Set by the agent loop so token use lands on the right dashboard row.
     on_tokens: object | None = None
+    # The manager's shared tools for this run, as an index the agent reads
+    # with the brief. A callable, because the index grows while the run is
+    # on and the prompt must carry what exists *now*.
+    session_tools: object | None = None
     last_usage: TokenUse = field(default_factory=TokenUse)
     # Every call this proposer has made, newest last. The loop stamps
     # `last_call` onto the turn it appends, so a trace can be read for where
@@ -425,12 +429,24 @@ class ClaudeCodeProposer:
             hypothesis=idea.hypothesis, title=idea.title, attempt=attempt,
             design=_indent(idea.design) or "    (the idea bank recorded none; "
                                            "work it out and say so in DESIGN.md)",
-            brief=brief.text or "(nothing on record yet)",
+            brief=self._brief_text(brief, "(nothing on record yet)"),
             history=_history(history),
             files="\n".join(f"  - {t}" for t in files))
         text, _ = self._run(prompt, cwd=str(ws.candidates), phase="edit",
                             timeout_s=self._edit_timeout())
         return text.strip()[:4000]
+
+    def _brief_text(self, brief: Brief, empty: str) -> str:
+        """The memory brief, plus the manager's tool index when there is one."""
+        text = brief.text or empty
+        index = ""
+        if self.session_tools is not None:
+            with contextlib.suppress(Exception):
+                index = str(self.session_tools() or "")
+        if index:
+            text += ("\n\nShared tools for this run, written by the manager because "
+                     "agents kept re-deriving them (run from your workspace):\n" + index)
+        return text
 
     def study(self, ws: Workspace, idea: Idea, brief: Brief,
               history: tuple[Attempt, ...],
@@ -443,7 +459,7 @@ class ClaudeCodeProposer:
         """
         template = _BUILD_STUDY_PROMPT if self.mode == "build" else _STUDY_PROMPT
         prompt = template.format(
-            hypothesis=idea.hypothesis, brief=brief.text or "(nothing yet)",
+            hypothesis=idea.hypothesis, brief=self._brief_text(brief, "(nothing yet)"),
             history=_history(history))
         try:
             text, _ = self._run(prompt, cwd=str(ws.candidates), phase="study",

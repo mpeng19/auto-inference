@@ -175,7 +175,9 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
         if cfg.fake_agents:
             prop = _ScriptedProposer(agent_id)
         else:
-            prop = ClaudeCodeProposer(model=cfg.model, seed_model=cfg.seed_model)
+            prop = ClaudeCodeProposer(
+                model=cfg.model, seed_model=cfg.seed_model, mode=cfg.mode,
+                session_tools=(fl.manager.tools_index if fl.manager is not None else None))
             # Token use is attributed the moment it is spent, which is what
             # makes the dashboard's per-agent cost real rather than
             # apportioned after the fact.
@@ -199,6 +201,10 @@ def check(cfg: FleetConfig) -> None:
     if not (base.get("quality") or {}):
         raise SystemExit('--baseline needs "quality": {suite: accuracy}; without '
                          "it the quality gate never fires")
+    if cfg.mode == "build" and not cfg.bank:
+        raise SystemExit("--mode build needs --bank: build-mode agents implement a "
+                         "recorded mechanism; without the bank they self-seed and "
+                         "produce the one-line tweaks build mode exists to replace")
     if cfg.screen_first and not isinstance(base.get("screen"), dict):
         raise SystemExit('--baseline needs "screen": {"bill_per_1k": ...} from a '
                          "stock sweep at screen tier, or screens are compared "
