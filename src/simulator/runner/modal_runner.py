@@ -133,7 +133,8 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
           canaries: bool = True, note: str = "", allow_stale: bool = False,
           profile_level: int = 0, profile_steps: int = 20,
           quality_suites: tuple = ("gsm8k",), quality_n: int = 50,
-          quality_baseline: dict | None = None) -> dict:
+          quality_baseline: dict | None = None,
+          quality_tolerance_pp: float = 10.0) -> dict:
     """Sweep concurrent conversations; return one record per level.
 
     Every level records its full percentile set and its raw server counters, so
@@ -239,7 +240,7 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
                     q = asyncio.run(quality_mod.run(
                         SERVER_URL, sc.model, suite=suite, n=quality_n,
                         baseline_accuracy=base.get(suite)))
-                    bad, why = quality_mod.regressed(q)
+                    bad, why = quality_mod.regressed(q, tolerance_pp=quality_tolerance_pp)
                     row = {**q.as_dict(), "regressed": bad, "why": why}
                     rec["quality"].append(row)
                     print(f"quality {suite}: {q.correct}/{q.n} = "

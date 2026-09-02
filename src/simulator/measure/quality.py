@@ -181,13 +181,16 @@ async def run(base_url: str, model: str, suite: str = "gsm8k", n: int = 100,
     return res
 
 
-def regressed(result: QualityResult, tolerance_pp: float = 2.0) -> tuple[bool, str]:
+def regressed(result: QualityResult, tolerance_pp: float = 10.0) -> tuple[bool, str]:
     """Is this a quality regression? Returns (yes, why).
 
-    `tolerance_pp` is percentage points, not a ratio. Greedy decoding is not
-    bitwise deterministic across batch compositions, so a point or two of
-    movement on 100 items is noise; anything past that is the thing this exists
-    to catch.
+    `tolerance_pp` is percentage points, not a ratio. The gate has to sit
+    outside the run-to-run noise of the *stock* stack or it rejects stock:
+    two 1xH100 sweeps on 2026-09-02, same 50 items, same greedy decoding,
+    scored 62% and 70% -- FP8 kernels are not bitwise deterministic and four
+    borderline items flipped. What this exists to catch is a stack that
+    serves a different model (a broken KV path scores near zero), and ten
+    points on 100 items is well outside the noise and well inside that.
     """
     if result.n == 0:
         return True, "no items scored"

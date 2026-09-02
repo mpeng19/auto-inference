@@ -218,9 +218,11 @@ N* = 12 users   batch 5.0   hit 0.748
   quality gsm8k:   72.0%  (+0.0 pts)
 ```
 
-A regression beyond 2 percentage points is rejected as a **failed hypothesis**,
-not an infra failure — re-running would reproduce it. The tolerance is not zero
-because greedy decoding is not bitwise deterministic across batch compositions.
+A regression beyond 10 percentage points is rejected as a **failed hypothesis**,
+not an infra failure — re-running would reproduce it. The tolerance is wide
+because FP8 greedy decoding is not bitwise deterministic: two stock sweeps on
+the same 50 items scored 62% and 70%. The gate catches a stack that serves a
+different model, not a subtle drift.
 `canary.py` still runs, but it digests six short outputs and would miss a
 subtle numerical degradation; this is the gate that catches it.
 

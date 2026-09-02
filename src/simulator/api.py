@@ -211,9 +211,9 @@ class Simulator:
     # see the difference. Run before load on an idle server, so this measures
     # the model rather than the scheduler.
     quality_suites: tuple[str, ...] = ("gsm8k",)
-    quality_n: int = 50
+    quality_n: int = 100
     quality_baseline: dict = field(default_factory=dict)
-    quality_tolerance_pp: float = 2.0
+    quality_tolerance_pp: float = 10.0   # see measure/quality.regressed
     slo: SLO = field(default_factory=lambda: SLO(bounds=MARKET_SLO))
 
     # ── the cost basis: assumptions, never measurements ──
@@ -310,7 +310,7 @@ class Simulator:
                 self.canaries, self.note, self.allow_stale_stack,
                 self.profile_level, self.profile_steps,
                 tuple(self.quality_suites), self.quality_n,
-                dict(self.quality_baseline))
+                dict(self.quality_baseline), self.quality_tolerance_pp)
 
     def submit(self) -> str:
         """Start the sweep and return immediately. Runs outlive this process.
