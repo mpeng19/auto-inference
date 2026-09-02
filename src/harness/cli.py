@@ -77,8 +77,8 @@ def cmd_start(a) -> int:
           + (f"   [{', '.join(fakes)}]" if fakes else ""))
     print(f"root      {root}")
     print(f"pid       {proc.pid}   log {root / 'daemon.log'}")
-    print(f"\nwatch:    harness tui --session {session_id}")
-    print(f"stop:     harness stop --session {session_id}")
+    print(f"\nwatch:    uv run harness --session {session_id} tui")
+    print(f"stop:     uv run harness --session {session_id} stop")
     return 0
 
 
