@@ -590,6 +590,16 @@ worse is rejected outright, however good the price looks -- so do not touch
 sampling, numerics, KV precision or eviction in ways that could change what
 the model says, unless testing exactly that is the hypothesis.
 
+**The launch line is yours too.** Write `serving.json` in this directory to
+change how the server is started for your evaluation:
+  {{"serving": {{"chunked_prefill_size": 16384, "mem_fraction_static": 0.90,
+               "max_running_requests": 64, "schedule_policy": "lpm",
+               "extra_args": ["--flag", "value"]}},
+   "env": {{"SGLANG_SOME_VAR": "1"}}}}
+Any ServingConfig field except model, gpu, n_gpu and enable_metrics. Stock's
+launch line is the baseline, so a win must beat stock's deployment, not just
+its code. `harness tool preflight` validates the file.
+
 Make the smallest edit that tests the hypothesis. Constraints:
   - Python must parse; a syntax error wastes a GPU sweep.
   - Do not add imports of packages SGLang does not already depend on.
@@ -659,6 +669,16 @@ that answers worse is rejected however good the price looks. Changing numerics
 is allowed *when that is the hypothesis* -- KV compression and lower-precision
 attention are on the table -- but then equivalence and the accuracy gate are
 the experiment, so report their numbers and expect to be judged on them.
+
+**The launch line is yours too.** Write `serving.json` in this directory to
+change how the server is started for your evaluation:
+  {{"serving": {{"chunked_prefill_size": 16384, "mem_fraction_static": 0.90,
+               "max_running_requests": 64, "schedule_policy": "lpm",
+               "extra_args": ["--flag", "value"]}},
+   "env": {{"SGLANG_SOME_VAR": "1"}}}}
+Any ServingConfig field except model, gpu, n_gpu and enable_metrics. Stock's
+launch line is the baseline, so a win must beat stock's deployment, not just
+its code. `harness tool preflight` validates the file.
 
 When done, reply with 4-8 sentences: the mechanism you implemented, and the
 numbers off your workbench -- micro-benchmark speedup, the correctness error

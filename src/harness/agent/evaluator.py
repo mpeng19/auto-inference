@@ -108,8 +108,16 @@ class SimulatorEvaluator:
                            "cost_usd": spent}, "quality"
 
         b = res.best
+        rank = res.rank() or {}
         return True, {
             "bill_per_1k": b.bill_per_1k,
+            # Where this price sits on the OpenRouter board, both ways, and
+            # the share one node could serve at it: what a watcher wants to
+            # see next to an agent, not just a delta.
+            "rank_bill": rank.get("rank_bill"),
+            "rank_eff_in": rank.get("rank_eff_in"),
+            "rank_of": rank.get("of"),
+            "interpolated": res.interpolated,
             "effective_in_per_m": b.effective_in_per_m,
             "out_per_m": b.out_per_m,
             "n_star": b.n_users,

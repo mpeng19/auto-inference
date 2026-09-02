@@ -69,6 +69,12 @@ class AgentView:
     attempt: int = 0
     attempts_total: int = 0
     best_delta_pct: float | None = None    # vs baseline; None = nothing yet
+    # The last priced result, as a watcher reads it: the bill, where it
+    # ranks on the OpenRouter board ("9/12"), and the market share one node
+    # serves at that price.
+    last_bill_per_1k: float | None = None
+    last_rank: str = ""
+    last_share_pct: float | None = None
     cost_usd: float = 0.0
     tokens: TokenUse = field(default_factory=TokenUse)
     eval_ticket: str = ""

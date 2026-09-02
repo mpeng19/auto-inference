@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import json
 import pathlib
 import shutil
 from dataclasses import dataclass
@@ -156,15 +157,53 @@ class Workspace:
         return tuple(out)
 
     def diff(self, rel: str | None = None, context: int = 3) -> str:
-        """Unified diff against stock. For the agent to review and for the log."""
+        """Unified diff against stock, plus the launch overrides if any.
+        For the agent to review and for the log."""
         rels = (rel,) if rel else self.touched()
         out = []
+        if rel is None:
+            serving, env, _ = self.serving()
+            if serving or env:
+                out.append("--- launch: stock\n+++ launch: candidate\n")
+                out.extend(f"+{k}={v}\n" for k, v in sorted(serving.items()))
+                out.extend(f"+env {k}={v}\n" for k, v in sorted(env.items()))
         for r in rels:
             a = self.stock_text(r).splitlines(keepends=True)
             b = self.read(r).splitlines(keepends=True)
             out.extend(difflib.unified_diff(
                 a, b, fromfile=f"stock/{r}", tofile=f"candidate/{r}", n=context))
         return "".join(out)
+
+    SERVING_FILE = "serving.json"
+
+    def serving(self) -> tuple[dict, dict, str]:
+        """The candidate's launch overrides: (serving, env, error).
+
+        `serving.json` in the candidate directory, shaped
+        `{"serving": {...ServingConfig fields...}, "env": {...}}` -- or the
+        flat form `{...ServingConfig fields...}`. Validated here against the
+        real ServingConfig so a typo is caught before a GPU is rented.
+        """
+        p = self.candidates / self.SERVING_FILE
+        if not p.is_file():
+            return {}, {}, ""
+        try:
+            d = json.loads(p.read_text())
+        except json.JSONDecodeError as e:
+            return {}, {}, f"{self.SERVING_FILE}: not JSON ({e.msg} at line {e.lineno})"
+        if not isinstance(d, dict):
+            return {}, {}, f"{self.SERVING_FILE}: expected an object"
+        if "serving" in d or "env" in d:
+            serving, env = dict(d.get("serving") or {}), dict(d.get("env") or {})
+        else:
+            serving, env = dict(d), {}
+        env = {str(k): str(v) for k, v in env.items()}
+        try:
+            from simulator.config import ServingConfig
+            ServingConfig().with_overrides(serving)
+        except ValueError as e:
+            return {}, {}, f"{self.SERVING_FILE}: {e}"
+        return serving, env, ""
 
     def check(self) -> tuple[bool, str]:
         """Everything worth knowing before renting a GPU.
@@ -179,8 +218,12 @@ class Workspace:
                 ast.parse(f.read_text())
             except SyntaxError as e:
                 return False, f"{rel}: syntax error at line {e.lineno}: {e.msg}"
-        if not self.touched():
-            return False, "no files changed; the stack would be identical to stock"
+        serving, env, why = self.serving()
+        if why:
+            return False, why
+        if not self.touched() and not serving and not env:
+            return False, ("no files changed and no serving.json; the stack would be "
+                           "identical to stock")
         return True, ""
 
     # ── handing it to the simulator ─────────────────────────────────────
@@ -192,9 +235,12 @@ class Workspace:
         if not ok:
             raise ValueError(f"workspace is not a valid stack: {why}")
         rels = self.touched()
+        serving, env, _ = self.serving()
+        what = list(rels) + [f"{k}={v}" for k, v in sorted(serving.items())]
         return InferenceStack(
             files={r: self.read(r) for r in rels},
             # Recorded from the same source the agent read, so drift is caught
             # at apply time instead of producing a quietly wrong experiment.
             upstream_sha={r: self.source.sha(r) for r in rels},
-            label=label or f"{self.agent_id or self.root.name}: {', '.join(rels)}")
+            serving=serving, env=env,
+            label=label or f"{self.agent_id or self.root.name}: {', '.join(what)}")

@@ -84,3 +84,38 @@ def test_apply_starts_from_stock_in_a_reused_container(tmp_path):
     assert prov["restored"] == ["srt/a.py"]
     assert (root / "srt" / "a.py").read_text() == "stock a\n"
     assert restore_stock(root) == []
+
+
+def test_serving_overrides_are_part_of_the_stack():
+    """The same code with a different chunk size is a different experiment:
+    hashed into the digest, carried in the record, applied at launch."""
+    from simulator.config import ServingConfig
+    from simulator.stack import InferenceStack
+
+    a = InferenceStack(files={"srt/a.py": "x"})
+    b = InferenceStack(files={"srt/a.py": "x"}, serving={"chunked_prefill_size": 16384})
+    c = InferenceStack(serving={"mem_fraction_static": 0.9}, env={"SGLANG_X": "1"})
+    assert a.digest != b.digest and not c.is_stock and not b.is_stock
+    assert "chunked_prefill_size=16384" in b.describe()
+    assert InferenceStack.from_dict(c.as_dict()) == c
+
+    sc = ServingConfig().with_overrides(
+        {"chunked_prefill_size": 16384, "extra_args": ["--flag", "v"], "ep_size": 0})
+    assert sc.chunked_prefill_size == 16384 and sc.extra_args == ("--flag", "v")
+    assert sc.ep_size is None and sc.model == ServingConfig().model
+    assert "--chunked-prefill-size" in sc.to_sglang_args()
+    import pytest
+    with pytest.raises(ValueError, match="not allowed"):
+        ServingConfig().with_overrides({"model": "other"})
+    with pytest.raises(ValueError, match="unknown"):
+        ServingConfig().with_overrides({"chunk_size": 1})
+
+
+def test_serving_only_stack_applies_as_stock_code(tmp_path):
+    from simulator.stack import InferenceStack
+
+    root = tmp_path / "sglang"
+    (root / "srt").mkdir(parents=True)
+    (root / "srt" / "a.py").write_text("stock\n")
+    prov = InferenceStack(serving={"chunked_prefill_size": 4096}).apply(root=root)
+    assert prov["applied"] == [] and (root / "srt" / "a.py").read_text() == "stock\n"

@@ -89,7 +89,7 @@ image = (
 app = modal.App(APP_NAME)
 
 
-def _server_env() -> dict:
+def _server_env(extra: dict | None = None) -> dict:
     """Environment for the SGLang server process.
 
     `SGLANG_ENABLE_METRICS_DEVICE_TIMER` wraps every forward pass in CUDA
@@ -101,6 +101,9 @@ def _server_env() -> dict:
     """
     import os
     env = dict(os.environ)
+    env.update({str(k): str(v) for k, v in (extra or {}).items()})
+    # Set last: a candidate may set anything else, but not turn off the
+    # counter the price is read from.
     env["SGLANG_ENABLE_METRICS_DEVICE_TIMER"] = "1"
     return env
 
@@ -176,11 +179,24 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
 
     sc, sl = ServingConfig(**serving), SLO.from_dict(slo)
     st = InferenceStack.from_dict(stack)
+    if st.serving:
+        # The candidate's launch line. Applied before validate() so a bad
+        # override fails as cheaply as a bad tp_size does.
+        try:
+            sc = sc.with_overrides(st.serving)
+        except ValueError as e:
+            rec_early = {"status": "failed", "note": note, "serving": serving,
+                         "stack_digest": st.digest, "levels": [],
+                         "failure": f"serving override rejected: {e}",
+                         "started_at": time.time()}
+            print("INVALID OVERRIDE:", e, flush=True)
+            return _save(rec_early, ServingConfig(**serving))
     install_fast_loop()
 
     rec: dict = {"status": "failed", "note": note, "serving": asdict(sc),
                  "serving_digest": sc.digest(), "slo": sl.as_dict(),
                  "stack_digest": st.digest, "levels": [],
+                 "serving_overrides": st.serving, "server_env": st.env,
                  "seconds_per_level": seconds_per_level, "repeats": repeats,
                  "provenance": _provenance(), "started_at": time.time()}
 
@@ -205,7 +221,7 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
 
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
-                                env=_server_env())
+                                env=_server_env(st.env))
         try:
             rec["model_load_s"] = round(asyncio.run(srv.wait_until_ready(
                 SERVER_URL, 2400, proc=proc, log_path=log_path, stall_s=420)), 1)

@@ -326,6 +326,13 @@ class IterativeAgent:
                      cost_delta=rec.cost_usd,
                      activity=f"attempt {n}: {tier} done"
                               + (f" ({rec.failure})" if not rec.ok else ""))
+        if rec.ok and rec.metrics.get("bill_per_1k") is not None:
+            m = rec.metrics
+            self._report(last_bill_per_1k=m.get("bill_per_1k"),
+                         last_rank=(f"{m['rank_bill']}/{m['rank_of']}"
+                                    if m.get("rank_bill") and m.get("rank_of") else ""),
+                         last_share_pct=((m.get("share_per_node") or 0.0) * 100.0
+                                         if m.get("share_per_node") is not None else None))
         self._append(trace, Turn(kind="eval_result", name=stack.digest,
                                  data={"tier": tier, **rec.metrics}),
                      since=t_phase, phase="wait")

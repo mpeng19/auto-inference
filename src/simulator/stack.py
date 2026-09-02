@@ -60,6 +60,13 @@ class InferenceStack:
     patches: dict[str, str] = field(default_factory=dict)
     upstream_sha: dict[str, str] = field(default_factory=dict)
     label: str = ""
+    # The launch line is part of the stack. `serving` holds ServingConfig
+    # field overrides (chunked_prefill_size, mem_fraction_static, schedule
+    # policy, extra_args, ...); `env` holds server environment variables.
+    # Both are hashed into the digest: the same code with a different chunk
+    # size is a different experiment.
+    serving: dict = field(default_factory=dict)
+    env: dict[str, str] = field(default_factory=dict)
 
     # ── construction ────────────────────────────────────────────────────
     @classmethod
@@ -104,7 +111,7 @@ class InferenceStack:
     # ── identity ────────────────────────────────────────────────────────
     @property
     def is_stock(self) -> bool:
-        return not self.files and not self.patches
+        return not (self.files or self.patches or self.serving or self.env)
 
     @property
     def digest(self) -> str:
@@ -115,23 +122,35 @@ class InferenceStack:
         """
         body = {"files": {k: _sha(v.encode()) for k, v in sorted(self.files.items())},
                 "patches": {k: _sha(v.encode()) for k, v in sorted(self.patches.items())}}
+        if self.serving:
+            body["serving"] = self.serving
+        if self.env:
+            body["env"] = self.env
         return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:12]
 
     def describe(self) -> str:
         if self.is_stock:
             return "stock SGLang"
+        parts = []
         n = len(self.files) + len(self.patches)
-        return f"{n} modified file(s) [{self.digest}]: " + ", ".join(
-            sorted({*self.files, *self.patches}))
+        if n:
+            parts.append(f"{n} modified file(s): " + ", ".join(sorted({*self.files, *self.patches})))
+        if self.serving:
+            parts.append("serving " + ", ".join(f"{k}={v}" for k, v in sorted(self.serving.items())))
+        if self.env:
+            parts.append("env " + ", ".join(f"{k}={v}" for k, v in sorted(self.env.items())))
+        return f"[{self.digest}] " + "; ".join(parts)
 
     def as_dict(self) -> dict:
         return {"files": self.files, "patches": self.patches,
-                "upstream_sha": self.upstream_sha, "label": self.label}
+                "upstream_sha": self.upstream_sha, "label": self.label,
+                "serving": self.serving, "env": self.env}
 
     @classmethod
     def from_dict(cls, d: dict) -> InferenceStack:
         return cls(files=d.get("files", {}), patches=d.get("patches", {}),
-                   upstream_sha=d.get("upstream_sha", {}), label=d.get("label", ""))
+                   upstream_sha=d.get("upstream_sha", {}), label=d.get("label", ""),
+                   serving=dict(d.get("serving") or {}), env=dict(d.get("env") or {}))
 
     # ── application, inside the container ───────────────────────────────
     def apply(self, allow_stale: bool = False, root: pathlib.Path | None = None) -> dict:
@@ -159,8 +178,8 @@ class InferenceStack:
                       "digest": self.digest, "label": self.label,
                       "stock": self.is_stock, "applied": [], "stale": [],
                       "restored": restore_stock(root)}
-        if self.is_stock:
-            return prov
+        if not (self.files or self.patches):
+            return prov                      # serving-only, or stock: nothing to write
 
         for rel in sorted({*self.files, *self.patches}):
             dst = root / rel

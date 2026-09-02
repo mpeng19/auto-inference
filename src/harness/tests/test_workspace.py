@@ -123,3 +123,27 @@ def test_reset_returns_to_stock(ws):
 def test_each_attempt_gets_its_own_run_dir(ws):
     a, b = ws.run_dir(0), ws.run_dir(1)
     assert a != b and a.is_dir() and b.is_dir()
+
+
+def test_serving_json_is_the_launch_line(ws):
+    """Every launch argument is the candidate's to set; a typo is caught
+    before a GPU is rented; the launch overrides travel with the stack."""
+    import json
+
+    ok, why = ws.check()
+    assert not ok and "serving.json" in why
+    (ws.candidates / "serving.json").write_text(json.dumps(
+        {"serving": {"chunked_prefill_size": 16384, "schedule_policy": "lpm"},
+         "env": {"SGLANG_FOO": 1}}))
+    ok, why = ws.check()
+    assert ok, why
+    st = ws.stack()
+    assert st.serving == {"chunked_prefill_size": 16384, "schedule_policy": "lpm"}
+    assert st.env == {"SGLANG_FOO": "1"} and not st.files
+    assert "chunked_prefill_size=16384" in ws.diff()
+    (ws.candidates / "serving.json").write_text(json.dumps({"model": "other"}))
+    ok, why = ws.check()
+    assert not ok and "not allowed" in why
+    (ws.candidates / "serving.json").write_text("{not json")
+    ok, why = ws.check()
+    assert not ok and "not JSON" in why

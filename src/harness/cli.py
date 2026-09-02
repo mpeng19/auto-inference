@@ -122,12 +122,16 @@ def cmd_status(a) -> int:
           f"{v.gpu_utilisation:.0%} GPU utilisation")
     print()
     print(f"{'agent':<7}{'status':<12}{'idea':<26}{'att':>4}{'Δ%':>8}"
-          f"{'$':>8}{'tokens':>11}  activity")
+          f"{'$/1k':>8}{'rank':>6}{'share':>7}{'$':>8}{'tokens':>11}  activity")
     for ag in v.agents:
         d = "-" if ag.best_delta_pct is None else f"{ag.best_delta_pct:+.1f}"
+        bill = "-" if ag.last_bill_per_1k is None else f"{ag.last_bill_per_1k:.2f}"
+        rank = ag.last_rank or "-"
+        share = "-" if ag.last_share_pct is None else f"{ag.last_share_pct:.2f}%"
         print(f"{ag.agent_id:<7}{ag.status:<12}{ag.idea_title[:24]:<26}"
-              f"{ag.attempt:>4}{d:>8}{ag.cost_usd:>8.2f}{ag.tokens.total:>11,}"
-              f"  {ag.activity[:44]}")
+              f"{ag.attempt:>4}{d:>8}{bill:>8}{rank:>6}{share:>7}"
+              f"{ag.cost_usd:>8.2f}{ag.tokens.total:>11,}"
+              f"  {ag.activity[:40]}")
     return 0
 
 

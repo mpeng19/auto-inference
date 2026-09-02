@@ -87,6 +87,39 @@ class ServingConfig:
     context_length: int | None = None
     extra_args: tuple[str, ...] = ()
 
+    # What a candidate may not change: these name the machine being priced,
+    # and `enable_metrics` is how the price is read. Everything else is the
+    # serving stack and is the candidate's to set -- a KV layout that changes
+    # what "static" memory means, or a prefill kernel that wants a different
+    # chunk, is not a complete idea without its launch line.
+    LOCKED = ("model", "gpu", "n_gpu", "enable_metrics")
+
+    def with_overrides(self, overrides: dict) -> ServingConfig:
+        """This config with a candidate's launch overrides applied.
+
+        Unknown keys and locked keys are errors, not warnings: a typo that
+        silently launched stock would produce a stock price under a
+        candidate's name. `extra_args` are appended, not replaced, so the
+        study's own extra flags survive.
+        """
+        from dataclasses import fields, replace
+
+        known = {f.name for f in fields(self)}
+        bad = sorted(k for k in overrides if k not in known)
+        if bad:
+            raise ValueError(f"unknown serving override(s): {bad}; "
+                             f"known: {sorted(known - set(self.LOCKED))}")
+        locked = sorted(k for k in overrides if k in self.LOCKED)
+        if locked:
+            raise ValueError(f"serving override(s) not allowed: {locked} "
+                             "(they define the machine being priced)")
+        d = dict(overrides)
+        if "extra_args" in d:
+            d["extra_args"] = tuple(self.extra_args) + tuple(d["extra_args"])
+        if "ep_size" in d and not d["ep_size"]:
+            d["ep_size"] = None
+        return replace(self, **d)
+
     def to_sglang_args(self) -> list[str]:
         """Render as `sglang.launch_server` CLI arguments."""
         a = [
