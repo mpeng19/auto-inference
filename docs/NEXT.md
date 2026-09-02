@@ -120,6 +120,14 @@ What matters:
   suspect**; the two full baselines ran alone in fresh containers and stand.
   night-4 is the first fleet whose measurements are attributable.
 
+- **The baseline must be stock on its good days.** With N=12 on the SLO
+  line, stock prices $12.2 when it holds and $15.0 when it does not, and it
+  held in four of five sweeps on 2026-09-02. A single stock run is a draw
+  from that; the $14.96 run was the unlucky one, and against it a no-op diff
+  is a replicated 18% win. Until N* is interpolated, the fleet baseline is
+  the **best** stock measurement on the grid ($12.23, `docs/examples/
+  baseline-1xh100`), and the screen baseline the best stock-equivalent
+  screen ($17.30 of 17.30-17.52). A win beats that or it is not a win.
 - **The frontier is quantised to the grid, and that manufactures wins.**
   A no-op diff scored 18% below baseline: N=12 held 20 ms mean TPOT in its
   sweep (19.x ms) and missed in stock's (22.0 ms), so N* moved from 8 to 12
