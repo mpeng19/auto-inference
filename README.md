@@ -90,6 +90,7 @@ price them with the simulator. Four services, each defined by a Protocol in
 | `SessionStore` | the seam between a running fleet and anything watching it |
 | `AgentService` | one idea, iterated, with divergence and retry policy |
 | `OrchestrationService` | N of those at once, kept diverse and in budget |
+| `IdeaBankService` | where ideas of the right size come from, claimed one per agent |
 
 **Agents are Claude Code processes.** Each runs as `claude -p` in its own
 workspace directory, edits the files there, and the harness reads the diff
@@ -134,6 +135,30 @@ agent  status      idea                  att      Δ%       $  activity
 a00    evaluating  prefill chunking        3   -10.3    2.60  attempt 3: full running; studying meanwhile
 a03    evaluating  queue ordering          1   -11.7    5.60  attempt 1: screen running; studying meanwhile
 ```
+
+**Where ideas come from.** Seeded with one-sentence hints, the first fleets
+produced one-line diffs: fifteen scheduler constants in a night, every one
+inside noise, two agents on the same constant. Ideas of the size that move
+cost per token arrive as records in the **idea bank** -- mechanism, sources,
+target files, expected gain, risks -- produced from the inference engineering
+book (`docs/ideas/book.jsonl`, committed) and an arXiv feed, and claimed by
+the fleet one per agent, least similar to what is live or tried first:
+
+```bash
+harness ideas import docs/ideas/book.jsonl --source book
+harness ideas arxiv -k 15 --model opus         # abstracts -> records, or NO
+harness ideas list                             # status, scale, who holds what
+harness start --agents 3 --model opus --mode build --bank --manager ...
+```
+
+`--mode build` changes what an agent is asked for: a design note first, a
+multi-file change expected, kernels welcome, and a workbench correctness
+check plus the equivalence gate before any sweep is spent. `--manager` adds
+one reviewer that reads every few outcomes and stashes a reusable script
+under the run's `tools/` only when it can name the agent-hours it saves;
+agents see the index in their prompt. A claimed win at full tier is measured
+twice and the worse run kept, because a level sitting on the SLO line passes
+or fails on noise (`docs/NEXT.md`, "What the first night found").
 
 **Tools agents can call.** An agent's feedback loop is otherwise one bit every
 25–60 minutes. These put signal in front of that:

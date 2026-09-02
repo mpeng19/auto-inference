@@ -6,107 +6,83 @@ next-steps note, not a running log — findings go in docstrings and
 
 ## The honest state
 
-Everything below has been exercised end to end **except the GPU path**. The
-simulator's analysis reproduces the 1xH100 baseline exactly from a stored
-sweep; the fleet, TUI, control plane, memory, traces and tools have all run
-against real Claude Code agents. But since `frontier` was rewritten as
-`sweep()`, **nothing has actually rented a GPU**. Specifically unverified:
+The tune-mode loop (nights 1-5, 2026-09-02) runs end to end: fifty-odd
+evaluations, honest verdicts, no wins. It produced one-line scheduler tweaks
+because that is what it asked for. The build-mode loop -- idea bank, GPU
+workbench, token-level gate, build prompt, manager -- is written and tested
+but **no build-mode agent has run yet**, and the workbench has run one smoke
+script. Treat the first build run as a systems test that may produce a kernel.
 
-- `runner.sweep()` — rewritten, deployed, never executed
-- the quality gate against a live server (`/v1/completions`, GSM8K scoring)
-- profile capture (`/start_profile`) and `simulate profile`
-- `InferenceStack.apply()` on a real container with a real diff
-- the whole chain: agent workspace -> stack -> Modal -> price -> memory
-
-So the first run is a **systems test that happens to produce a number**, not a
-result. Treat any price it prints as unconfirmed until a second run agrees.
-
-## Step 1 — a baseline sweep (~45 min, ~$3)
-
-Agents need two numbers before they can be scored: the baseline bill and the
-baseline accuracy. Both come from one stock run. Do this first and alone, so a
-failure is attributable.
+## Step 1 -- baselines (once per grid; done for 2026-09-02)
 
 ```bash
 mkdir -p runs/baseline runs/baseline-screen
 uv run simulate run --root runs/baseline --levels 4,8,12,16,24 --seconds 120 --n-gpu 1
-# stock at the fleet's *screen* tier, on the same grid a screen uses
 uv run simulate run --root runs/baseline-screen --levels 8,12 --seconds 60 --n-gpu 1
 ```
 
-Two runs, because a screen is not a small full sweep: its price carries
-warm-up that 120 s levels amortise, and stock priced ~15% higher at screen
-tier on 2026-09-02. A screen is compared with stock measured the same way or
-it can never be promoted.
+Read the interpolated frontier line as well as N*. The stock numbers on this
+grid are $12.23/1k full (stock on its good days; see below), $17.30 screen,
+GSM8K 0.69.
 
-Check, in order:
-
-1. It completed. If it died, read `runs/.../sweep.json` `failure` and the
-   `server_log_tail` — the launch traps are model-spec and parallelism ones
-   (`docs/methodology.md` §6).
-2. `report.txt` has `quality gsm8k: NN%`. **If quality is missing or errored,
-   stop** — the gate is the only thing standing between a speed win and a
-   worse model, and a fleet without it is worse than no fleet.
-3. `N*` is bracketed, i.e. some level passes and some fails. If every level
-   passes, the sweep never found the frontier and the price is an upper bound;
-   raise the top level and re-run.
-4. Sanity: `busy_frac` near 1.0 (`::sanity`), and `eff-in`/`out` within a
-   factor of two of $0.029/M and $5.60/M. Wildly different means something
-   structural changed, not that we got faster.
-
-Record the three numbers. They are the fleet's `--baseline`, and `harness start`
-refuses to run without all of them: each missing one is a way the fleet runs
-all night and learns nothing.
-
-## Step 2 — three agents, overnight (~8h, cap $60)
-
-Three, not ten: the point is to find out whether the loop runs at all, and
-three is enough to exercise seeding diversity, dedup and the eval queue while
-keeping the bill legible.
+## Step 2 -- the equivalence reference and its noise floor (once per model)
 
 ```bash
-uv run harness --session night-1 start \
-  --agents 3 --evals 2 --model sonnet \
-  --budget 60 --agent-budget 20 --max-attempts 3 \
-  --root agents/night-1 \
-  --baseline '{"bill_per_1k": <full>, "quality": {"gsm8k": <acc>}, "screen": {"bill_per_1k": <screen>}}' \
-  --seed "raise the decode batch the SLO permits" \
-  --seed "reduce per-sequence KV bytes read per decode step" \
-  --seed "improve prefix cache hit rate under load"
+mkdir -p runs/equiv-ref runs/equiv-noise
+uv run simulate equivalence --root runs/equiv-ref       # stock: writes the cached reference
+uv run simulate equivalence --root runs/equiv-noise     # stock again: the noise floor
 ```
 
-The seeds are not arbitrary. `docs/methodology.md` §8.3 says the per-sequence
-KV term runs at 0.22–0.28 of memory bandwidth and **does not amortise with
-batch** — it is the one term a TPOT SLO converts directly into money. The
-second seed aims at it; the other two are controls.
+The second run's agreement and mean |dlogprob| are what a candidate must
+stay inside; the thresholds in `measure/equivalence.py` (0.97, 0.05) are
+provisional until this has run.
 
-Watch it with `harness tui`. Leave it.
+## Step 3 -- fill the bank (once; grows over time)
 
-### Cost arithmetic, so the cap is a decision and not a hope
+```bash
+uv run harness ideas import docs/ideas/book.jsonl --source book   # 27 records, committed
+uv run harness ideas arxiv -k 15 --model opus                       # ~30 min of model calls
+uv run harness ideas list
+```
 
-A full sweep is ~45 min of 1xH100 at Modal retail ($3.95/hr) ≈ **$2.90**; a
-screen is ~13 min ≈ **$0.85**. With `--evals 2` the fleet can burn about
-$7.70/hour flat out, so $60 is roughly an 8-hour night. `--budget` is the hard
-stop; `--agent-budget 20` stops one agent monopolising it.
+Records carry mechanism, targets, expected gain and risks. `harness ideas
+show <id>` before believing one.
+
+## Step 4 -- three build-mode agents, overnight
+
+```bash
+uv run harness --session build-1 start \
+  --agents 3 --evals 2 --model opus --mode build --bank --manager \
+  --budget 200 --agent-budget 70 --max-attempts 4 \
+  --root agents/build-1 \
+  --baseline '{"bill_per_1k": 12.23, "quality": {"gsm8k": 0.69}, "screen": {"bill_per_1k": 17.30}}'
+```
+
+No `--seed`: agents claim from the bank, least-similar first, one mechanism
+each. Opus, because a kernel is not a knob. Four attempts, because an attempt
+is now hours: design note, workbench correctness and micro-benchmark,
+equivalence, then the sweep. The manager reviews every third outcome and
+stashes a tool under `agents/build-1/tools/` only when it can name the hours
+it saves; agents see the index in their prompt.
+
+**Leave the lid open.** The daemon runs under `caffeinate`, which does not
+survive clamshell sleep; the status line prints `host slept` if it happens.
 
 ## In the morning
 
 ```bash
-harness status                       # or: harness --session night-1 status
-harness traces list --root agents/night-1
-harness traces show <id> --kind eval_submit --full   # the diffs they wrote
-harness tool recall "decode batch" --root agents/night-1
+uv run harness --session build-1 status
+uv run harness traces list --root agents/build-1
+uv run harness traces show <id> --kind eval_submit --full     # the diffs
+uv run harness ideas list --status tried
+ls agents/build-1/tools/                                     # what the manager stashed
 ```
 
-Judge the *system*, not the science. Three attempts each is nowhere near enough
-to find a real improvement, and a win on one sweep is noise until replicated.
-What matters:
-
-- Did every agent get an idea, write a diff, and get it priced?
-- Did the eval queue stay busy (`gpu_utilisation`), or did agents stall?
-- Did `cost_usd` track something plausible, and did the budget bind?
-- Did anything reach memory, and can a second agent read it back?
-- Did any diff fail `preflight` or the quality gate, and was that correct?
+Judge: did each agent write a DESIGN.md and run the workbench before the
+sweep (`tool_call` turns, `denials` = 0 in the call stats)? Did any kernel
+pass equivalence? Did the manager stash anything, and was it worth it? A
+price move is a result only if it is outside the interpolated frontier's
+noise and replicated.
 
 ## What the first night found (2026-09-02)
 
