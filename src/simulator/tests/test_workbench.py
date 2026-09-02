@@ -224,3 +224,18 @@ def test_cli_equivalence_exits_nonzero_on_a_regression(root, monkeypatch):
 
     monkeypatch.setattr(Simulator, "equivalence", fake)
     assert main(["equivalence", "--root", str(root)]) == 1
+
+
+def test_results_path_guard_resolves_the_mount_too(tmp_path):
+    """/results is a symlink inside the container; the guard must resolve
+    both sides or it rejects every real file (it did)."""
+    from simulator.runner.modal_runner import _inside
+
+    real = tmp_path / "vol"
+    (real / "equivalence").mkdir(parents=True)
+    (real / "equivalence" / "ref.json").write_text("{}")
+    link = tmp_path / "results"
+    link.symlink_to(real)
+    assert _inside(str(link), str(link / "equivalence" / "ref.json"))
+    assert not _inside(str(link), str(link / ".." / "vol" / ".." / "elsewhere"))
+    assert not _inside(str(link), str(tmp_path / "other.json"))

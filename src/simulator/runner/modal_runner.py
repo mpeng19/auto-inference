@@ -558,6 +558,14 @@ def _write_helpers(scratch: pathlib.Path, files: dict[str, str]) -> list[str]:
     return written
 
 
+def _inside(root: str, path: str) -> bool:
+    """Is `path` under `root` once both are resolved? Both sides resolved,
+    because a volume mount is a symlink: comparing the resolved file against
+    the literal "/results" rejected every real file on the first run."""
+    r = os.path.realpath(root)
+    return os.path.commonpath([r, os.path.realpath(path)]) == r
+
+
 @app.function(image=image, volumes={"/results": results_vol}, timeout=600)
 def read_results(paths: list[str]) -> dict:
     """Read JSON files off the results volume, by path. One call, many files.
@@ -574,7 +582,7 @@ def read_results(paths: list[str]) -> dict:
     out: dict = {}
     for p in paths:
         full = p if p.startswith("/results/") else f"/results/{p.lstrip('/')}"
-        if os.path.commonpath(["/results", os.path.realpath(full)]) != "/results":
+        if not _inside("/results", full):
             out[p] = {"ok": False, "error": "path escapes /results"}
             continue
         if not os.path.isfile(full):
