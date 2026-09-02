@@ -319,7 +319,14 @@ class Simulator:
         `local_entrypoint`'s in-flight call dies with its client, which
         cancelled a sweep three levels in once.
         """
-        call = self._fn().spawn(*self._args())
+        return self._record(self._fn().spawn(*self._args()))
+
+    async def submit_async(self) -> str:
+        """`submit()` for callers already on an event loop (`eval`, the
+        harness). Modal's blocking interface warns when used under one."""
+        return self._record(await self._fn().spawn.aio(*self._args()))
+
+    def _record(self, call) -> str:
         (self.root / "call_id").write_text(call.object_id)
         return call.object_id
 
@@ -345,7 +352,7 @@ class Simulator:
 
     async def eval(self) -> EvalResult:
         """Submit, wait, analyse, write artifacts. The one call most callers want."""
-        return await self.collect(self.submit())
+        return await self.collect(await self.submit_async())
 
     # ── analysis, which needs no GPU ─────────────────────────────────────
     def analyse(self, record: dict) -> EvalResult:

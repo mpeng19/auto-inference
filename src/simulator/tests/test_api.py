@@ -199,3 +199,32 @@ def test_clean_quality_does_not_flag(root, sweep):
     res = Simulator(root_dir=root, n_gpu=1, levels=(4, 8, 12, 16, 24)).analyse(sweep)
     assert res.ok and not res.quality_regressed
     assert "quality gsm8k: 72.0%" in res.summary()
+
+
+def test_submit_records_the_call_id_on_both_paths(root, monkeypatch):
+    """`eval()` awaits the sweep from an event loop, so it must use Modal's
+    async spawn; `submit()` stays blocking for the CLI. Both leave `call_id`
+    behind so a dead client can still `collect`."""
+    import asyncio
+
+    from simulator import Simulator
+
+    class Call:
+        object_id = "fc-123"
+
+    class Spawn:
+        def __call__(self, *a):
+            return Call()
+
+        async def aio(self, *a):
+            return Call()
+
+    class Fn:
+        spawn = Spawn()
+
+    monkeypatch.setattr(Simulator, "_fn", lambda self: Fn())
+    s = Simulator(root_dir=root)
+    assert s.submit() == "fc-123"
+    (root / "call_id").unlink()
+    assert asyncio.run(s.submit_async()) == "fc-123"
+    assert (root / "call_id").read_text() == "fc-123"
