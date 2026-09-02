@@ -145,6 +145,8 @@ class FleetApp(App):
                  f"{v.evals_queued} queued  {v.evals_completed} done  "
                  f"{v.evals_deduped} deduped  {v.gpu_utilisation:.0%} utilisation",
                  style="cyan")
+        if v.note:
+            t.append(f"\n{v.note}", style="bold red")
         self.summary_text = t.plain
         s.update(t)
 

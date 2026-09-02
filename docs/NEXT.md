@@ -145,6 +145,17 @@ What matters:
 - **Spend must land per attempt**, or the dashboard and the budget are blind
   for an entire idea.
 
+## The laptop is part of the fleet
+
+The daemon and every agent run on the machine that is logged in to Claude
+Code. When it sleeps they freeze, their timeouts freeze with them, and the
+sweeps they submitted keep billing on Modal. On 2026-09-02 a closed lid at
+08:39 held three agents for five hours: night-5 averaged one evaluation an
+hour overnight and six an hour once the lid was open. `harness start` now
+runs the daemon under `caffeinate -i -s`, which prevents idle and AC sleep
+but **not clamshell sleep** -- leave the lid open, or attach an external
+display. The status line and TUI print `host slept ~N min` when it happens.
+
 ## Known gaps, worth fixing before scaling to ten
 
 - **No profile is captured by default.** `--profile-level` exists and is

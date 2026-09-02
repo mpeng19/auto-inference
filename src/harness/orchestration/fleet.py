@@ -84,6 +84,8 @@ class Fleet:
         self._next_index = 0
         self._target = 0
         self._cost = 0.0
+        self._slept_s = 0.0
+        self._sleep_note = ""
         self._completed: list[AgentOutcome] = []
 
     @property
@@ -295,11 +297,22 @@ class Fleet:
                 evals_deduped=getattr(q, "deduped", 0),
                 gpu_utilisation=getattr(q, "utilisation", 0.0),
                 budget_usd=self._spec.fleet_budget.max_usd_total if self._spec else 0.0,
-                pid=os.getpid(), root=self.root)
+                pid=os.getpid(), root=self.root, note=self._sleep_note)
+
+    # A tick that takes far longer than `tick_s` of wall time means the host
+    # was suspended: every agent's Claude call and timeout froze with it,
+    # while the sweeps it had submitted kept billing. Worth shouting about.
+    SLEEP_GAP_S = 120.0
 
     def _control_loop(self) -> None:
         """Apply operator commands, publish the snapshot. Once per tick."""
+        last = time.time()
         while not self._stop.is_set():
+            now = time.time()
+            gap = now - last - self.tick_s
+            if gap > self.SLEEP_GAP_S:
+                self.note_host_sleep(gap)
+            last = now
             if self.store is not None:
                 # A watcher's database must never be able to kill a fleet
                 # that is mid-experiment and holding rented GPUs.
@@ -310,6 +323,15 @@ class Fleet:
             if not self._within_budget():
                 break
             time.sleep(self.tick_s)
+
+    def note_host_sleep(self, seconds: float) -> None:
+        """Record that the host stopped running us for `seconds`."""
+        msg = f"host slept ~{seconds/60:.0f} min ending {time.strftime('%H:%M')}"
+        with self._lock:
+            self._slept_s += seconds
+            self._sleep_note = msg
+        print(f"WARNING: {msg}; agents were frozen, rented GPUs were not",
+              flush=True)
 
     def _apply(self, cmd: Command) -> str:
         k, a = cmd.kind, cmd.agent_id

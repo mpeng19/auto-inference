@@ -25,6 +25,7 @@ import json
 import os
 import pathlib
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -63,8 +64,16 @@ def cmd_start(a) -> int:
     cfg.save(cfg_path)
 
     log = (root / "daemon.log").open("a")
+    # The daemon lives on this laptop because the agents are this laptop's
+    # Claude Code login. If the laptop sleeps, so does the fleet: on
+    # 2026-09-02 a closed lid froze three agents for five hours while the
+    # GPUs they had rented kept running. `caffeinate -i -s` holds off idle
+    # and AC sleep for as long as the daemon runs; it cannot override a
+    # closed lid without an external display, so the TUI also reports gaps.
+    daemon = [sys.executable, "-m", "harness.daemon", "--config", str(cfg_path)]
+    caff = shutil.which("caffeinate")
     proc = subprocess.Popen(
-        [sys.executable, "-m", "harness.daemon", "--config", str(cfg_path)],
+        [caff, "-i", "-s", *daemon] if caff else daemon,
         stdout=log, stderr=subprocess.STDOUT,
         # Its own process group, so closing this terminal (or Ctrl-C here)
         # does not take down a fleet holding rented GPUs.
@@ -96,6 +105,8 @@ def cmd_status(a) -> int:
     print(f"{v.session_id}   {v.phase}   {v.live_agents}/{v.target_agents} agents"
           f"   ${v.cost_usd:.2f} of ${v.budget_usd:.0f}"
           f"   {v.tokens.total:,} tokens   updated {age:.0f}s ago")
+    if v.note:
+        print(f"note:  {v.note}")
     print(f"evals: {v.evals_running} running, {v.evals_queued} queued, "
           f"{v.evals_completed} done, {v.evals_deduped} deduped, "
           f"{v.gpu_utilisation:.0%} GPU utilisation")

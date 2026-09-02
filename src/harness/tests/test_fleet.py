@@ -767,3 +767,18 @@ def test_a_failed_sweep_still_costs(tmp_path):
         simulator.Simulator = real
     assert not ok and failure == "slo"
     assert metrics["cost_usd"] > 0, "a failed sweep still rented the GPU"
+
+
+def test_host_sleep_is_reported_not_hidden():
+    """A closed lid froze three agents for five hours on 2026-09-02 while the
+    GPUs they had rented kept billing; nothing said so. The control loop
+    notices a wall-clock gap and the snapshot carries it."""
+    broker = EvalBroker(lambda r: (True, {}, ""), capacity=1)
+    fleet = Fleet(lambda a, f: None, broker)
+    try:
+        fleet.note_host_sleep(4 * 3600)
+        snap = fleet._snapshot()
+        assert "host slept ~240 min" in snap.note
+        assert fleet._slept_s == 4 * 3600
+    finally:
+        broker.shutdown()
