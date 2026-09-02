@@ -206,6 +206,29 @@ Three mechanisms keep utilisation high, in descending order of what they buy:
 working, and tests assert that every `study` call happens with an evaluation
 actually in flight.
 
+## GPU profiles
+
+`src/tracedb/` is a queryable database for GPU profiling traces, built for
+agents. A kineto trace is hundreds of thousands of events; no agent reads one.
+But trace debugging is pattern matching, and those are queries.
+
+```bash
+simulate run --root runs/x --profile-level 8      # capture during the sweep
+simulate profile --dir <dir from the record>      # download and ingest
+tracedb --db profiles/trace.sqlite summary
+tracedb --db profiles/trace.sqlite gaps attn_out mlp_in --min-gap 100
+tracedb --db profiles/trace.sqlite idle --min-gap 50
+```
+
+This is what turns *"decode runs at 28% of memory bandwidth"*
+(`docs/methodology.md` §8.3) into *"and here is the kernel where it goes"*.
+Profiling perturbs what it measures, so it runs at one level only and the price
+still comes from N\*.
+
+Agents reach it as **MCP tools**, not through the shell — `harness.profile`
+generates a `--mcp-config` per agent so `trace_summary`, `trace_gaps`,
+`trace_gpu_idle` and `trace_slowest` appear as typed tools they can discover.
+
 ## Layout
 
 ```
@@ -230,7 +253,9 @@ src/harness/            the auto-research harness
   agent/                Workspace (the diff API), the loop, the Claude Code proposer
   orchestration/        Fleet + EvalBroker: N agents, one queue for the GPUs
   tui/                  the dashboard
+  profile.py            points agents at a captured GPU profile over MCP
   daemon.py cli.py      `harness start|status|tui|scale|agent|stop|kill`
+src/tracedb/            queryable GPU trace database (`tracedb`, `tracedb-mcp`)
 monitor/                Modal spend monitoring
 docs/methodology.md     how the method was arrived at, and every negative result
 docs/example.ipynb      minimal end-to-end notebook

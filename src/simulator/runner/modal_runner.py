@@ -130,7 +130,8 @@ def _provenance() -> dict:
 def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
           seconds_per_level: float = 120.0, repeats: int = 1,
           target_in: int = 0, target_out: int = 0, n_sessions: int = 300,
-          canaries: bool = True, note: str = "", allow_stale: bool = False) -> dict:
+          canaries: bool = True, note: str = "", allow_stale: bool = False,
+          profile_level: int = 0, profile_steps: int = 20) -> dict:
     """Sweep concurrent conversations; return one record per level.
 
     Every level records its full percentile set and its raw server counters, so
@@ -232,6 +233,17 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
 
             for n_users in levels:
                 for rep in range(repeats):
+                    # Profiling perturbs what it measures, so it runs at one
+                    # level only and never at the level the price comes from
+                    # unless asked for explicitly.
+                    profiling = profile_level and n_users == profile_level and rep == 0
+                    if profiling:
+                        pdir = f"/results/profiles/{int(time.time())}-N{n_users}"
+                        os.makedirs(pdir, exist_ok=True)
+                        rec.setdefault("profiles", []).append(
+                            {"level": n_users, "dir": pdir,
+                             "start": asyncio.run(srv.start_profile(
+                                 SERVER_URL, pdir, profile_steps))})
                     before = asyncio.run(srv.scrape(SERVER_URL))
                     t0 = time.perf_counter()
                     res, batch = asyncio.run(measure(n_users, seconds_per_level))
@@ -264,6 +276,10 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
                         "client_health": client_health(res),
                         "server_counters": ctr,
                     }
+                    if profiling:
+                        asyncio.run(srv.stop_profile(SERVER_URL))
+                        results_vol.commit()
+                        lvl["profile_dir"] = rec["profiles"][-1]["dir"]
                     v = sl.judge(lvl)
                     lvl["meets_slo"] = v.ok
                     lvl["slo_checks"] = v.checks
@@ -306,6 +322,28 @@ def _save(rec: dict, sc) -> dict:
     rec["result_path"] = path
     print(f"saved {path}", flush=True)
     return rec
+
+
+@app.function(image=image, volumes={"/results": results_vol}, timeout=900)
+def fetch_profile(rel_dir: str) -> dict:
+    """Return the captured trace files, so they can be ingested locally.
+
+    Bytes rather than a path: a kineto trace is a few MB and the alternative is
+    teaching every caller how to mount a Modal volume.
+    """
+    import base64
+    import os
+
+    d = rel_dir if rel_dir.startswith("/results") else f"/results/profiles/{rel_dir}"
+    out = []
+    if os.path.isdir(d):
+        for name in sorted(os.listdir(d)):
+            p = os.path.join(d, name)
+            if os.path.isfile(p) and os.path.getsize(p) < 200_000_000:
+                with open(p, "rb") as f:
+                    out.append({"name": name, "size": os.path.getsize(p),
+                                "b64": base64.b64encode(f.read()).decode()})
+    return {"dir": d, "files": out}
 
 
 @app.function(image=image, volumes={"/results": results_vol}, timeout=600)

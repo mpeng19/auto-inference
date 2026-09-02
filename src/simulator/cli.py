@@ -38,7 +38,9 @@ def _build(a) -> Simulator:
                      repeats=a.repeats, rate_per_gpu_hour=a.rate,
                      gpu_provider=a.provider,
                      utilisation=a.utilisation, note=a.note,
-                     canaries=not a.no_canaries, **kw)
+                     canaries=not a.no_canaries,
+                     profile_level=a.profile_level,
+                     profile_steps=a.profile_steps, **kw)
 
 
 def _report(sim: Simulator, res) -> int:
@@ -47,6 +49,42 @@ def _report(sim: Simulator, res) -> int:
     for k, v in res.artifacts.items():
         print(f"  {k:<16} {v}")
     return 0 if res.ok else 1
+
+
+def cmd_profile(a) -> int:
+    """Download a captured GPU profile and ingest it into a trace database.
+
+    The capture lives on the results volume; this brings it local and hands it
+    to `tracedb`, after which the questions are queries rather than a 40 MB
+    JSON nobody can read.
+    """
+    import base64
+
+    import modal
+
+    fn = modal.Function.from_name("auto-inference", "fetch_profile")
+    got = fn.remote(a.dir)
+    if not got["files"]:
+        print(f"no trace files under {got['dir']}", file=sys.stderr)
+        return 1
+    out = pathlib.Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    written = []
+    for f in got["files"]:
+        p = out / f["name"]
+        p.write_bytes(base64.b64decode(f["b64"]))
+        written.append(p)
+        print(f"  {p}  ({f['size']:,} bytes)")
+
+    traces = [p for p in written if p.suffix in (".json", ".gz", ".jsonl")]
+    if not traces:
+        print("nothing that looks like a chrome trace; not ingesting")
+        return 0
+    from tracedb.ingest import ingest
+    db = out / "trace.sqlite"
+    print(json.dumps(ingest(traces[0], db), indent=1))
+    print(f"\nquery it:  tracedb --db {db} summary")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="$/GPU-hour; overrides --provider")
         p.add_argument("--utilisation", type=float, default=0.50)
         p.add_argument("--no-canaries", action="store_true")
+        p.add_argument("--profile-level", dest="profile_level", type=int, default=0,
+                       help="capture a GPU profile at this concurrency level")
+        p.add_argument("--profile-steps", dest="profile_steps", type=int, default=20)
         p.add_argument("--note", default="")
 
     common(sub.add_parser("run", help="submit, wait, analyse, write artifacts"))
@@ -81,6 +122,11 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("rescore", help="re-judge a stored sweep, no GPU")
     common(r)
     r.add_argument("--sweep", default="", help="defaults to <root>/sweep.json")
+    pr = sub.add_parser("profile", help="download and ingest a captured GPU profile")
+    pr.add_argument("--dir", required=True, help="profile dir from the sweep record")
+    pr.add_argument("--out", default="profiles", help="local destination")
+    pr.set_defaults(fn=cmd_profile)
+
     sub.add_parser("ls", help="list stored sweeps")
 
     a = ap.parse_args(argv)

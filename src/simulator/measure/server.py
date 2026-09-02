@@ -408,3 +408,37 @@ async def warmup(base_url: str, model: str, n: int = 20) -> float:
             except Exception:
                 pass
     return _t.perf_counter() - t0
+
+
+# ── GPU profiling: torch/kineto capture around a measured window ─────────
+
+async def start_profile(base_url: str, output_dir: str, num_steps: int = 20,
+                        by_stage: bool = True) -> dict:
+    """Ask SGLang to capture `num_steps` of forward passes into `output_dir`.
+
+    The device timer says decode costs 3.36 ms per output token and that the KV
+    read runs at ~28% of memory bandwidth (`docs/methodology.md` 8.3). It
+    cannot say *which kernel*. This can.
+
+    `num_steps` rather than a stop call: SGLang stops on its own after that
+    many steps, so a capture cannot run away and fill the volume if the caller
+    dies mid-window. `profile_by_stage` splits prefill from decode, which is
+    the split every question here is asked along.
+    """
+    body = {"output_dir": output_dir, "num_steps": num_steps,
+            "activities": ["CPU", "GPU"], "profile_by_stage": by_stage}
+    async with aiohttp.ClientSession() as s, s.post(
+            base_url.rstrip("/") + "/start_profile", json=body,
+            timeout=aiohttp.ClientTimeout(total=120)) as r:
+        return {"status": r.status, "body": (await r.text())[:400]}
+
+
+async def stop_profile(base_url: str) -> dict:
+    """Belt to `num_steps`' braces; harmless if profiling already stopped."""
+    try:
+        async with aiohttp.ClientSession() as s, s.post(
+                base_url.rstrip("/") + "/stop_profile",
+                timeout=aiohttp.ClientTimeout(total=120)) as r:
+            return {"status": r.status, "body": (await r.text())[:400]}
+    except Exception as e:
+        return {"status": 0, "body": f"{type(e).__name__}: {e}"}

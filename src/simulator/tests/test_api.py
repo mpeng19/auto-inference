@@ -150,3 +150,13 @@ def test_good_frac_is_a_runtime_gate_not_a_rescoring_one(root, sweep):
     free = sim(root, slo=SLO(bounds=SLO.parse("tpot:mean:9999").bounds,
                              min_good_frac=0.0))
     assert free.analyse(sweep).n_star == 24
+
+
+def test_profiling_is_off_by_default_and_plumbed_when_asked(root):
+    """It perturbs what it measures, so it must never be on by accident."""
+    from simulator import Simulator
+
+    assert Simulator(root_dir=root).profile_level == 0
+    s = Simulator(root_dir=root, profile_level=8, profile_steps=30)
+    args = s._args()
+    assert args[-2:] == (8, 30), "profile settings must reach the runner"

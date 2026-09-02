@@ -174,6 +174,13 @@ class Simulator:
     repeats: int = 1
     n_sessions: int = 300
     canaries: bool = True
+    # Capture a GPU profile at this concurrency level (0 = none). Profiling
+    # perturbs what it measures, so it runs at one level and the price is still
+    # taken from N*. `docs/methodology.md` 8.3 is the question it answers:
+    # the device timer says the KV read is at ~28% of bandwidth but not which
+    # kernel spends it.
+    profile_level: int = 0
+    profile_steps: int = 20
     slo: SLO = field(default_factory=lambda: SLO(bounds=MARKET_SLO))
 
     # ── the cost basis: assumptions, never measurements ──
@@ -267,7 +274,8 @@ class Simulator:
         return (asdict(self.serving), self.slo.as_dict(), self.stack.as_dict(),
                 list(self.levels), self.seconds_per_level, self.repeats,
                 MARKET_IN_PER_REQ, MARKET_OUT_PER_REQ, self.n_sessions,
-                self.canaries, self.note, self.allow_stale_stack)
+                self.canaries, self.note, self.allow_stale_stack,
+                self.profile_level, self.profile_steps)
 
     def submit(self) -> str:
         """Start the sweep and return immediately. Runs outlive this process.

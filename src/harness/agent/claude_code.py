@@ -78,6 +78,10 @@ class ClaudeCodeProposer:
     binary: str = "claude"
     permission_mode: str = "acceptEdits"
     extra_args: tuple[str, ...] = ()
+    # Path to a `--mcp-config` JSON. When a fleet has captured a GPU profile,
+    # this points the agent at `tracedb`'s tools so it can ask where the time
+    # actually went instead of reasoning about it.
+    mcp_config: str = ""
     # Off by default: an inherited API key silently bills the wrong account.
     use_api_key: bool = False
     # Set by the agent loop so token use lands on the right dashboard row.
@@ -115,6 +119,7 @@ class ClaudeCodeProposer:
                "--model", model or self.model,
                "--output-format", "json",
                "--permission-mode", self.permission_mode,
+               *(("--mcp-config", self.mcp_config) if self.mcp_config else ()),
                *self.extra_args]
         r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
                            timeout=self.timeout_s, env=self._env())

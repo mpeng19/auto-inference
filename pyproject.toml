@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Price an LLM serving stack the way a marketplace would"
 requires-python = ">=3.12"
 dependencies = [
+    "mcp>=2.1.1",
     "modal>=1.5.5",
     "numpy>=2.5.2",
     "textual>=8.2.8",
@@ -31,13 +32,15 @@ dev = [
 [project.scripts]
 simulate = "simulator.cli:main"
 harness = "harness.cli:main"
+tracedb = "tracedb.cli:main"
+tracedb-mcp = "tracedb.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/simulator", "src/harness"]
+packages = ["src/simulator", "src/harness", "src/tracedb"]
 # The market snapshot is package data, not repo data (see price.market), and the
 # tests ship with it so an installed copy can be verified: `pytest --pyargs simulator`.
 artifacts = ["src/simulator/data/*.json", "src/simulator/tests/data/*.json"]
@@ -47,7 +50,7 @@ asyncio_mode = "auto"
 # Tests live beside the code they test. Every test directory is a package
 # (`__init__.py`), so pytest imports them through `simulator.*` rather than by
 # path -- which is what makes `pytest <any path>` work from any directory.
-testpaths = ["src/simulator", "src/harness"]
+testpaths = ["src/simulator", "src/harness", "src/tracedb"]
 
 [tool.ruff]
 src = ["src"]
@@ -72,3 +75,8 @@ ignore = [
 # destroys the only structure the file has.
 "src/harness/contracts/__init__.py" = ["RUF022"]
 "src/harness/__init__.py" = ["RUF022"]
+# tracedb was written elsewhere in a deliberately dense style (its whole
+# point is being compact enough to read in one sitting). Reformatting 800
+# lines of validated code to satisfy a whitespace rule is a bad trade; the
+# substantive findings were fixed.
+"src/tracedb/**" = ["E701", "E702"]
