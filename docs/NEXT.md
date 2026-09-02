@@ -110,6 +110,16 @@ What matters:
 
 ## What the first night found (2026-09-02)
 
+- **Warm containers carried the previous stack's files.** `apply()` backed
+  up each file it overwrote and nothing ever restored it. Modal reuses a
+  container between back-to-back calls, so every evaluation after the first
+  in a container ran on top of the last one's diff, a stock run in a warm
+  container was not stock, and a stack touching a file the previous one had
+  touched was refused as "stale". Fixed: `apply()` restores stock first and
+  records `restored`. **Every fleet number from night-1 to night-3 is
+  suspect**; the two full baselines ran alone in fresh containers and stand.
+  night-4 is the first fleet whose measurements are attributable.
+
 - **The frontier is quantised to the grid, and that manufactures wins.**
   A no-op diff scored 18% below baseline: N=12 held 20 ms mean TPOT in its
   sweep (19.x ms) and missed in stock's (22.0 ms), so N* moved from 8 to 12
