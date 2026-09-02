@@ -86,7 +86,7 @@ def test_ask_sends_the_run_as_cached_context_and_keeps_history(tmp_path):
 
     class Messages:
         def stream(self, **kw):
-            calls.append(kw)
+            calls.append({**kw, "messages": list(kw["messages"])})   # a snapshot
             return Stream(kw)
 
     client = type("C", (), {"beta": type("B", (), {"messages": Messages()})()})()

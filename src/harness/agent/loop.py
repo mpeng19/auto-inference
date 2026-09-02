@@ -535,7 +535,10 @@ class IterativeAgent:
             agent_id=self.agent_id, idea_id=idea.id, timeline=idea.timeline,
             hypothesis=idea.hypothesis, rationale=rationale,
             stack_digest=att.stack_digest, verdict=verdict,
-            metrics=att.metrics, baseline_metrics=self.baseline,
+            # The tier travels with the metrics: a screen's price is judged
+            # against stock at screen tier, and a reader of memory needs to
+            # know which baseline a number was scored on.
+            metrics={**att.metrics, "tier": att.tier}, baseline_metrics=self.baseline,
             summary=self._summarise(att), tags=idea.targets, trace_ref=trace)
         self.memory.record(exp)
         if history:

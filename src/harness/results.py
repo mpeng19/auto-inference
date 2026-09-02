@@ -33,6 +33,7 @@ class Result:
     trace_ref: str
     ts: float
     metrics: dict = field(default_factory=dict)
+    tier: str = "full"
 
     @property
     def title(self) -> str:
@@ -52,7 +53,9 @@ def leaderboard(root: str | pathlib.Path) -> list[Result]:
         m = json.loads(r["metrics"] or "{}")
         base = json.loads(r["baseline_metrics"] or "{}")
         bill = m.get("bill_per_1k")
-        b0 = base.get("bill_per_1k")
+        # A screen is compared with stock at screen tier (see loop._delta).
+        screen = base.get("screen") if m.get("tier") == "screen" else None
+        b0 = (screen or {}).get("bill_per_1k") if isinstance(screen, dict) else base.get("bill_per_1k")
         delta = (round((bill - b0) / b0 * 100, 2)
                  if isinstance(bill, (int, float)) and isinstance(b0, (int, float)) and b0
                  else None)
@@ -69,7 +72,8 @@ def leaderboard(root: str | pathlib.Path) -> list[Result]:
             bill_per_1k=bill if isinstance(bill, (int, float)) else None,
             delta_pct=delta, rank=rank,
             share_pct=(share * 100 if isinstance(share, (int, float)) else None),
-            n_star=m.get("n_star"), quality=q, stack_digest=r["stack_digest"] or "",
+            n_star=m.get("n_star"), quality=q, tier=m.get("tier") or "full",
+            stack_digest=r["stack_digest"] or "",
             trace_ref=r["trace_ref"] or "", ts=r["ts"] or 0.0, metrics=m))
     c.close()
     priced = sorted((x for x in out if x.delta_pct is not None), key=lambda x: x.delta_pct)
