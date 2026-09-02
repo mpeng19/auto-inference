@@ -7,6 +7,7 @@ other's failures back, and stop for the right reasons.
 import pathlib
 import threading
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 import pytest
 
@@ -531,6 +532,8 @@ def test_a_quality_regression_is_not_a_win(tmp_path, stock_dir, memory, context)
         quality = ({"suite": "gsm8k", "regressed": True},)
         bill_per_1k = 6.0          # a large apparent win
         reason = ""
+        record: ClassVar = {"serving": {"n_gpu": 1, "gpu": "H100"},
+                            "model_load_s": 300.0, "levels": [{"wall_s": 200.0}]}
 
     ev = SimulatorEvaluator()
     import simulator
@@ -551,3 +554,68 @@ def test_a_quality_regression_is_not_a_win(tmp_path, stock_dir, memory, context)
     # A rejected hypothesis, not infra: re-running would reproduce it.
     assert failure == "quality"
     assert "accuracy fell" in metrics["reason"]
+
+
+def test_every_evaluation_reports_what_it_cost():
+    """Budgets are checked against `cost_usd`. Omitting it does not make them
+    approximate -- it makes them inert, and a fleet runs with no spend control.
+
+    Caught by inspection before the first real GPU run; every fake returned a
+    cost, so the whole suite passed while the real path reported nothing.
+    """
+    from harness.agent.evaluator import SimulatorEvaluator
+
+    ev = SimulatorEvaluator(n_gpu=1, gpu="H100")
+    rec = {"serving": {"n_gpu": 1, "gpu": "H100"}, "model_load_s": 360.0,
+           "levels": [{"wall_s": 380.0} for _ in range(5)]}
+    spend = ev._spend(rec)
+    assert 2.0 < spend < 3.0, spend
+    # Two GPUs for the same wall time is twice the bill.
+    assert ev._spend({**rec, "serving": {"n_gpu": 2, "gpu": "H100"}}) == \
+        pytest.approx(spend * 2, rel=0.01)
+
+
+def test_cost_uses_retail_not_the_serving_basis():
+    """$3.00/GPU-hr is what a provider would pay to serve; $3.95 is what we are
+    billed to experiment. Charging our own budget the serving basis would
+    understate spend by 24%."""
+    from harness.agent.evaluator import SimulatorEvaluator
+    from simulator import costs
+
+    ev = SimulatorEvaluator()
+    rec = {"serving": {"n_gpu": 1, "gpu": "H100"}, "model_load_s": 3600.0,
+           "levels": []}
+    assert ev._spend(rec) == pytest.approx(
+        costs.rate("H100", "modal", allow_retail=True), rel=0.01)
+    assert ev._spend(rec) > costs.rate("H100")
+
+
+def test_a_failed_sweep_still_costs(tmp_path):
+    """The GPU was rented either way. A failure that reports zero lets an agent
+    burn its budget on infra problems for free."""
+    import simulator
+    from harness.agent.evaluator import SimulatorEvaluator
+
+    class Res:
+        ok = False
+        reason = "no level met the SLO"
+        quality_regressed = False
+        quality: tuple = ()
+        record: ClassVar = {"serving": {"n_gpu": 1, "gpu": "H100"},
+                            "model_load_s": 300.0, "levels": [{"wall_s": 200.0}]}
+
+    real = simulator.Simulator
+    try:
+        class Stub:
+            def __init__(self, **kw):
+                pass
+
+            async def eval(self):
+                return Res()
+
+        simulator.Simulator = Stub
+        ok, metrics, failure = SimulatorEvaluator().evaluate(object(), str(tmp_path))
+    finally:
+        simulator.Simulator = real
+    assert not ok and failure == "slo"
+    assert metrics["cost_usd"] > 0, "a failed sweep still rented the GPU"
