@@ -265,6 +265,12 @@ Tools available in your shell (use them; they are far cheaper than a sweep):
       parses your edit and checks for undefined names. Run this before you
       finish; a NameError costs six GPU-minutes to discover otherwise.
 
+**Accuracy is checked, not assumed.** Every evaluation scores GSM8K on an
+idle server before load. A change that makes the model faster but answers
+worse is rejected outright, however good the price looks -- so do not touch
+sampling, numerics, KV precision or eviction in ways that could change what
+the model says, unless testing exactly that is the hypothesis.
+
 Make the smallest edit that tests the hypothesis. Constraints:
   - Python must parse; a syntax error wastes a GPU sweep.
   - Do not add imports of packages SGLang does not already depend on.

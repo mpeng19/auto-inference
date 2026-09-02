@@ -159,4 +159,42 @@ def test_profiling_is_off_by_default_and_plumbed_when_asked(root):
     assert Simulator(root_dir=root).profile_level == 0
     s = Simulator(root_dir=root, profile_level=8, profile_steps=30)
     args = s._args()
-    assert args[-2:] == (8, 30), "profile settings must reach the runner"
+    assert 8 in args and 30 in args, "profile settings must reach the runner"
+
+
+def test_quality_is_measured_by_default(root):
+    """An agent maximising goodput can serve worse answers faster, and nothing
+    in the price model sees it."""
+    from simulator import Simulator
+
+    s = Simulator(root_dir=root)
+    assert s.quality_suites == ("gsm8k",) and s.quality_n > 0
+    assert tuple(s.quality_suites) in s._args()
+
+
+def test_a_quality_regression_is_reported_beside_the_price(root, sweep):
+    """Both are facts: a price was computed *and* accuracy fell. Collapsing
+    them into one boolean loses the number a caller needs."""
+    from simulator import Simulator
+
+    sweep["quality"] = [{"suite": "gsm8k", "n": 50, "correct": 30,
+                         "accuracy": 0.60, "baseline_accuracy": 0.72,
+                         "delta_pct": -12.0, "errors": 0, "regressed": True,
+                         "why": "accuracy fell 12.0 points"}]
+    res = Simulator(root_dir=root, n_gpu=1, levels=(4, 8, 12, 16, 24)).analyse(sweep)
+    assert res.ok, "the price is still computed and still reported"
+    assert res.quality_regressed
+    assert "accuracy fell" in res.quality_note
+    assert "REGRESSION" in res.summary()
+
+
+def test_clean_quality_does_not_flag(root, sweep):
+    from simulator import Simulator
+
+    sweep["quality"] = [{"suite": "gsm8k", "n": 50, "correct": 36,
+                         "accuracy": 0.72, "baseline_accuracy": 0.72,
+                         "delta_pct": 0.0, "errors": 0, "regressed": False,
+                         "why": ""}]
+    res = Simulator(root_dir=root, n_gpu=1, levels=(4, 8, 12, 16, 24)).analyse(sweep)
+    assert res.ok and not res.quality_regressed
+    assert "quality gsm8k: 72.0%" in res.summary()

@@ -54,7 +54,8 @@ class Attempt:
     ok: bool = False
     # Split on purpose: an infrastructure failure is retried unchanged, a
     # rejected hypothesis is not.
-    failure: Literal["", "infra", "hypothesis", "invalid_diff", "slo"] = ""
+    failure: Literal["", "infra", "hypothesis", "invalid_diff", "slo",
+                     "quality"] = ""
     tier: str = "full"
     metrics: dict = field(default_factory=dict)
     delta: dict = field(default_factory=dict)     # vs the baseline

@@ -131,7 +131,9 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
           seconds_per_level: float = 120.0, repeats: int = 1,
           target_in: int = 0, target_out: int = 0, n_sessions: int = 300,
           canaries: bool = True, note: str = "", allow_stale: bool = False,
-          profile_level: int = 0, profile_steps: int = 20) -> dict:
+          profile_level: int = 0, profile_steps: int = 20,
+          quality_suites: tuple = ("gsm8k",), quality_n: int = 50,
+          quality_baseline: dict | None = None) -> dict:
     """Sweep concurrent conversations; return one record per level.
 
     Every level records its full percentile set and its raw server counters, so
@@ -141,6 +143,7 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
     """
     from simulator.config import ServingConfig
     from simulator.measure import canary as canary_mod
+    from simulator.measure import quality as quality_mod
     from simulator.measure import server as srv
     from simulator.measure.loadgen import (
         client_health,
@@ -224,6 +227,30 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
                 rec["canary"] = asyncio.run(
                     canary_mod.run(SERVER_URL, sc.model))
                 print(f"canary: {rec['canary'].get('summary', '')}", flush=True)
+
+            # Quality before load, on an idle server: this measures the model,
+            # not the scheduler. An optimisation that serves worse answers
+            # faster wins on every latency number, and nothing in the price
+            # model can see it.
+            rec["quality"] = []
+            base = quality_baseline or {}
+            for suite in (quality_suites or ()):
+                try:
+                    q = asyncio.run(quality_mod.run(
+                        SERVER_URL, sc.model, suite=suite, n=quality_n,
+                        baseline_accuracy=base.get(suite)))
+                    bad, why = quality_mod.regressed(q)
+                    row = {**q.as_dict(), "regressed": bad, "why": why}
+                    rec["quality"].append(row)
+                    print(f"quality {suite}: {q.correct}/{q.n} = "
+                          f"{q.accuracy:.1%}"
+                          + (f"  ({q.delta_pct:+.1f} pts vs baseline)"
+                             if q.delta_pct is not None else "")
+                          + ("   REGRESSION" if bad else ""), flush=True)
+                except Exception as e:
+                    rec["quality"].append({"suite": suite,
+                                           "error": f"{type(e).__name__}: {e}"})
+                    print(f"quality {suite} failed: {e}", flush=True)
 
             async def measure(n, secs):
                 async with srv.BatchSampler(SERVER_URL) as bs:

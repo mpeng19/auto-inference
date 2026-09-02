@@ -517,3 +517,37 @@ def test_a_finished_agent_can_still_report_done(tmp_path, stock_dir, memory, con
     finally:
         fleet.stop()
         broker.shutdown()
+
+
+def test_a_quality_regression_is_not_a_win(tmp_path, stock_dir, memory, context):
+    """An agent maximising goodput can serve worse answers faster. The price
+    model cannot see it, so the evaluator has to."""
+    from harness.agent.evaluator import SimulatorEvaluator
+
+    class FakeRes:
+        ok = True
+        quality_regressed = True
+        quality_note = "accuracy fell 12.0 points on gsm8k"
+        quality = ({"suite": "gsm8k", "regressed": True},)
+        bill_per_1k = 6.0          # a large apparent win
+        reason = ""
+
+    ev = SimulatorEvaluator()
+    import simulator
+    real = simulator.Simulator
+    try:
+        class Stub:
+            def __init__(self, **kw):
+                pass
+
+            async def eval(self):
+                return FakeRes()
+
+        simulator.Simulator = Stub
+        ok, metrics, failure = ev.evaluate(object(), str(tmp_path))
+    finally:
+        simulator.Simulator = real
+    assert not ok
+    # A rejected hypothesis, not infra: re-running would reproduce it.
+    assert failure == "quality"
+    assert "accuracy fell" in metrics["reason"]

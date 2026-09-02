@@ -206,6 +206,36 @@ Three mechanisms keep utilisation high, in descending order of what they buy:
 working, and tests assert that every `study` call happens with an evaluation
 actually in flight.
 
+## Quality, not just speed
+
+Every sweep scores **GSM8K** on an idle server before load, pinned by dataset
+revision. The reason is structural: an agent maximising goodput has an obvious
+cheat — serve worse answers faster — and nothing in the price model can see it.
+
+```
+N* = 12 users   batch 5.0   hit 0.748
+  whole bill       $12.23 per 1k requests   rank 9/12
+  quality gsm8k:   72.0%  (+0.0 pts)
+```
+
+A regression beyond 2 percentage points is rejected as a **failed hypothesis**,
+not an infra failure — re-running would reproduce it. The tolerance is not zero
+because greedy decoding is not bitwise deterministic across batch compositions.
+`canary.py` still runs, but it digests six short outputs and would miss a
+subtle numerical degradation; this is the gate that catches it.
+
+Set `quality_suites=("gsm8k", "mmlu")` for both. MMLU is one token per item so
+it is cheap, but a single token is a weak per-item signal; GSM8K's multi-step
+reasoning compounds a small numerical error into a wrong answer, which is the
+sensitivity worth paying for.
+
+**Cross-check.** `measure/crosscheck.py` runs `sglang.benchmark.serving`
+against the same server and compares TTFT/TPOT percentiles with ours. Two
+independently written clients agreeing is real evidence; disagreeing means one
+has a bug. It is deliberately not a dependency — SGLang moved
+`sglang.bench_serving` to `sglang.benchmark.serving` in the version we pin, and
+an actively reorganised surface is a bad thing to put in the path of a price.
+
 ## GPU profiles
 
 `src/tracedb/` is a queryable database for GPU profiling traces, built for

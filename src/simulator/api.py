@@ -83,6 +83,18 @@ class EvalResult:
     record: dict = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
     stack_digest: str = ""
+    # Measured before load. Carried separately from `ok` on purpose: a price
+    # was computed *and* accuracy fell are both facts, and collapsing them
+    # into one boolean loses the number a caller needs to judge the trade.
+    quality: tuple[dict, ...] = ()
+
+    @property
+    def quality_regressed(self) -> bool:
+        return any(q.get("regressed") for q in self.quality)
+
+    @property
+    def quality_note(self) -> str:
+        return "; ".join(q["why"] for q in self.quality if q.get("why"))
 
     @property
     def best(self) -> Point | None:
@@ -120,6 +132,8 @@ class EvalResult:
     def as_dict(self) -> dict:
         r = self.rank()
         return {"ok": self.ok, "reason": self.reason, "n_star": self.n_star,
+                "quality": list(self.quality),
+                "quality_regressed": self.quality_regressed,
                 "stack_digest": self.stack_digest,
                 "curve": [p.as_dict() for p in self.curve],
                 "priced_at": self.best.as_dict() if self.best else None,
@@ -143,6 +157,15 @@ class EvalResult:
         if r:
             lines.append(f"  on effective input alone: rank {r['rank_eff_in']}/{r['of']}"
                          "  -- the metric OpenRouter sorts on, not what a buyer pays")
+        for q in self.quality:
+            if "error" in q:
+                lines.append(f"  quality {q['suite']}: NOT MEASURED ({q['error']})")
+                continue
+            d = f"  ({q['delta_pct']:+.1f} pts)" if q.get("delta_pct") is not None else ""
+            lines.append(f"  quality {q['suite']}: {q['accuracy']:.1%}{d}"
+                         + ("   REGRESSION" if q.get("regressed") else ""))
+        if self.quality_regressed:
+            lines.append(f"  !! {self.quality_note}")
         return "\n".join(lines)
 
 
@@ -181,6 +204,13 @@ class Simulator:
     # kernel spends it.
     profile_level: int = 0
     profile_steps: int = 20
+    # A speed win that costs accuracy is not a win, and the price model cannot
+    # see the difference. Run before load on an idle server, so this measures
+    # the model rather than the scheduler.
+    quality_suites: tuple[str, ...] = ("gsm8k",)
+    quality_n: int = 50
+    quality_baseline: dict = field(default_factory=dict)
+    quality_tolerance_pp: float = 2.0
     slo: SLO = field(default_factory=lambda: SLO(bounds=MARKET_SLO))
 
     # ── the cost basis: assumptions, never measurements ──
@@ -275,7 +305,9 @@ class Simulator:
                 list(self.levels), self.seconds_per_level, self.repeats,
                 MARKET_IN_PER_REQ, MARKET_OUT_PER_REQ, self.n_sessions,
                 self.canaries, self.note, self.allow_stale_stack,
-                self.profile_level, self.profile_steps)
+                self.profile_level, self.profile_steps,
+                tuple(self.quality_suites), self.quality_n,
+                dict(self.quality_baseline))
 
     def submit(self) -> str:
         """Start the sweep and return immediately. Runs outlive this process.
@@ -315,8 +347,9 @@ class Simulator:
     # ── analysis, which needs no GPU ─────────────────────────────────────
     def analyse(self, record: dict) -> EvalResult:
         """Turn a sweep record into a priced curve. Pure; re-runnable offline."""
+        quality = tuple(record.get("quality") or ())
         if record.get("status") != "ok":
-            return EvalResult(ok=False, record=record,
+            return EvalResult(ok=False, record=record, quality=quality,
                               stack_digest=record.get("stack_digest", ""),
                               reason=record.get("failure", "sweep did not complete"))
         n_gpu = (record.get("serving") or {}).get("n_gpu", 1)
@@ -358,14 +391,14 @@ class Simulator:
                 capacity_per_day=e.capacity_per_node_per_day(),
                 checks=v.checks, warnings=v.warnings))
         if not pts:
-            return EvalResult(ok=False, record=record,
+            return EvalResult(ok=False, record=record, quality=quality,
                               stack_digest=record.get("stack_digest", ""),
                               reason="; ".join(skipped) or "no priceable levels")
         passing = [p for p in pts if p.meets_slo]
         if not passing:
             return EvalResult(
                 ok=False, curve=tuple(pts), market=m, record=record,
-                stack_digest=record.get("stack_digest", ""),
+                quality=quality, stack_digest=record.get("stack_digest", ""),
                 reason=("no level met the SLO -- the sweep starts above the "
                         "frontier; lower the levels"))
         star = max(passing, key=lambda p: p.n_users)
@@ -374,6 +407,7 @@ class Simulator:
                            "the true frontier is higher and the price lower")
         return EvalResult(ok=True, reason="; ".join(skipped), n_star=star.n_users,
                           curve=tuple(pts), market=m, record=record,
+                          quality=quality,
                           stack_digest=record.get("stack_digest", ""))
 
     def finish(self, record: dict) -> EvalResult:

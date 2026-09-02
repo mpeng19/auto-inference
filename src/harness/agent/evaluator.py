@@ -49,6 +49,14 @@ class SimulatorEvaluator:
             kind = "infra" if "DEVICE_TIMER" in res.reason else "slo"
             return False, {"reason": res.reason}, kind
 
+        if res.quality_regressed:
+            # A faster model that answers worse is not an improvement, and the
+            # price model cannot tell the difference. Reject it as a rejected
+            # hypothesis, not an infra failure: re-running would reproduce it.
+            return False, {"reason": res.quality_note,
+                           "quality": list(res.quality),
+                           "bill_per_1k": res.bill_per_1k}, "quality"
+
         b = res.best
         return True, {
             "bill_per_1k": b.bill_per_1k,
@@ -59,5 +67,6 @@ class SimulatorEvaluator:
             "hit_rate": b.hit_rate,
             "gpu_s_per_request": b.gpu_s_per_request,
             "share_per_node": b.share_per_node,
+            "quality": list(res.quality),
             "artifacts": res.artifacts,
         }, ""
