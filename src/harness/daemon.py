@@ -116,6 +116,25 @@ def _fake_runner(req):
                   "cost_usd": 0.4 if req.tier == "screen" else 2.2}, ""
 
 
+def evaluator_for(cfg: FleetConfig, tier: str) -> SimulatorEvaluator:
+    """The real evaluator for one tier. Module-level so a test can check what
+    a fleet would rent without renting it.
+
+    The quality gate only fires against a baseline, and the baseline lives in
+    `cfg.baseline["quality"]` as `{suite: accuracy}` -- the same map the
+    stock sweep prints. Leaving it out does not weaken the gate, it removes
+    it: every attempt scores `regressed=False` and a stack that serves worse
+    answers faster is recorded as a win.
+    """
+    screen = tier == "screen"
+    quality = dict((cfg.baseline or {}).get("quality") or {})
+    return SimulatorEvaluator(
+        n_gpu=cfg.n_gpu, gpu=cfg.gpu, model=cfg.sim_model,
+        levels=cfg.screen_levels if screen else cfg.levels,
+        seconds_per_level=cfg.screen_seconds if screen else cfg.seconds_per_level,
+        extra={"quality_baseline": quality})
+
+
 def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     """Assemble every service. The one place implementations are chosen."""
     root = pathlib.Path(cfg.root or (pathlib.Path.cwd() / "agents"))
@@ -128,12 +147,7 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
         runner = _fake_runner
     else:
         def runner(req):
-            ev = SimulatorEvaluator(
-                n_gpu=cfg.n_gpu, gpu=cfg.gpu, model=cfg.sim_model,
-                levels=cfg.screen_levels if req.tier == "screen" else cfg.levels,
-                seconds_per_level=(cfg.screen_seconds if req.tier == "screen"
-                                   else cfg.seconds_per_level))
-            return ev.evaluate(req.stack, req.run_dir)
+            return evaluator_for(cfg, req.tier).evaluate(req.stack, req.run_dir)
 
     broker = EvalBroker(runner, capacity=cfg.eval_capacity)
     fleet = Fleet(None, broker, store=store, session_id=cfg.session_id,

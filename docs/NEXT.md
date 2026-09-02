@@ -48,7 +48,7 @@ Check, in order:
    factor of two of $0.029/M and $5.60/M. Wildly different means something
    structural changed, not that we got faster.
 
-Record the two numbers. They are the fleet's `--baseline`.
+Record the two numbers. They are the fleet's `--baseline`; the quality map is what makes the gate fire at all.
 
 ## Step 2 — three agents, overnight (~8h, cap $60)
 
@@ -61,7 +61,7 @@ uv run harness --session night-1 start \
   --agents 3 --evals 2 --model sonnet \
   --budget 60 --agent-budget 20 --max-attempts 3 \
   --root agents/night-1 \
-  --baseline '{"bill_per_1k": <from step 1>}' \
+  --baseline '{"bill_per_1k": <from step 1>, "quality": {"gsm8k": <from step 1>}}' \
   --seed "raise the decode batch the SLO permits" \
   --seed "reduce per-sequence KV bytes read per decode step" \
   --seed "improve prefix cache hit rate under load"

@@ -40,6 +40,22 @@ def test_build_assembles_every_service(tmp_path):
         broker.shutdown()
 
 
+def test_quality_baseline_reaches_the_evaluator():
+    """Without it the gate is not weak, it is absent (see `evaluator_for`)."""
+    from harness.daemon import evaluator_for
+
+    cfg = FleetConfig(session_id="s1", baseline={"bill_per_1k": 12.0,
+                                                 "quality": {"gsm8k": 0.62}})
+    full = evaluator_for(cfg, "full")
+    assert full.extra["quality_baseline"] == {"gsm8k": 0.62}
+    assert full.levels == cfg.levels and full.seconds_per_level == cfg.seconds_per_level
+    screen = evaluator_for(cfg, "screen")
+    assert screen.levels == cfg.screen_levels
+    assert screen.seconds_per_level == cfg.screen_seconds
+    assert evaluator_for(FleetConfig(session_id="s2"), "full").extra == {
+        "quality_baseline": {}}
+
+
 def test_fake_agents_never_shell_out(tmp_path, monkeypatch):
     """`--fake-agents` must not spend subscription usage; the offline socket
     guard would catch a network call, but not a subprocess."""
