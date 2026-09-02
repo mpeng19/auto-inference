@@ -151,3 +151,13 @@ def test_book_windows_and_harvest(bank):
 def test_record_from_dict_defaults():
     r = record_from_dict({"title": "t"})
     assert r.scale == "kernel" and r.status == "available" and r.targets == ()
+
+
+def test_record_from_dict_flattens_lists_in_text_fields(bank):
+    """The arXiv harvest died on its 22nd paper: the model returned `risks`
+    as a list and SQLite refused to bind it."""
+    r = record_from_dict({"title": "t", "risks": ["numerics", "accuracy"],
+                          "prerequisites": {"needs": "triton 3"}})
+    assert r.risks == "numerics; accuracy" and r.prerequisites == "needs: triton 3"
+    bank.add(r)
+    assert bank.get(r.id).risks == "numerics; accuracy"

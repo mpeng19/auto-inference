@@ -198,6 +198,13 @@ def record_from_dict(d: dict, source_default: str = "") -> IdeaRecord:
             clean[k] = tuple(x.strip() for x in v.split(",") if x.strip())
         elif v is not None:
             clean[k] = tuple(str(x) for x in v)
+    # A model asked for prose sometimes answers with a list; the column is
+    # text either way.
+    for k, v in list(clean.items()):
+        if k not in _LIST_FIELDS and isinstance(v, (list, tuple)):
+            clean[k] = "; ".join(str(x) for x in v)
+        elif k not in _LIST_FIELDS and isinstance(v, dict):
+            clean[k] = "; ".join(f"{a}: {b}" for a, b in v.items())
     if not clean.get("source") and source_default:
         clean["source"] = source_default
     scale = clean.get("scale", "kernel")
