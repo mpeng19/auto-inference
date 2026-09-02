@@ -33,6 +33,17 @@ class SimulatorEvaluator:
     utilisation: float = 0.50
     extra: dict = field(default_factory=dict)
 
+    # What the sweep container reserves besides the GPU. Kept here rather
+    # than imported from the runner so the evaluator never imports modal.
+    vcpu: float = 16.0
+    memory_gib: float = 0.0
+
+    def _rate(self, gpu: str, n_gpu: int) -> float:
+        from simulator import costs
+
+        return costs.container_rate(gpu, n_gpu, vcpu=self.vcpu,
+                                    memory_gib=self.memory_gib)
+
     def _spend(self, record: dict) -> float:
         """What this sweep actually cost us, in Modal dollars.
 
@@ -40,10 +51,9 @@ class SimulatorEvaluator:
         are different numbers for different questions: $3.00/GPU-hr is what a
         provider would pay to serve, $3.95 is what we are billed to experiment.
         Confusing them is why `costs.py` marks the retail rows
-        `serving_basis=False`.
+        `serving_basis=False`. And the GPU is not the whole container: the
+        16 vCPUs the load generator needs are billed too (`costs.container_rate`).
         """
-        from simulator import costs
-
         if not record:
             return 0.0
         n_gpu = max(1, (record.get("serving") or {}).get("n_gpu", 1))
@@ -53,11 +63,7 @@ class SimulatorEvaluator:
                        for lv in record.get("levels") or ())
         for m in record.get("mixes") or ():
             seconds += float(m.get("wall_s") or 0.0)
-        try:
-            rate = costs.rate(gpu, "modal", allow_retail=True)
-        except KeyError:
-            rate = 3.95
-        return round(seconds * n_gpu * rate / 3600.0, 4)
+        return round(seconds * self._rate(gpu, n_gpu) / 3600.0, 4)
 
     def evaluate(self, stack, run_dir) -> tuple[bool, dict, str]:
         from simulator import Simulator
@@ -67,15 +73,21 @@ class SimulatorEvaluator:
                         seconds_per_level=self.seconds_per_level,
                         gpu_provider=self.gpu_provider,
                         utilisation=self.utilisation, **self.extra)
+        import time
+
+        t0 = time.time()
         try:
             res = asyncio.run(sim.eval())
         except Exception as e:
             # The sweep never produced a record: the GPU died, the image failed,
-            # the server never came up. Worth retrying the same diff. Cost is
-            # unknown here rather than zero -- the container may well have run
-            # for twenty minutes before dying.
+            # the server never came up. Worth retrying the same diff. The
+            # container ran for about as long as we waited, so bill that
+            # rather than zero -- zero let a night of cancelled and orphaned
+            # sweeps vanish from the budget.
+            est = round((time.time() - t0) * self._rate(self.gpu, self.n_gpu)
+                        / 3600.0, 4)
             return False, {"error": f"{type(e).__name__}: {e}",
-                           "cost_usd": 0.0, "cost_unknown": True}, "infra"
+                           "cost_usd": est, "cost_estimated": True}, "infra"
 
         spent = self._spend(res.record)
         if not res.ok:

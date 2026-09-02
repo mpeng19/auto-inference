@@ -68,6 +68,26 @@ CATALOG: tuple[GpuCost, ...] = (
 
 BY_KEY = {c.key: c for c in CATALOG}
 
+# What a Modal container bills besides its GPU. The GPU rate is the headline
+# and it is not the bill: the sweep container asks for 16 vCPUs, which at
+# retail is more than half a GPU again. Modal pricing page, 2026-08-29.
+MODAL_USD_PER_VCPU_HOUR = 0.1368       # $0.000038 / core-second
+MODAL_USD_PER_GIB_HOUR = 0.0240        # $0.00000667 / GiB-second
+
+
+def container_rate(gpu: str, n_gpu: int = 1, vcpu: float = 0.0,
+                   memory_gib: float = 0.0, provider: str = "modal") -> float:
+    """$/hour for one running container: GPUs plus the CPU and memory it
+    reserves. This is what our experiments are billed at, and it is the
+    number budgets must be checked against -- charging the GPU rate alone
+    understated a night of sweeps by a third."""
+    try:
+        gpu_rate = rate(gpu, provider, allow_retail=True)
+    except KeyError:
+        gpu_rate = 3.95
+    return (gpu_rate * max(1, n_gpu) + vcpu * MODAL_USD_PER_VCPU_HOUR
+            + memory_gib * MODAL_USD_PER_GIB_HOUR)
+
 
 def rate(gpu: str = FALLBACK_GPU, provider: str | None = None,
          allow_retail: bool = False) -> float:

@@ -121,8 +121,14 @@ def _provenance() -> dict:
     return out
 
 
+# The load generator is CPU-bound at high concurrency (see the note on
+# `client_dispatch_lag_ms` above); 16 vCPUs at retail is ~$2.19/h on top of
+# the GPU. `SWEEP_VCPU` exists so the evaluator can bill what was reserved.
+SWEEP_VCPU = 16.0
+
+
 @app.function(
-    image=image, gpu="H100", cpu=16.0,
+    image=image, gpu="H100", cpu=SWEEP_VCPU,
     volumes={"/cache": hf_cache, "/results": results_vol},
     secrets=_hf_secret(),
     timeout=4 * 60 * 60,

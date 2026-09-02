@@ -679,10 +679,13 @@ def test_every_evaluation_reports_what_it_cost():
     rec = {"serving": {"n_gpu": 1, "gpu": "H100"}, "model_load_s": 360.0,
            "levels": [{"wall_s": 380.0} for _ in range(5)]}
     spend = ev._spend(rec)
-    assert 2.0 < spend < 3.0, spend
-    # Two GPUs for the same wall time is twice the bill.
+    assert 3.5 < spend < 4.5, spend            # 0.63 h at $3.95 GPU + 16 vCPU
+    # A second GPU adds a GPU's rate for the same wall time; the CPU and
+    # memory the container reserves are not doubled.
+    from simulator import costs
+    hours = 2260 / 3600
     assert ev._spend({**rec, "serving": {"n_gpu": 2, "gpu": "H100"}}) == \
-        pytest.approx(spend * 2, rel=0.01)
+        pytest.approx(spend + hours * costs.rate("H100", "modal", allow_retail=True), rel=0.01)
 
 
 def test_cost_uses_retail_not_the_serving_basis():
@@ -696,8 +699,43 @@ def test_cost_uses_retail_not_the_serving_basis():
     rec = {"serving": {"n_gpu": 1, "gpu": "H100"}, "model_load_s": 3600.0,
            "levels": []}
     assert ev._spend(rec) == pytest.approx(
-        costs.rate("H100", "modal", allow_retail=True), rel=0.01)
-    assert ev._spend(rec) > costs.rate("H100")
+        costs.container_rate("H100", 1, vcpu=ev.vcpu), rel=0.01)
+    assert ev._spend(rec) > costs.rate("H100", "modal", allow_retail=True) > costs.rate("H100")
+
+
+def test_the_container_bills_more_than_its_gpu():
+    """A night of sweeps at the GPU rate came to $43; Modal billed more,
+    and the 16 reserved vCPUs are most of the gap."""
+    from simulator import costs
+
+    gpu_only = costs.rate("H100", "modal", allow_retail=True)
+    full = costs.container_rate("H100", 1, vcpu=16.0)
+    assert full == pytest.approx(gpu_only + 16 * costs.MODAL_USD_PER_VCPU_HOUR)
+    assert full / gpu_only > 1.5
+
+
+def test_a_sweep_that_died_is_billed_for_the_time_it_ran(tmp_path):
+    import time
+
+    import simulator
+    from harness.agent.evaluator import SimulatorEvaluator
+
+    real = simulator.Simulator
+    try:
+        class Stub:
+            def __init__(self, **kw):
+                pass
+
+            async def eval(self):
+                time.sleep(0.05)
+                raise RuntimeError("container died")
+
+        simulator.Simulator = Stub
+        ok, metrics, failure = SimulatorEvaluator().evaluate(object(), str(tmp_path))
+    finally:
+        simulator.Simulator = real
+    assert not ok and failure == "infra"
+    assert metrics["cost_usd"] > 0 and metrics["cost_estimated"]
 
 
 def test_a_failed_sweep_still_costs(tmp_path):
