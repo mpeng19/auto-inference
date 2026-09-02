@@ -33,9 +33,15 @@ uv run simulate equivalence --root runs/equiv-ref       # stock: writes the cach
 uv run simulate equivalence --root runs/equiv-noise     # stock again: the noise floor
 ```
 
-The second run's agreement and mean |dlogprob| are what a candidate must
-stay inside; the thresholds in `measure/equivalence.py` (0.97, 0.05) are
-provisional until this has run.
+Done for Qwen3.8-27B-FP8 on 2026-09-02: stock against its own reference
+scores **agreement 1.0000, |dlogprob| mean 0.0000** over 1,512 positions.
+Teacher-forced single-sequence scoring is deterministic, unlike GSM8K under
+batched load (62% vs 70% on the same items). So the thresholds in
+`measure/equivalence.py` (0.97 agreement, 0.05 mean |dlogprob|) are not a
+noise allowance; they are how much a numerics-changing kernel (FP8 KV,
+int8 KV, a different softmax order) is allowed to move the model before it
+counts as a different model. A lossless kernel should score exactly 1.0 / 0.0.
+Each candidate check costs ~5 min and ~$0.36 (engine load dominates).
 
 ## Step 3 -- fill the bank (once; grows over time)
 
