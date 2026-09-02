@@ -114,6 +114,9 @@ def cmd_sessions(a) -> int:
 
 # ── control ──────────────────────────────────────────────────────────────
 
+STALE_S = 15.0          # a live fleet publishes about once a second
+
+
 def _send(a, kind: str, agent_id: str = "", value: str = "") -> int:
     store = _store(a)
     v = _resolve(store, a.session)
@@ -121,8 +124,17 @@ def _send(a, kind: str, agent_id: str = "", value: str = "") -> int:
         return 1
     cid = store.send_to(v.session_id, Command(kind=kind, agent_id=agent_id,
                                               value=value))
-    for _ in range(50):                      # the fleet ticks about once a second
-        time.sleep(0.1)
+    # Do not wait on a fleet that is not ticking. A dead session should say so
+    # at once rather than making the operator watch a spinner for five seconds
+    # to be told the same thing.
+    stale = (time.time() - v.updated_at) > STALE_S or v.phase == "stopped"
+    if stale:
+        print(f"queued {kind}; session {v.session_id} is {v.phase} and last "
+              f"published {time.time() - v.updated_at:.0f}s ago", file=sys.stderr)
+        return 1
+    deadline = time.time() + a.wait
+    while time.time() < deadline:
+        time.sleep(0.05)
         c = store.command_status(cid)
         if c and c.applied_at:
             print(c.result)
@@ -185,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="harness", description=__doc__.split("\n")[0])
     ap.add_argument("--store", default="", help="session database (default ~/.auto-inference)")
     ap.add_argument("--session", default="", help="session id (default: most recent)")
+    ap.add_argument("--wait", type=float, default=5.0,
+                    help="seconds to wait for a command to be acknowledged")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("start", help="launch a fleet, detached")
