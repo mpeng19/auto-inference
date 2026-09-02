@@ -826,3 +826,30 @@ def test_agents_claim_distinct_ideas_from_the_bank(tmp_path):
     finally:
         fleet.stop()
         broker.shutdown()
+
+
+def test_an_unmeasured_error_returns_the_idea_to_the_bank():
+    """build-1 drained six bank records in a minute on a workspace crash."""
+    import pathlib
+    import tempfile
+
+    from harness.contracts import AgentOutcome, Attempt, IdeaRecord
+    from harness.ideas import SqliteIdeaBank
+
+    bank = SqliteIdeaBank(pathlib.Path(tempfile.mkdtemp()) / "b.db")
+    rec = IdeaRecord(title="t", mechanism="m", hypothesis="h")
+    bank.add(rec)
+    broker = EvalBroker(lambda r: (True, {}, ""), capacity=1)
+    fleet = Fleet(lambda a, f: None, broker)
+    fleet.bank = bank
+    try:
+        idea = bank.claim("a00").as_idea()
+        fleet._bank_outcome(AgentOutcome(agent_id="a00", idea=idea, stop="error"))
+        assert bank.get(rec.id).status == "available"
+        bank.claim("a00")
+        fleet._bank_outcome(AgentOutcome(agent_id="a00", idea=idea, stop="no_progress",
+                                         attempts=(Attempt(idea_id=idea.id, ok=True,
+                                                           experiment_id="e1"),)))
+        assert bank.get(rec.id).status == "tried"
+    finally:
+        broker.shutdown()

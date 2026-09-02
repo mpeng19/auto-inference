@@ -355,3 +355,14 @@ def test_every_turn_says_how_long_its_phase_took(
     assert propose.data["duration_ms"] == 4200
     assert propose.data["num_turns"] == 9
     assert propose.data["phase"] == "propose", "the call's own label must not win"
+
+
+def test_agent_shell_can_find_harness():
+    """The agent's cwd is its candidate directory, where `uv run` has no
+    project; the console scripts must be on PATH."""
+    import os
+    import sys
+
+    env = ClaudeCodeProposer()._env()
+    assert env["PATH"].split(os.pathsep)[0] == os.path.dirname(sys.executable)
+    assert "ANTHROPIC_API_KEY" not in env

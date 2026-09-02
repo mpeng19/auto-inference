@@ -66,6 +66,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -134,6 +135,14 @@ DEFAULT_ALLOWED_TOOLS = (
     "Bash(python -c:*)",
     "Bash(python3 -c:*)",
     "Bash(ruff:*)",
+    # Reading and running inside its own copy of the package. The first
+    # build-mode agent was refused eight commands in one call and gave up
+    # before the workbench; a sandboxed copy of sglang is not worth guarding
+    # command by command.
+    "Bash(python:*)", "Bash(python3:*)", "Bash(harness:*)", "Bash(uv run harness:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(grep:*)", "Bash(rg:*)", "Bash(find:*)", "Bash(sed -n:*)", "Bash(diff:*)",
+    "Bash(git diff:*)", "Bash(git status:*)", "Bash(mkdir:*)", "Bash(pwd)", "Bash(tree:*)",
     "Read",
     "Grep",
     "Glob",
@@ -248,6 +257,11 @@ class ClaudeCodeProposer:
         disabled, which is easy to read past.
         """
         env = {**os.environ, "CLAUDE_CODE_NONINTERACTIVE": "1"}
+        # `harness` lives in this interpreter's environment, and the agent's
+        # cwd is its candidate directory, where `uv run` finds no project.
+        # Put the console scripts first on PATH so `harness tool ...` resolves.
+        bindir = os.path.dirname(sys.executable)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
         if not self.use_api_key:
             for k in self.AUTH_VARS:
                 env.pop(k, None)
@@ -423,7 +437,13 @@ class ClaudeCodeProposer:
         # Give it real files to open. Without this the first thing it does is
         # discover the directory is empty.
         files = idea.targets or self.targets
-        ws.materialise(*files)
+        present = ws.materialise(*files)
+        missing = getattr(ws, "missing_targets", ())
+        if not present:
+            files = self.targets
+            ws.materialise(*files)
+        else:
+            files = tuple(present)
         template = _BUILD_PROMPT if self.mode == "build" else _EDIT_PROMPT
         prompt = template.format(
             hypothesis=idea.hypothesis, title=idea.title, attempt=attempt,
@@ -431,7 +451,9 @@ class ClaudeCodeProposer:
                                            "work it out and say so in DESIGN.md)",
             brief=self._brief_text(brief, "(nothing on record yet)"),
             history=_history(history),
-            files="\n".join(f"  - {t}" for t in files))
+            files="\n".join(f"  - {t}" for t in files)
+            + ("\n  (not in this SGLang version, find the equivalent code: "
+               + ", ".join(missing) + ")" if missing else ""))
         text, _ = self._run(prompt, cwd=str(ws.candidates), phase="edit",
                             timeout_s=self._edit_timeout())
         return text.strip()[:4000]
@@ -590,6 +612,11 @@ worse is rejected outright, however good the price looks -- so do not touch
 sampling, numerics, KV precision or eviction in ways that could change what
 the model says, unless testing exactly that is the hypothesis.
 
+**This directory is the package root.** `srt/` is right here; new files go
+under it (e.g. `srt/layers/attention/my_kernel.py`) or beside it. Do not
+create a `sglang/` directory here, and run tools as `harness tool <name>
+--workspace .` from this directory.
+
 **The launch line is yours too.** Write `serving.json` in this directory to
 change how the server is started for your evaluation:
   {{"serving": {{"chunked_prefill_size": 16384, "mem_fraction_static": 0.90,
@@ -669,6 +696,11 @@ that answers worse is rejected however good the price looks. Changing numerics
 is allowed *when that is the hypothesis* -- KV compression and lower-precision
 attention are on the table -- but then equivalence and the accuracy gate are
 the experiment, so report their numbers and expect to be judged on them.
+
+**This directory is the package root.** `srt/` is right here; new files go
+under it (e.g. `srt/layers/attention/my_kernel.py`) or beside it. Do not
+create a `sglang/` directory here, and run tools as `harness tool <name>
+--workspace .` from this directory.
 
 **The launch line is yours too.** Write `serving.json` in this directory to
 change how the server is started for your evaluation:

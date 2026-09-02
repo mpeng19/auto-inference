@@ -53,7 +53,7 @@ class Workspace:
     source: StockSource | None = None
 
     def __post_init__(self):
-        self.root = pathlib.Path(self.root)
+        self.root = self.locate(self.root)
         self.source = self.source or stock(self.sglang_version)
         for d in (self.candidates, self.traces, self.runs):
             d.mkdir(parents=True, exist_ok=True)
@@ -121,6 +121,24 @@ class Workspace:
             (self.candidates / rel).unlink(missing_ok=True)
 
     # ── inspecting the proposal ─────────────────────────────────────────
+    RESERVED = ("candidate", "runs", "traces", "sglang")
+
+    @staticmethod
+    def locate(root) -> pathlib.Path:
+        """The agent directory, given it or its `candidate/` subdirectory.
+
+        Agents run their tools from inside `candidate/` with `--workspace .`;
+        treating that as an agent root created a nested workspace there and
+        re-materialised the targets over the agent's edits. An agent root is
+        the directory that *contains* `candidate/`.
+        """
+        p = pathlib.Path(root)
+        if p.name == "sglang" and p.parent.name == "candidate":
+            return p.parent.parent          # candidate/sglang -> the agent dir
+        if p.name == "candidate" and (p / "sglang").is_dir():
+            return p.parent                 # candidate -> the agent dir
+        return p
+
     def materialise(self, *rels: str) -> tuple[str, ...]:
         """Write stock copies into the workspace so an editor can open them.
 
@@ -128,14 +146,28 @@ class Workspace:
         directory, not a function handed a string: it wants real files to read
         and edit in place. Copies are only made where none exists, so calling
         this twice never discards an agent's work.
+
+        A target that does not exist in this SGLang version is skipped and
+        listed in `missing_targets`, not raised: idea records are written
+        against papers and books, not against 0.5.18's file layout, and one
+        stale path must not throw away the whole idea.
         """
         out = []
+        missing = []
         for rel in rels:
             dst = self.candidates / rel
-            if not dst.is_file():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_text(self.source.read(rel))
+            if dst.is_file():
+                out.append(rel)
+                continue
+            try:
+                text = self.source.read(rel)
+            except (OSError, FileNotFoundError):
+                missing.append(rel)
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(text)
             out.append(rel)
+        self.missing_targets = tuple(missing)
         return tuple(out)
 
     def touched(self) -> tuple[str, ...]:
@@ -149,12 +181,29 @@ class Workspace:
         out = []
         for f in sorted(self.candidates.rglob("*.py")):
             rel = str(f.relative_to(self.candidates))
+            if rel.split("/", 1)[0] in self.RESERVED:
+                continue                 # a misplaced tree; check() reports it
             try:
                 if f.read_text() != self.source.read(rel):
                     out.append(rel)
             except (OSError, FileNotFoundError):
                 out.append(rel)          # not in stock at all: genuinely new
         return tuple(out)
+
+    def _in_stock(self, rel: str) -> bool:
+        try:
+            self.source.read(rel)
+            return True
+        except (OSError, FileNotFoundError):
+            return False
+
+    def misplaced(self) -> tuple[str, ...]:
+        """Top-level directories in the candidate that cannot be part of the
+        package: a nested `sglang/` (the agent treated this as a repo root),
+        or a nested workspace. Either means files the container would never
+        load, so it is an error, not a warning."""
+        return tuple(sorted(d.name for d in self.candidates.iterdir()
+                            if d.is_dir() and d.name in self.RESERVED))
 
     def diff(self, rel: str | None = None, context: int = 3) -> str:
         """Unified diff against stock, plus the launch overrides if any.
@@ -218,6 +267,10 @@ class Workspace:
                 ast.parse(f.read_text())
             except SyntaxError as e:
                 return False, f"{rel}: syntax error at line {e.lineno}: {e.msg}"
+        bad = self.misplaced()
+        if bad:
+            return False, (f"{', '.join(bad)}/ inside the candidate: this directory IS the "
+                           "sglang package root (srt/ is here); move files up a level")
         serving, env, why = self.serving()
         if why:
             return False, why
@@ -241,6 +294,6 @@ class Workspace:
             files={r: self.read(r) for r in rels},
             # Recorded from the same source the agent read, so drift is caught
             # at apply time instead of producing a quietly wrong experiment.
-            upstream_sha={r: self.source.sha(r) for r in rels},
+            upstream_sha={r: self.source.sha(r) for r in rels if self._in_stock(r)},
             serving=serving, env=env,
             label=label or f"{self.agent_id or self.root.name}: {', '.join(what)}")

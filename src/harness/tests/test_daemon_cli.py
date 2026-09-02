@@ -232,3 +232,16 @@ def test_agents_use_the_subscription_not_an_api_key(monkeypatch):
     assert "ANTHROPIC_BASE_URL" not in ClaudeCodeProposer()._env()
     assert ClaudeCodeProposer(use_api_key=True)._env()["ANTHROPIC_API_KEY"] \
         == "sk-should-not-leak"
+
+
+def test_start_refuses_a_second_daemon_on_the_same_root(tmp_path):
+    """Two daemons on one root reset each other's agent workspaces."""
+    import os
+
+    from harness.cli import running_daemon
+
+    assert running_daemon(tmp_path) == 0
+    (tmp_path / "daemon.pid").write_text(str(os.getpid()))
+    assert running_daemon(tmp_path) == os.getpid()
+    (tmp_path / "daemon.pid").write_text("999999999")
+    assert running_daemon(tmp_path) == 0

@@ -147,3 +147,44 @@ def test_serving_json_is_the_launch_line(ws):
     (ws.candidates / "serving.json").write_text("{not json")
     ok, why = ws.check()
     assert not ok and "not JSON" in why
+
+
+def test_tools_run_from_inside_candidate_find_the_agent_root(ws):
+    """`harness tool ... --workspace .` from candidate/ nested a second
+    workspace there and re-materialised the targets over the agent's edits."""
+    from harness.agent.workspace import Workspace
+
+    assert Workspace.locate(ws.candidates) == ws.root            # candidate/sglang
+    assert Workspace.locate(ws.candidates.parent) == ws.root     # candidate
+    assert Workspace.locate(ws.root) == ws.root
+    again = Workspace(ws.candidates, source=ws.source)
+    assert again.root == ws.root
+    assert not (ws.candidates / "candidate").exists()
+    assert not (ws.candidates.parent / "candidate").exists()
+
+
+def test_missing_targets_are_skipped_and_named(ws):
+    present = ws.materialise("srt/managers/schedule_policy.py", "srt/nope/gone.py")
+    assert present == ("srt/managers/schedule_policy.py",)
+    assert ws.missing_targets == ("srt/nope/gone.py",)
+
+
+def test_a_nested_sglang_directory_is_refused_not_shipped(ws):
+    """An agent that treats the package root as a repo root writes
+    `sglang/srt/...`; the container would never load it."""
+    ws.materialise("srt/managers/schedule_policy.py")
+    p = ws.candidates / "sglang" / "srt" / "x.py"
+    p.parent.mkdir(parents=True)
+    p.write_text("x = 1\n")
+    ok, why = ws.check()
+    assert not ok and "package root" in why
+    assert "sglang/srt/x.py" not in ws.touched()
+
+
+def test_new_files_have_no_upstream_sha(ws):
+    ws.materialise("srt/managers/schedule_policy.py")
+    (ws.candidates / "srt" / "layers").mkdir(parents=True, exist_ok=True)
+    (ws.candidates / "srt" / "layers" / "new_kernel.py").write_text("k = 1\n")
+    st = ws.stack()
+    assert "srt/layers/new_kernel.py" in st.files
+    assert "srt/layers/new_kernel.py" not in st.upstream_sha

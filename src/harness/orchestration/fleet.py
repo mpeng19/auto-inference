@@ -299,7 +299,12 @@ class Fleet:
         exp = out.best.experiment_id if out.best else ""
         exp = exp or next((a.experiment_id for a in out.attempts if a.experiment_id), "")
         with contextlib.suppress(Exception):
-            self.bank.record_outcome(out.idea.seeded_by, exp, status="tried")
+            if out.stop == "error" and not exp:
+                # Nothing was measured: the record goes back, so a tooling
+                # fault does not drain the bank one idea per minute.
+                self.bank.release(out.idea.seeded_by)
+            else:
+                self.bank.record_outcome(out.idea.seeded_by, exp, status="tried")
 
     def claim_idea(self, agent_id: str, proposed: Idea) -> Idea | None:
         with self._lock:
@@ -462,9 +467,15 @@ class Fleet:
             try:
                 out = agent.run(idea, spec.agent_budget)
             except Exception as e:                  # one agent must not kill the fleet
+                import traceback
+                print(f"agent {agent_id} failed on {idea.title!r}: {type(e).__name__}: {e}\n"
+                      + traceback.format_exc(), flush=True)
                 self.report(agent_id, status="failed", note=f"{type(e).__name__}: {e}")
                 with self._lock:
                     self._live_ideas = [i for i in self._live_ideas if i.id != idea.id]
+                if self.bank is not None and idea.seeded_by.startswith("bank_"):
+                    with contextlib.suppress(Exception):
+                        self.bank.release(idea.seeded_by)
                 continue
             self._record_outcome(out)
             self._bank_outcome(out)

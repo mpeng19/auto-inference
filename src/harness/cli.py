@@ -57,10 +57,30 @@ def _bank_path(value: str) -> str:
     return value
 
 
+def running_daemon(root: pathlib.Path) -> int:
+    """The pid of a live daemon for this root, or 0."""
+    f = root / "daemon.pid"
+    if not f.is_file():
+        return 0
+    try:
+        pid = int(f.read_text().strip())
+        os.kill(pid, 0)
+        return pid
+    except (ValueError, ProcessLookupError, PermissionError):
+        return 0
+
+
 def cmd_start(a) -> int:
     session_id = a.session or f"sess-{int(time.time())}"
     root = pathlib.Path(a.root or (pathlib.Path.cwd() / "agents" / session_id))
     root.mkdir(parents=True, exist_ok=True)
+    pid = running_daemon(root)
+    if pid and not a.force:
+        # Two daemons on one root share the agent directories: each agent's
+        # workspace is reset and re-seeded under the other's feet. The first
+        # build run lost its kernel this way.
+        raise SystemExit(f"a fleet is already running on {root} (pid {pid}); "
+                         f"`harness --session {session_id} stop` first, or --force")
     cfg = FleetConfig(
         session_id=session_id, root=str(root), agents=a.agents,
         eval_capacity=a.evals, budget_usd=a.budget, model=a.model,
@@ -386,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--gpu", default="H100")
     s.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
     s.add_argument("--root", default="")
+    s.add_argument("--force", action="store_true",
+                   help="start even if a daemon for this root is alive")
     s.add_argument("--bank", nargs="?", const="__default__", default="",
                    help="claim ideas from the bank (default path when given no value)")
     s.add_argument("--manager", action="store_true",
