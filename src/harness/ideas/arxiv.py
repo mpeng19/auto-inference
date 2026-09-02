@@ -47,7 +47,7 @@ class Paper:
 def fetch(query: str, max_results: int = 25, timeout: int = 60) -> tuple[Paper, ...]:
     q = urllib.parse.urlencode({
         "search_query": "all:" + query, "start": 0, "max_results": max_results,
-        "sortBy": "submittedDate", "sortOrder": "descending"})
+        "sortBy": "relevance", "sortOrder": "descending"})
     with urllib.request.urlopen(f"{API}?{q}", timeout=timeout) as r:
         return parse_atom(r.read().decode("utf-8", errors="replace"))
 

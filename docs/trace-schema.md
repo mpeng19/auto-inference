@@ -76,6 +76,27 @@ debugging database exists to answer.
 20,000 characters. It is the most useful single field for reconstructing what
 an agent actually changed.
 
+### Timing (v1, from 2026-09-02)
+
+Every turn the reference loop writes also carries, in `data`:
+
+| key | type | notes |
+|---|---|---|
+| `phase` | enum | the phase this turn closes: `start`, `recall`, `propose`, `check`, `submit`, `study`, `wait`, `done` |
+| `elapsed_s` | float | wall seconds that phase took |
+
+A turn that closes a model call (`thought name=propose`, `thought name=study`)
+also carries the call's own accounting: `wall_s`, `duration_ms`,
+`duration_api_ms`, `num_turns`, `is_error`, `denials` (permission refusals --
+non-zero means the agent asked to run a tool and was told no), `returncode`,
+`cancelled`, `timed_out`. A large gap between `wall_s` and `duration_ms` is the
+host, not the model: a closed laptop lid froze a fleet for five hours and this
+is how the trace says so.
+
+Since the same date a `thought name=propose` is written on the success path
+too (not only when the check fails), and a successful check writes a
+`tool_call name=check`.
+
 ## The sidecar
 
 `trc_<id>.meta.json` is a summary, rewritten on close. Everything in it is
