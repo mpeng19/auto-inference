@@ -228,3 +228,20 @@ def test_submit_records_the_call_id_on_both_paths(root, monkeypatch):
     (root / "call_id").unlink()
     assert asyncio.run(s.submit_async()) == "fc-123"
     assert (root / "call_id").read_text() == "fc-123"
+
+
+def test_interpolated_frontier_sits_inside_the_grid_step(root, sweep):
+    """N* is quantised to the grid; the crossing is not. On the stored
+    baseline mean TPOT is 19.3 ms at N=12 and 22.0 at N=16, so the 20 ms line
+    is crossed a quarter of the way to 16 and the bill there is a shade below
+    the N=12 price."""
+    res = sim(root).analyse(sweep)
+    i = res.interpolated
+    assert i is not None and i["binding"] == "mean TPOT"
+    assert 12 < i["n_star"] < 14 and i["between"] == [12, 16]
+    assert res.bill_per_1k > i["bill_per_1k"] > res.curve[3].bill_per_1k
+    assert res.as_dict()["interpolated"] == i
+    # a sweep that passes everywhere has no crossing to interpolate
+    from simulator.slo import SLO
+    loose = sim(root, slo=SLO.parse("tpot:mean:9999")).analyse(sweep)
+    assert loose.interpolated is None

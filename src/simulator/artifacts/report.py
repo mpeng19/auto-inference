@@ -42,6 +42,10 @@ def render(sim, res) -> str:
 
     add("")
     add(res.summary())
+    if res.interpolated:
+        i = res.interpolated
+        add(f"  frontier by interpolation: N*~{i['n_star']:.1f}  ${i['bill_per_1k']:.2f}/1k"
+            f"  ({i['binding']} crosses between N={i['between'][0]} and {i['between'][1]})")
     if res.reason:
         add(f"\ncaveat: {res.reason}")
 

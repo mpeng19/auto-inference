@@ -87,6 +87,13 @@ class EvalResult:
     # was computed *and* accuracy fell are both facts, and collapsing them
     # into one boolean loses the number a caller needs to judge the trade.
     quality: tuple[dict, ...] = ()
+    # Where the binding SLO metric crosses its limit, by linear interpolation
+    # between the last passing and first failing level, with the bill
+    # interpolated to match. Reported beside N*, not instead of it: N* is
+    # quantised to the grid, and a level sitting on the SLO line passes or
+    # fails on noise -- stock priced $12.2/1k when N=12 held 20 ms mean TPOT
+    # and $15.0/1k when it did not. This number moves 3%, not 18%.
+    interpolated: dict | None = None
 
     @property
     def quality_regressed(self) -> bool:
@@ -132,6 +139,7 @@ class EvalResult:
     def as_dict(self) -> dict:
         r = self.rank()
         return {"ok": self.ok, "reason": self.reason, "n_star": self.n_star,
+                "interpolated": self.interpolated,
                 "quality": list(self.quality),
                 "quality_regressed": self.quality_regressed,
                 "stack_digest": self.stack_digest,
@@ -170,6 +178,42 @@ class EvalResult:
 
 
 # ── the simulator ────────────────────────────────────────────────────────
+
+
+def interpolate_frontier(pts: list) -> dict | None:
+    """The SLO crossing between the last level that held and the first that
+    did not, and the bill there. None when the sweep does not bracket it.
+
+    Linear in N for both the metric and the bill. Rough, and honest about
+    it: it exists to show how far inside the grid step the frontier sits,
+    which is what decides whether a one-level move is a result or noise.
+    """
+    passing = [p for p in pts if p.meets_slo]
+    failing = [p for p in pts if not p.meets_slo and p.n_users > max(
+        (q.n_users for q in passing), default=-1)]
+    if not passing or not failing:
+        return None
+    lo = max(passing, key=lambda p: p.n_users)
+    hi = min(failing, key=lambda p: p.n_users)
+    lo_vals = {c["label"]: c for c in lo.checks if c.get("value") is not None}
+    crossings = []
+    for c in hi.checks:
+        if c.get("ok") or c.get("value") is None or c["label"] not in lo_vals:
+            continue
+        v0, v1, lim = lo_vals[c["label"]]["value"], c["value"], c["limit"]
+        if v1 <= v0:
+            continue
+        frac = min(1.0, max(0.0, (lim - v0) / (v1 - v0)))
+        crossings.append((frac, c["label"]))
+    if not crossings:
+        return None
+    frac, label = min(crossings)
+    n = lo.n_users + frac * (hi.n_users - lo.n_users)
+    bill = lo.bill_per_1k + frac * (hi.bill_per_1k - lo.bill_per_1k)
+    gsr = lo.gpu_s_per_request + frac * (hi.gpu_s_per_request - lo.gpu_s_per_request)
+    return {"n_star": round(n, 2), "bill_per_1k": round(bill, 4),
+            "gpu_s_per_request": round(gsr, 3), "binding": label,
+            "between": [lo.n_users, hi.n_users]}
 
 @dataclass
 class Simulator:
@@ -417,7 +461,7 @@ class Simulator:
                            "the true frontier is higher and the price lower")
         return EvalResult(ok=True, reason="; ".join(skipped), n_star=star.n_users,
                           curve=tuple(pts), market=m, record=record,
-                          quality=quality,
+                          quality=quality, interpolated=interpolate_frontier(pts),
                           stack_digest=record.get("stack_digest", ""))
 
     def finish(self, record: dict) -> EvalResult:
