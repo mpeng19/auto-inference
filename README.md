@@ -87,8 +87,53 @@ price them with the simulator. Four services, each defined by a Protocol in
 | `MemoryService` | has anyone tried this, and what happened? |
 | `ContextService` | how exactly did they do it? |
 | `EvalService` | the queue in front of the GPUs |
+| `SessionStore` | the seam between a running fleet and anything watching it |
 | `AgentService` | one idea, iterated, with divergence and retry policy |
 | `OrchestrationService` | N of those at once, kept diverse and in budget |
+
+**Agents are Claude Code processes.** Each runs as `claude -p` in its own
+workspace directory, edits the files there, and the harness reads the diff
+back. Rebuilding a coding agent badly is weeks of work for something worse;
+what this adds is the part Claude Code does not have — a fleet, a shared memory
+of every experiment, and a priced evaluation of the diff. Token usage comes
+back in the JSON envelope, which is what makes per-agent cost real on the
+dashboard rather than estimated.
+
+Prefer `--model sonnet` or `opus`. A reasoning-heavy frontier model spends its
+budget thinking about a task whose difficulty lives in the codebase, not in the
+prompt.
+
+```bash
+harness start --agents 10 --evals 3 --model sonnet --budget 500   # detached
+harness tui                        # watch and steer it
+harness status                     # one-shot, scriptable, --json
+harness scale 6                    # add or remove agents in flight
+harness agent pause a03            # pause / resume / kill one agent
+harness stop                       # graceful: finish paid work, then wind up
+harness kill                       # flat: everything, now
+```
+
+`start` is asynchronous: a fleet runs for hours and must outlive the terminal.
+Everything after it talks to a SQLite session store, so the CLI and the TUI are
+two clients of the same interface and neither needs the other to exist. Add
+`--dry-run` to fake the GPUs (saves dollars) and `--fake-agents` to fake Claude
+Code too (saves subscription usage); together they exercise the whole fleet for
+free.
+
+The TUI is deliberately small — one table, one detail pane, six keys
+(`p`/`r`/`k` per agent, `+`/`-` to scale, `s` to stop). It answers four
+questions and stops: who is running and what is each doing right now, what has
+it cost in dollars and tokens per agent, are the GPUs busy or is the fleet
+stalled behind them, and which agent do I want to pause.
+
+```
+demo   running   4/4 agents   $28.00 of $60   updated 0s ago
+evals: 2 running, 4 queued, 35 done, 0 deduped, 100% GPU utilisation
+
+agent  status      idea                  att      Δ%       $  activity
+a00    evaluating  prefill chunking        3   -10.3    2.60  attempt 3: full running; studying meanwhile
+a03    evaluating  queue ordering          1   -11.7    5.60  attempt 1: screen running; studying meanwhile
+```
 
 An agent's whole interface to the code is a `Workspace`:
 
@@ -153,11 +198,14 @@ src/simulator/          the product
   conftest.py           shared fixtures for every test below
   */tests/              tests live beside the service they test
 src/harness/            the auto-research harness
-  contracts/            the four service Protocols; no logic lives here
+  contracts/            the service Protocols; no logic lives here
   memory/               SqliteMemory: experiment graph, FTS, briefs
   context/              JsonlContext: append-only agent traces
-  agent/                Workspace (the diff API), the iterate-on-one-idea loop
-  orchestration/        Fleet: N agents, one gate on GPU spend
+  session/              SqliteSessionStore: the fleet/TUI seam
+  agent/                Workspace (the diff API), the loop, the Claude Code proposer
+  orchestration/        Fleet + EvalBroker: N agents, one queue for the GPUs
+  tui/                  the dashboard
+  daemon.py cli.py      `harness start|status|tui|scale|agent|stop|kill`
 monitor/                Modal spend monitoring
 docs/methodology.md     how the method was arrived at, and every negative result
 docs/example.ipynb      minimal end-to-end notebook
