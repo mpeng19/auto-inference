@@ -261,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
     s.add_argument("--root", default="")
     s.add_argument("--seed", action="append", help="a starting hypothesis; repeatable")
-    s.add_argument("--baseline", default="", help='JSON, e.g. {"bill_per_1k": 12.23, "quality": {"gsm8k": 0.62}}')
+    s.add_argument("--baseline", default="", help='JSON from stock sweeps: {"bill_per_1k": 14.96, "quality": {"gsm8k": 0.66}, "screen": {"bill_per_1k": 17.3}}')
     s.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="fake the GPU evaluations (saves dollars, still runs "
                         "real Claude Code agents)")

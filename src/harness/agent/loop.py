@@ -256,6 +256,7 @@ class IterativeAgent:
         rec = self.evals.collect(ticket.id)
         idle = time.time() - t0
         self._report(status="thinking", queued_s=rec.queued_s, eval_ticket="",
+                     cost_delta=rec.cost_usd,
                      activity=f"attempt {n}: {tier} done"
                               + (f" ({rec.failure})" if not rec.ok else ""))
         self.context.append(trace, Turn(kind="eval_result", name=stack.digest,
@@ -264,7 +265,7 @@ class IterativeAgent:
             idea_id=idea.id, agent_id=self.agent_id, n=n, tier=tier,
             stack_digest=stack.digest, trace_ref=trace, ok=rec.ok,
             failure="" if rec.ok else (rec.failure or "hypothesis"),
-            metrics=rec.metrics, delta=self._delta(rec.metrics),
+            metrics=rec.metrics, delta=self._delta(rec.metrics, tier),
             cost_usd=rec.cost_usd, queued_s=rec.queued_s)
         return att, idle
 
@@ -283,9 +284,23 @@ class IterativeAgent:
         claimed = set(idea.targets)
         return len(touched - claimed) / len(touched)
 
-    def _delta(self, metrics: dict) -> dict:
+    def _delta(self, metrics: dict, tier: str = "full") -> dict:
+        """Percent change against stock *measured the same way*.
+
+        A screen is a short sweep over a couple of levels, and its price
+        carries warm-up that a full sweep amortises: on 2026-09-02 stock
+        priced $14.96/1k at full tier and ~$17/1k at screen tier. Judged
+        against the full baseline, no screen could ever clear the promotion
+        threshold, so every idea died in the cheap tier and nothing was
+        confirmed. `baseline["screen"]` holds stock at screen tier; without
+        it the full baseline is used and the caller should know that is a
+        comparison the screen cannot win.
+        """
+        base_map = self.baseline
+        if tier == "screen" and isinstance(self.baseline.get("screen"), dict):
+            base_map = self.baseline["screen"]
         out = {}
-        for k, base in self.baseline.items():
+        for k, base in base_map.items():
             if k in metrics and isinstance(base, (int, float)) and base:
                 out[f"{k}_pct"] = round((metrics[k] - base) / base * 100, 2)
         return out

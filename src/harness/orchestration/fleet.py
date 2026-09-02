@@ -49,6 +49,9 @@ class _Slot:
         self.resume = threading.Event()
         self.resume.set()                       # not paused
         self.view = AgentView(agent_id=agent_id)
+        # Spend the agent has already reported for its current idea, so the
+        # outcome's total is not counted twice when the idea ends.
+        self.reported_usd = 0.0
 
     @property
     def paused(self) -> bool:
@@ -216,6 +219,16 @@ class Fleet:
             if s is None:
                 return
             tok = fields.pop("tokens", None)
+            # `cost_delta` is spend that just happened. It lands in the fleet
+            # total immediately; the alternative -- summing outcomes when an
+            # idea ends -- left the dashboard at $0.00 and the budget blind
+            # for up to `max_attempts` sweeps per agent, which on the first
+            # real run was every dollar the fleet had spent.
+            usd = fields.pop("cost_delta", None)
+            if usd:
+                self._cost += usd
+                s.reported_usd += usd
+                s.view = replace(s.view, cost_usd=s.view.cost_usd + usd)
             # An operator's state outranks the agent's own. Pause is
             # cooperative -- the agent keeps working until its next checkpoint
             # -- so without this the row flips straight back to "evaluating"
@@ -324,7 +337,15 @@ class Fleet:
     def _record_outcome(self, out: AgentOutcome) -> None:
         with self._lock:
             self._completed.append(out)
-            self._cost += out.cost_usd
+            # Only what the agent did not already report as it went.
+            s = self._slots.get(out.agent_id)
+            rest = out.cost_usd - (s.reported_usd if s else 0.0)
+            if s is not None:
+                s.reported_usd = 0.0
+            if rest > 0:
+                self._cost += rest
+                if s is not None:
+                    s.view = replace(s.view, cost_usd=s.view.cost_usd + rest)
             self._live_ideas = [i for i in self._live_ideas if i.id != out.idea.id]
 
     def _run_agent(self, agent_id: str) -> None:
@@ -372,7 +393,7 @@ class Fleet:
                     self._live_ideas = [i for i in self._live_ideas if i.id != idea.id]
                 continue
             self._record_outcome(out)
-            self.report(agent_id, status="idle", cost_usd=out.cost_usd,
+            self.report(agent_id, status="idle",
                         attempts_total=slot.view.attempts_total + len(out.attempts),
                         idle_s=out.idle_s,
                         best_delta_pct=(out.best.delta.get("bill_per_1k_pct")

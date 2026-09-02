@@ -198,10 +198,13 @@ def recall(intent: str, root: str | pathlib.Path | None = None, k: int = 8,
 
 def _find_memory(root: str | pathlib.Path | None) -> pathlib.Path | None:
     if root:
+        # An explicit root is an answer, not a hint: a missing database there
+        # must not quietly become whichever fleet last ran in this directory.
         p = pathlib.Path(root)
         for c in (p, p / "memory.db"):
             if c.is_file():
                 return c
+        return None
     for base in (pathlib.Path.cwd() / "agents", pathlib.Path.home() / ".auto-inference"):
         if base.is_dir():
             found = sorted(base.rglob("memory.db"),

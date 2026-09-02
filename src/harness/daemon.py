@@ -171,7 +171,25 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     return fleet, broker
 
 
+def check(cfg: FleetConfig) -> None:
+    """Refuse configurations that run but cannot work."""
+    if cfg.dry_run:
+        return
+    base = cfg.baseline or {}
+    if not isinstance(base.get("bill_per_1k"), (int, float)):
+        raise SystemExit("--baseline needs bill_per_1k from a stock sweep on the "
+                         "same grid (docs/NEXT.md step 1)")
+    if not (base.get("quality") or {}):
+        raise SystemExit('--baseline needs "quality": {suite: accuracy}; without '
+                         "it the quality gate never fires")
+    if cfg.screen_first and not isinstance(base.get("screen"), dict):
+        raise SystemExit('--baseline needs "screen": {"bill_per_1k": ...} from a '
+                         "stock sweep at screen tier, or screens are compared "
+                         "with a full sweep and can never be promoted")
+
+
 def run(cfg: FleetConfig) -> None:
+    check(cfg)
     store = SqliteSessionStore(default_store_path())
     fleet, broker = build(cfg, store=store)
     spec = FleetSpec(

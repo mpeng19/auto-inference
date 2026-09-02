@@ -56,6 +56,22 @@ def test_quality_baseline_reaches_the_evaluator():
         "quality_baseline": {}}
 
 
+def test_a_real_fleet_refuses_a_baseline_it_cannot_score_against():
+    """Each missing piece is a way the fleet runs all night and learns nothing."""
+    from harness.daemon import check
+
+    check(FleetConfig(session_id="s", dry_run=True))            # fakes need nothing
+    full = {"bill_per_1k": 14.96, "quality": {"gsm8k": 0.66},
+            "screen": {"bill_per_1k": 17.3}}
+    check(FleetConfig(session_id="s", baseline=full))
+    for missing in ("bill_per_1k", "quality", "screen"):
+        with pytest.raises(SystemExit):
+            check(FleetConfig(session_id="s",
+                              baseline={k: v for k, v in full.items() if k != missing}))
+    check(FleetConfig(session_id="s", screen_first=False,
+                      baseline={k: v for k, v in full.items() if k != "screen"}))
+
+
 def test_fake_agents_never_shell_out(tmp_path, monkeypatch):
     """`--fake-agents` must not spend subscription usage; the offline socket
     guard would catch a network call, but not a subprocess."""

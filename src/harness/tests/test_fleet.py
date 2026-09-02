@@ -267,6 +267,68 @@ def test_agents_keep_working_while_gpus_are_saturated(tmp_path, stock_dir,
         "an agent studied with no evaluation in flight -- it was not overlapped"
 
 
+def test_spend_is_visible_per_attempt_not_per_idea():
+    """The first real fleet showed $0.00 after two sweeps because cost only
+    reached the total when an idea ended. Spend reported as it happens must
+    land immediately, and the outcome's total must not count it again."""
+    import time
+
+    from harness.contracts import AgentOutcome
+
+    gate = threading.Event()
+
+    class Blocking:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        def propose(self, seed=None, live_ideas=()):
+            return Idea(title="t", hypothesis="h")
+
+        def run(self, idea, budget):
+            gate.wait(5)
+            return AgentOutcome(agent_id=self.agent_id, idea=idea,
+                                stop="no_progress", cost_usd=2.0)
+
+    broker = EvalBroker(lambda r: (True, {}, ""), capacity=1)
+    fleet = Fleet(lambda a, f: Blocking(a), broker)
+    fleet.start(FleetSpec(fleet_budget=FleetBudget(max_agents=1, max_usd_total=2.0)))
+    try:
+        for _ in range(100):
+            if fleet.state().agents and fleet.state().agents[0].status != "starting":
+                break
+            time.sleep(0.02)
+        fleet.report("a00", cost_delta=1.5)
+        st = fleet.state()
+        assert st.cost_usd == 1.5 and st.agents[0].cost_usd == 1.5
+        gate.set()
+        for _ in range(100):
+            if fleet.state().agents[0].status == "idle":
+                break
+            time.sleep(0.02)
+        st = fleet.state()
+        assert st.cost_usd == 2.0, st.cost_usd        # not 3.5
+        assert st.agents[0].cost_usd == 2.0
+    finally:
+        fleet.stop()
+        broker.shutdown()
+
+
+def test_a_screen_is_judged_against_stock_at_screen_tier(
+        tmp_path, stock_dir, memory, context):
+    """Stock prices higher at screen tier than at full tier, so a screen
+    compared with the full baseline can never be promoted."""
+    run = FakeRunner(mode="flat")                      # always $12.23
+    broker = EvalBroker(run, capacity=2)
+    make = _agent_factory(tmp_path, stock_dir, memory, context, broker)
+    agent = make("a01", None)
+    agent.baseline = {"bill_per_1k": 10.0,             # full: screen loses
+                      "screen": {"bill_per_1k": 14.0}}  # screen tier: it wins
+    agent.run(Idea(title="chunk", hypothesis="tune chunk", targets=(P,)),
+              AgentBudget(max_attempts=1, patience=1, screen_first=True))
+    broker.shutdown()
+    assert run.tiers == ["screen", "full"], run.tiers
+
+
 def test_screen_first_avoids_full_sweeps_on_dead_candidates(
         tmp_path, stock_dir, memory, context):
     """The largest throughput lever: most candidates die in the cheap tier."""
