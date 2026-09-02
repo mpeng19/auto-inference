@@ -157,8 +157,13 @@ class IterativeAgent:
             ok, why = self.workspace.check()
             if not ok:
                 # Free to reject here; ~6 GPU-minutes if it reaches the runner.
+                # Keep what the model said: an agent that returns no diff
+                # twice in a row is either stuck or being refused, and the
+                # trace is the only place that distinction can be made.
                 attempts.append(Attempt(idea_id=idea.id, agent_id=self.agent_id,
                                         n=n, ok=False, failure="invalid_diff"))
+                self.context.append(trace, Turn(kind="thought", name="propose",
+                                                content=str(rationale)[:4000]))
                 self.context.append(trace, Turn(kind="error", name="check", content=why))
                 n += 1
                 continue
