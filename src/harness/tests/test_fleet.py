@@ -303,7 +303,7 @@ def test_verdicts_have_a_noise_floor():
     from harness.contracts import Attempt
 
     v = IterativeAgent._verdict
-    ok = lambda pct: Attempt(idea_id="i", agent_id="a", n=0, ok=True,  # noqa: E731
+    ok = lambda pct: Attempt(idea_id="i", agent_id="a", n=0, ok=True,
                              delta={"bill_per_1k_pct": pct})
     assert v(ok(-0.9)) == "neutral"
     assert v(ok(-3.0)) == "win"
