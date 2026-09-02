@@ -12,7 +12,14 @@ that gets rewritten repeatedly stays coherent.
     AgentService           one idea, iterated
     OrchestrationService   N of those, kept diverse and inside a budget
 """
-from .agent import AgentBudget, AgentOutcome, AgentService, Attempt, Idea
+from .agent import (
+    AgentBudget,
+    AgentControl,
+    AgentOutcome,
+    AgentService,
+    Attempt,
+    Idea,
+)
 from .common import Provenance, digest, new_id, now
 from .context import ContextService, Slice, TraceMeta, Turn
 from .evaluation import (
@@ -32,6 +39,13 @@ from .orchestration import (
     FleetState,
     OrchestrationService,
 )
+from .session import (
+    AgentView,
+    Command,
+    SessionStore,
+    SessionView,
+    TokenUse,
+)
 
 __all__ = [
     # shared
@@ -44,7 +58,10 @@ __all__ = [
     "EvalService", "EvalRequest", "EvalTicket", "EvalRecord", "EvalStatus",
     "QueueStats", "Tier",
     # agent
-    "AgentService", "Idea", "Attempt", "AgentOutcome", "AgentBudget",
+    "AgentService", "AgentControl", "Idea", "Attempt", "AgentOutcome",
+    "AgentBudget",
+    # session / control
+    "SessionStore", "SessionView", "AgentView", "Command", "TokenUse",
     # orchestration
     "OrchestrationService", "FleetSpec", "FleetState", "FleetBudget", "AgentState",
 ]

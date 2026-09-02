@@ -30,6 +30,7 @@ import json
 import math
 import pathlib
 import sqlite3
+import threading
 import time
 from dataclasses import asdict
 
@@ -93,10 +94,30 @@ class SqliteMemory:
     def __init__(self, path: str | pathlib.Path = "memory.db"):
         self.path = pathlib.Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._c = sqlite3.connect(self.path, check_same_thread=False)
-        self._c.row_factory = sqlite3.Row
-        self._c.executescript(SCHEMA)
-        self._c.commit()
+        self._local = threading.local()
+        self._conn().executescript(SCHEMA)
+        self._conn().commit()
+
+    def _conn(self) -> sqlite3.Connection:
+        """One connection per thread.
+
+        Ten agent threads sharing a single connection raises "bad parameter or
+        other API misuse" the moment two of them query at once -- observed on a
+        live fleet, where it surfaced as an agent failing to propose an idea.
+        A lock would also work; per-thread connections keep concurrent reads
+        actually concurrent, which is the point of WAL.
+        """
+        c = getattr(self._local, "c", None)
+        if c is None:
+            c = sqlite3.connect(self.path, timeout=15)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA busy_timeout=15000")
+            self._local.c = c
+        return c
+
+    @property
+    def _c(self) -> sqlite3.Connection:
+        return self._conn()
 
     # ── write ────────────────────────────────────────────────────────────
     def record(self, exp: Experiment) -> str:

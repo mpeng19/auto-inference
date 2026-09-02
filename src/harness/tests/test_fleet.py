@@ -81,7 +81,7 @@ def _agent_factory(tmp_path, stock_dir, memory, context, evals, proposer=None):
             agent_id=agent_id, workspace=ws, memory=memory, context=context,
             proposer=proposer or ScriptedProposer(),
             evals=(fleet.evals if fleet is not None else evals),
-            baseline={"bill_per_1k": 12.23})
+            control=fleet, baseline={"bill_per_1k": 12.23})
     return make
 
 
@@ -328,3 +328,192 @@ def test_identical_proposals_collapse_fleet_wide(tmp_path, stock_dir, memory, co
     st = broker.stats()
     assert st.deduped > st.completed, \
         f"expected identical proposals to collapse: {st}"
+
+
+# ── live control: pause, resume, kill, scale ──────────────────────────────
+
+def _control_fleet(tmp_path, stock_dir, memory, context, store=None, agents=3):
+    run = FakeRunner(delay=0.05)
+    broker = EvalBroker(run, capacity=2)
+    fleet = Fleet(_agent_factory(tmp_path, stock_dir, memory, context, broker),
+                  broker, store=store, session_id="t1", tick_s=0.05)
+    fleet.start(FleetSpec(
+        agent_budget=AgentBudget(max_attempts=3, max_usd=5, patience=3,
+                                 screen_first=False),
+        fleet_budget=FleetBudget(max_agents=agents, max_concurrent_evals=2,
+                                 max_usd_total=50, max_wall_s=30)))
+    return fleet, broker, run
+
+
+def test_an_agent_can_be_paused_and_resumed(tmp_path, stock_dir, memory, context):
+    fleet, broker, _ = _control_fleet(tmp_path, stock_dir, memory, context)
+    try:
+        import time
+        assert fleet.pause_agent("a00") is True
+        time.sleep(0.2)
+        assert fleet._slots["a00"].paused
+        assert fleet.resume_agent("a00") is True
+        assert not fleet._slots["a00"].paused
+        assert fleet.pause_agent("nope") is False
+    finally:
+        fleet.stop()
+        broker.shutdown()
+
+
+def test_killing_one_agent_leaves_the_others_running(tmp_path, stock_dir,
+                                                     memory, context):
+    fleet, broker, _ = _control_fleet(tmp_path, stock_dir, memory, context)
+    try:
+        import time
+        assert fleet.kill_agent("a00") is True
+        time.sleep(0.4)
+        assert fleet.should_stop("a00")
+        assert not fleet.should_stop("a01")
+        assert fleet.state().running
+    finally:
+        fleet.stop()
+        broker.shutdown()
+
+
+def test_scaling_adds_and_removes_agents_in_flight(tmp_path, stock_dir,
+                                                   memory, context):
+    fleet, broker, _ = _control_fleet(tmp_path, stock_dir, memory, context, agents=2)
+    try:
+        import time
+        assert fleet.scale(4) == 4
+        time.sleep(0.2)
+        assert len(fleet._slots) == 4
+        fleet.scale(1)
+        time.sleep(0.2)
+        live = [s for s in fleet._slots.values() if not s.stop.is_set()]
+        assert len(live) == 1
+        # Newest go first: an agent several attempts in has more sunk cost.
+        assert live[0].agent_id == "a00"
+    finally:
+        fleet.stop()
+        broker.shutdown()
+
+
+def test_commands_arrive_through_the_store(tmp_path, stock_dir, memory, context):
+    """The TUI is a different process; it can only write rows."""
+    from harness.contracts.session import Command
+    from harness.session import SqliteSessionStore
+
+    store = SqliteSessionStore(tmp_path / "s.db")
+    fleet, broker, _ = _control_fleet(tmp_path, stock_dir, memory, context, store)
+    try:
+        import time
+        cid = store.send_to("t1", Command(kind="pause", agent_id="a01"))
+        for _ in range(60):
+            time.sleep(0.05)
+            c = store.command_status(cid)
+            if c and c.applied_at:
+                break
+        assert c.result == "paused"
+        assert fleet._slots["a01"].paused
+        snap = store.read("t1")
+        assert snap is not None and snap.session_id == "t1"
+        assert snap.pid > 0, "the pid must travel with the snapshot"
+    finally:
+        fleet.stop()
+        broker.shutdown()
+
+
+def test_a_failed_agent_is_not_relabelled_done(tmp_path, stock_dir, memory, context):
+    """The trailing status report used to overwrite `failed`, which hid a real
+    SQLite error behind a green row on the dashboard."""
+    class Broken(ScriptedProposer):
+        def seed(self, live_ideas, brief):
+            raise RuntimeError("boom")
+
+    broker = EvalBroker(FakeRunner(), capacity=1)
+    fleet = Fleet(_agent_factory(tmp_path, stock_dir, memory, context, broker,
+                                 proposer=Broken()), broker, tick_s=0.05)
+    try:
+        import time
+        fleet.start(FleetSpec(
+            agent_budget=AgentBudget(max_attempts=1),
+            fleet_budget=FleetBudget(max_agents=1, max_concurrent_evals=1,
+                                     max_usd_total=5, max_wall_s=10)))
+        time.sleep(0.5)
+        assert fleet._slots["a00"].view.status == "failed"
+        assert "boom" in fleet._slots["a00"].view.note
+    finally:
+        fleet.stop()
+        broker.shutdown()
+
+
+def test_reseeding_backs_off_rather_than_spinning(tmp_path, stock_dir, memory, context):
+    """Every reseed costs a model call; a hot loop on duplication is expensive.
+
+    Diversity is a heuristic, so after a few collisions the agent takes the
+    near-duplicate and gets on with it.
+    """
+    class SameIdea(ScriptedProposer):
+        def seed(self, live_ideas, brief):
+            return Idea(title="identical", hypothesis="the very same hypothesis",
+                        targets=(P,))
+
+    submitted_by = []
+    broker = EvalBroker(
+        lambda req: (True, {"bill_per_1k": 12.0, "cost_usd": 0.5}, ""), capacity=2)
+    # Count *submissions*, not runs: these agents all propose the identical
+    # edit, so the broker correctly collapses them into one GPU run and the
+    # runner would only ever see one agent id.
+    _submit = broker.submit
+    broker.submit = lambda req: (submitted_by.append(req.agent_id), _submit(req))[1]
+    fleet = Fleet(_agent_factory(tmp_path, stock_dir, memory, context, broker,
+                                 proposer=SameIdea()), broker, tick_s=0.05,
+                  max_reseeds=2)
+    try:
+        import time
+        fleet.start(FleetSpec(
+            agent_budget=AgentBudget(max_attempts=1, patience=1, screen_first=False),
+            # Generous on purpose: a tight budget would be exhausted by the
+            # first agent through, and the starvation under test is caused by
+            # reseeding, not by money.
+            fleet_budget=FleetBudget(max_agents=3, max_concurrent_evals=2,
+                                     max_usd_total=500, max_wall_s=10)))
+        time.sleep(1.5)
+        # The property is that agents do not starve: with three agents all
+        # proposing the identical idea, more than one still gets to work.
+        submitters = set(submitted_by)
+        assert len(submitters) >= 2, (
+            f"only {submitters} ever ran; the rest starved on reseeding")
+    finally:
+        fleet.stop()
+        broker.shutdown()
+
+
+def test_a_paused_agent_keeps_showing_paused(tmp_path, stock_dir, memory, context):
+    """Pause is cooperative, so the agent keeps working until its next
+    checkpoint. Without this the row flipped back to "evaluating" and `pause`
+    looked like it had done nothing."""
+    fleet, broker, _ = _control_fleet(tmp_path, stock_dir, memory, context)
+    try:
+        import time
+        fleet.pause_agent("a00")
+        # the agent reports its own progress while finishing paid work
+        fleet.report("a00", status="evaluating", activity="attempt 1: full running")
+        assert fleet._slots["a00"].view.status == "paused"
+        assert "full running" in fleet._slots["a00"].view.activity
+        fleet.resume_agent("a00")
+        fleet.report("a00", status="evaluating")
+        assert fleet._slots["a00"].view.status == "evaluating"
+        time.sleep(0.05)
+    finally:
+        fleet.stop()
+        broker.shutdown()
+
+
+def test_a_finished_agent_can_still_report_done(tmp_path, stock_dir, memory, context):
+    """The operator-state guard must not trap an agent in `stopping` forever."""
+    fleet, broker, _ = _control_fleet(tmp_path, stock_dir, memory, context)
+    try:
+        fleet.kill_agent("a00")
+        assert fleet._slots["a00"].view.status == "stopping"
+        fleet.report("a00", status="done")
+        assert fleet._slots["a00"].view.status == "done"
+    finally:
+        fleet.stop()
+        broker.shutdown()

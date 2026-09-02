@@ -117,9 +117,40 @@ class Workspace:
             (self.candidates / rel).unlink(missing_ok=True)
 
     # ── inspecting the proposal ─────────────────────────────────────────
+    def materialise(self, *rels: str) -> tuple[str, ...]:
+        """Write stock copies into the workspace so an editor can open them.
+
+        Needed because the agent is a Claude Code process working in this
+        directory, not a function handed a string: it wants real files to read
+        and edit in place. Copies are only made where none exists, so calling
+        this twice never discards an agent's work.
+        """
+        out = []
+        for rel in rels:
+            dst = self.candidates / rel
+            if not dst.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(self.source.read(rel))
+            out.append(rel)
+        return tuple(out)
+
     def touched(self) -> tuple[str, ...]:
-        return tuple(sorted(str(p.relative_to(self.candidates))
-                            for p in self.candidates.rglob("*.py")))
+        """Files that actually differ from stock.
+
+        Not "files present": an agent editing in place starts from a stock copy
+        of everything it might touch, and most of those stay identical. A stack
+        containing an unmodified file is a no-op wearing a diff's clothes --
+        exactly what the deleted `overlays/` directory turned out to be.
+        """
+        out = []
+        for f in sorted(self.candidates.rglob("*.py")):
+            rel = str(f.relative_to(self.candidates))
+            try:
+                if f.read_text() != self.source.read(rel):
+                    out.append(rel)
+            except (OSError, FileNotFoundError):
+                out.append(rel)          # not in stock at all: genuinely new
+        return tuple(out)
 
     def diff(self, rel: str | None = None, context: int = 3) -> str:
         """Unified diff against stock. For the agent to review and for the log."""
@@ -133,18 +164,20 @@ class Workspace:
         return "".join(out)
 
     def check(self) -> tuple[bool, str]:
-        """Everything worth knowing before renting a GPU."""
-        touched = self.touched()
-        if not touched:
-            return False, "no files changed; the stack would be identical to stock"
-        for r in touched:
-            text = self.read(r)
+        """Everything worth knowing before renting a GPU.
+
+        Also parses every *present* file, not just the changed ones: an agent
+        editing in place can leave a syntax error in a file it then reverted,
+        and finding that out six GPU-minutes in costs about a dollar a typo.
+        """
+        for f in sorted(self.candidates.rglob("*.py")):
+            rel = str(f.relative_to(self.candidates))
             try:
-                ast.parse(text)
+                ast.parse(f.read_text())
             except SyntaxError as e:
-                return False, f"{r}: syntax error at line {e.lineno}: {e.msg}"
-            if text == self.stock_text(r):
-                return False, f"{r}: written but byte-identical to stock"
+                return False, f"{rel}: syntax error at line {e.lineno}: {e.msg}"
+        if not self.touched():
+            return False, "no files changed; the stack would be identical to stock"
         return True, ""
 
     # ── handing it to the simulator ─────────────────────────────────────

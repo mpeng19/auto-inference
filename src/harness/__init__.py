@@ -26,8 +26,14 @@ agents sat blocked in it, which is capacity being paid for and not used.
 Contracts live in `harness.contracts` and hold no logic. Everything else is a
 reference implementation of one of them.
 """
-from .agent import Evaluator, IterativeAgent, Proposer, Workspace
-from .agent.evaluator import SimulatorEvaluator
+from .agent import (
+    ClaudeCodeProposer,
+    Evaluator,
+    IterativeAgent,
+    Proposer,
+    SimulatorEvaluator,
+    Workspace,
+)
 from .context import JsonlContext
 from .contracts import (
     AgentBudget,
@@ -56,11 +62,13 @@ from .contracts import (
 )
 from .memory import SqliteMemory
 from .orchestration import EvalBroker, Fleet
+from .session import SqliteSessionStore
 
 __all__ = [
     # services (implementations)
     "Fleet", "EvalBroker", "IterativeAgent", "Workspace",
-    "SqliteMemory", "JsonlContext", "SimulatorEvaluator",
+    "SqliteMemory", "JsonlContext", "SimulatorEvaluator", "ClaudeCodeProposer",
+    "SqliteSessionStore",
     # extension points
     "Proposer", "Evaluator",
     # contracts

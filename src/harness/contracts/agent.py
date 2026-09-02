@@ -104,6 +104,33 @@ class AgentBudget:
 
 
 @runtime_checkable
+class AgentControl(Protocol):
+    """How a running agent asks the fleet whether it may keep going.
+
+    An operator watching a fleet needs to pause or kill one agent without
+    touching the other nine, and an agent cannot be interrupted at an arbitrary
+    instant -- it may be halfway through a paid evaluation. So control is
+    *cooperative*: the agent checks at points where stopping is cheap and
+    resuming is coherent.
+
+    `report` is the other direction: it is how a dashboard knows an agent is
+    thinking rather than hung.
+    """
+
+    def should_stop(self, agent_id: str) -> bool:
+        """True when this agent should wind up after the current attempt."""
+        ...
+
+    def wait_if_paused(self, agent_id: str, timeout_s: float = 3600) -> bool:
+        """Block while paused. False means "stop instead of resuming"."""
+        ...
+
+    def report(self, agent_id: str, **fields) -> None:
+        """Publish what this agent is doing right now. Never blocks."""
+        ...
+
+
+@runtime_checkable
 class AgentService(Protocol):
     def propose(self, *, seed: Idea | None, live_ideas: tuple[Idea, ...]) -> Idea:
         """Pick this agent's idea, avoiding what the fleet is already doing."""

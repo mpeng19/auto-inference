@@ -24,6 +24,7 @@ this system can do by accident.
 """
 from __future__ import annotations
 
+import contextlib
 import time
 from dataclasses import dataclass, field, replace
 from typing import Protocol
@@ -74,8 +75,28 @@ class IterativeAgent:
     context: object           # contracts.context.ContextService
     proposer: Proposer
     evals: object             # contracts.evaluation.EvalService
+    control: object | None = None     # contracts.agent.AgentControl
     baseline: dict = field(default_factory=dict)
     priority: int = 0
+
+    # ── the control seam ─────────────────────────────────────────────────
+    def _report(self, **fields) -> None:
+        if self.control is not None:
+            # Telemetry must never take an experiment down.
+            with contextlib.suppress(Exception):
+                self.control.report(self.agent_id, **fields)
+
+    def _may_continue(self) -> bool:
+        """Checked where stopping is cheap: between attempts, not mid-sweep.
+
+        Cooperative on purpose. An operator killing an agent should not
+        abandon an evaluation that has already been paid for.
+        """
+        if self.control is None:
+            return True
+        if not self.control.wait_if_paused(self.agent_id):
+            return False
+        return not self.control.should_stop(self.agent_id)
 
     # ── seeding ──────────────────────────────────────────────────────────
     def propose(self, *, seed: Idea | None, live_ideas: tuple[Idea, ...]) -> Idea:
@@ -110,7 +131,13 @@ class IterativeAgent:
             if spent >= budget.max_usd or time.time() - started > budget.max_wall_s:
                 stop = "budget"
                 break
+            if not self._may_continue():
+                stop = "budget"
+                self._report(status="stopping", activity="stopped by operator")
+                break
 
+            self._report(status="thinking", attempt=n,
+                         activity=f"attempt {n}: reading what the fleet knows")
             brief = self.memory.recall(Recall(
                 intent=idea.hypothesis, agent_id=self.agent_id, idea_id=idea.id))
             self.context.append(trace, Turn(
@@ -118,6 +145,7 @@ class IterativeAgent:
                 tokens_in=brief.est_tokens))
 
             self.workspace.reset()
+            self._report(activity=f"attempt {n}: writing a diff")
             try:
                 rationale = self.proposer.edit(
                     self.workspace, idea, brief, n, tuple(attempts))
@@ -203,12 +231,16 @@ class IterativeAgent:
                           run_dir=str(self.workspace.run_dir(n)),
                           label=f"{idea.title} #{n} ({tier})")
         ticket = self.evals.submit(req)         # returns immediately, always
+        self._report(status="queued", eval_ticket=ticket.id, attempt=n,
+                     activity=f"attempt {n}: submitted a {tier} run")
         self.context.append(trace, Turn(
             kind="eval_submit", name=stack.digest, content=rationale,
             data={"tier": tier, "ticket": ticket.id, "queued": self.evals.stats().queued,
                   "diff": self.workspace.diff()[:20000]}))
 
         # Useful non-GPU work while the sweep runs.
+        self._report(status="evaluating",
+                     activity=f"attempt {n}: {tier} running; studying meanwhile")
         study = getattr(self.proposer, "study", None)
         if study is not None:
             try:
@@ -223,6 +255,9 @@ class IterativeAgent:
         t0 = time.time()
         rec = self.evals.collect(ticket.id)
         idle = time.time() - t0
+        self._report(status="thinking", queued_s=rec.queued_s, eval_ticket="",
+                     activity=f"attempt {n}: {tier} done"
+                              + (f" ({rec.failure})" if not rec.ok else ""))
         self.context.append(trace, Turn(kind="eval_result", name=stack.digest,
                                         data={"tier": tier, **rec.metrics}))
         att = Attempt(

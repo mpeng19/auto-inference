@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "modal>=1.5.5",
     "numpy>=2.5.2",
+    "textual>=8.2.8",
     "uvloop>=0.22.1",
 ]
 
@@ -29,6 +30,7 @@ dev = [
 
 [project.scripts]
 simulate = "simulator.cli:main"
+harness = "harness.cli:main"
 
 [build-system]
 requires = ["hatchling"]

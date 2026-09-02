@@ -55,11 +55,34 @@ def test_syntax_errors_are_caught_before_a_gpu_is_rented(ws):
 
 
 def test_a_no_op_is_not_a_stack(ws):
+    """A stack of unmodified files is a no-op wearing a diff's clothes.
+
+    Exactly what the deleted `overlays/` turned out to be: two pristine
+    vendored files whose "application" changed nothing.
+    """
     ok, why = ws.check()
     assert not ok and "no files changed" in why
-    ws.edit(P, ws.stock_text(P))
+    # An agent editing in place starts from stock copies; those alone are still
+    # not a diff.
+    ws.materialise(P)
     ok, why = ws.check()
-    assert not ok and "byte-identical" in why
+    assert not ok and "no files changed" in why
+    assert ws.touched() == ()
+
+
+def test_materialise_never_discards_work(ws):
+    ws.materialise(P)
+    ws.replace(P, "8192", "16384")
+    ws.materialise(P)                     # called again by the next attempt
+    assert "16384" in ws.read(P)
+
+
+def test_a_syntax_error_anywhere_blocks_the_stack(ws):
+    """Even in a file the agent later reverted: it is still six GPU-minutes."""
+    ws.replace(P, "8192", "16384")
+    ws.edit("srt/mem_cache/radix_cache.py", "class Broken(:\n")
+    ok, why = ws.check()
+    assert not ok and "syntax error" in why
 
 
 def test_stack_carries_upstream_hashes(ws):
