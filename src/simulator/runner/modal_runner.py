@@ -559,7 +559,7 @@ def _write_helpers(scratch: pathlib.Path, files: dict[str, str]) -> list[str]:
 
 
 def _inside(root: str, path: str) -> bool:
-    """Is `path` under `root` once both are resolved? Both sides resolved,
+    """Is `path` under `root` once both are resolved? Both sides resolved (v2),
     because a volume mount is a symlink: comparing the resolved file against
     the literal "/results" rejected every real file on the first run."""
     r = os.path.realpath(root)
