@@ -68,12 +68,17 @@ been charging the tail of every reply to the price):
 
 | stock, runner v3 | N* | $/1k | interpolated |
 |---|---|---|---|
-| full, 5 x 120 s | 8 | 9.77 | N*~11.7, $8.54 |
+| full, 5 x 120 s, run 1 | 8 | 9.77 | N*~11.7, $8.54 |
+| full, 5 x 120 s, run 2 | 12 | 8.32 | N*~12.2, $8.23 |
 | screen, 2 x 60 s | 12 | 9.03 | |
 | quality | gsm8k 0.64-0.70, longbench 0.53, mmlu 0.64 | | |
 
 Old numbers ($12.23 / $14.96 full, $17.30 screen) are from drained levels
-and are not comparable with anything measured now.
+and are not comparable with anything measured now. Two things follow. The
+fleet baseline is stock on its good day, $8.32. And at that price stock is
+**rank 1 of 12** on the OpenRouter board: the drained tail had been adding
+~30% to every price and pushing stock to rank 9. A win now has to beat a
+stack that already undercuts every provider.
 
 ## Step 2 -- the equivalence reference (built on first use)
 
@@ -99,11 +104,11 @@ uv run harness ideas list
 ## Step 4 -- five build-mode agents, until the money runs out
 
 ```bash
-uv run harness --session build-3 start \
+uv run harness --session build-4 start \
   --agents 5 --evals 3 --model opus --mode build --bank --manager \
   --budget 300 --agent-budget 80 --max-attempts 6 \
-  --root agents/build-3 \
-  --baseline '{"bill_per_1k": 9.77, "quality": {"gsm8k": 0.66, "longbench": 0.53, "mmlu": 0.64}, "screen": {"bill_per_1k": 9.03}}'
+  --root agents/build-4 \
+  --baseline '{"bill_per_1k": 8.32, "quality": {"gsm8k": 0.66, "longbench": 0.53, "mmlu": 0.64}, "screen": {"bill_per_1k": 9.03}}'
 ```
 
 Five agents on three GPUs: with screens at ~10 minutes and full sweeps at
