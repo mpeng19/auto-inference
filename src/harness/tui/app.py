@@ -74,7 +74,8 @@ class FleetApp(App):
     #results { width: 2fr; }
     #result_detail { width: 1fr; padding: 0 1; border-left: solid $panel; }
     #ask { dock: bottom; }
-    #answer_box { height: 12; padding: 0 1; border-top: solid $panel; }
+    #answer_box { height: 12; padding: 0 1; border-top: solid $panel; display: none; }
+    #ask { display: none; }
     #answer { height: auto; }
     """
 
@@ -86,6 +87,7 @@ class FleetApp(App):
         ("-", "scale_down", "Remove agent"),
         ("s", "stop_fleet", "Stop fleet"),
         ("a", "ask", "Ask about the run"),
+        ("escape", "close_ask", "Close the ask box"),
         ("o", "open_artifact", "Open selected result's files"),
         ("t", "open_timeline", "Open timeline (HTML)"),
         ("ctrl+up", "answer_grow", "Bigger answer box"),
@@ -329,10 +331,36 @@ class FleetApp(App):
         if tabs.active == "tab_results":
             self._render_results(force=True)
 
+    @property
+    def _ask_open(self) -> bool:
+        try:
+            return self.query_one("#ask", Input).display
+        except Exception:
+            return False
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Keys that only make sense with the ask box open are hidden from
+        the footer otherwise; a footer full of keys that do nothing is noise."""
+        if action in ("answer_grow", "answer_shrink", "close_ask"):
+            return self._ask_open
+        return True
+
     def action_ask(self) -> None:
         self.query_one("#tabs", TabbedContent).active = "tab_results"
         self._render_results(force=True)
-        self.query_one("#ask", Input).focus()
+        self.query_one("#answer_box", VerticalScroll).display = True
+        box = self.query_one("#ask", Input)
+        box.display = True
+        box.focus()
+        self.refresh_bindings()
+
+    def action_close_ask(self) -> None:
+        """Escape: hide the ask box and the answer, hand focus back to the
+        results table. The conversation is kept; `a` reopens it."""
+        self.query_one("#ask", Input).display = False
+        self.query_one("#answer_box", VerticalScroll).display = False
+        self.query_one("#results", DataTable).focus()
+        self.refresh_bindings()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         q = event.value.strip()
@@ -437,10 +465,23 @@ class FleetApp(App):
         return out
 
     @staticmethod
-    def _open(path: str) -> None:
+    def _open(path: str, kind: str = "file") -> None:
+        """Hand a path to the right program: a folder to the IDE
+        (`HARNESS_IDE`, else `cursor`, else `code`, else the OS opener); a
+        document to the default browser, which renders PDFs and text alike."""
+        import os
         import shutil
         import subprocess
+        import webbrowser
 
+        if kind == "dir":
+            ide = os.environ.get("HARNESS_IDE") or shutil.which("cursor") or shutil.which("code")
+            if ide:
+                subprocess.Popen([ide, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+        if kind == "browser":
+            webbrowser.open(f"file://{path}")
+            return
         opener = shutil.which("open") or shutil.which("xdg-open")
         if opener:
             subprocess.Popen([opener, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -449,8 +490,8 @@ class FleetApp(App):
         arts = getattr(self, "result_artifacts", [])
         run = next((p for k, p in arts if k == "run"), None)
         if run:
-            self._open(run)
-            self.notify(f"opened {run}", timeout=2)
+            self._open(run, kind="dir")
+            self.notify(f"opened {run} in the IDE", timeout=2)
 
     def on_data_table_row_selected(self, event) -> None:
         if getattr(event.data_table, "id", "") != "results":
@@ -459,8 +500,8 @@ class FleetApp(App):
         target = next((p for k, p in arts if k == "paper"), None) or \
             next((p for k, p in arts if k == "report"), None)
         if target:
-            self._open(target)
-            self.notify(f"opened {target}", timeout=2)
+            self._open(target, kind="browser")
+            self.notify(f"opened {target} in the browser", timeout=2)
 
     def action_open_timeline(self) -> None:
         import pathlib
@@ -472,7 +513,7 @@ class FleetApp(App):
             return
         p = pathlib.Path(root) / "timeline.html"
         p.write_text(render_html(root))
-        self._open(str(p))
+        self._open(str(p), kind="browser")
         self.notify(f"opened {p}", timeout=2)
 
     def _recent_calls(self, agent_id: str, k: int = 5) -> list[dict]:

@@ -162,8 +162,10 @@ async def test_results_tab_lists_experiments_and_answers_questions(tmp_path, mon
         results = app.query_one("#results")
         assert results.row_count == 2
         assert app.results_text.splitlines()[0].startswith("win -14.1")
+        assert not app._ask_open
         await pilot.press("a")
         await pilot.pause()
+        assert app._ask_open
         for ch in "why":
             await pilot.press(ch)
         await pilot.press("enter")
@@ -181,3 +183,6 @@ async def test_results_tab_lists_experiments_and_answers_questions(tmp_path, mon
         await pilot.press("ctrl+down")
         await pilot.pause()
         assert int(box.styles.height.value) == h0
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app._ask_open and not app.check_action("answer_grow", ())
