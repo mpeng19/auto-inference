@@ -81,7 +81,9 @@ uv run harness --session build-1 status
 uv run harness traces list --root agents/build-1
 uv run harness traces show <id> --kind eval_submit --full     # the diffs
 uv run harness ideas list --status tried
-ls agents/build-1/tools/                                     # what the manager stashed
+uv run harness skills list                                   # facts the manager wrote
+ls agents/build-1/tools/ agents/build-1/profiles/            # stashed tools; ingested profiles
+uv run harness --session build-1 timeline                    # who did what, when
 ```
 
 Judge: did each agent write a DESIGN.md and run the workbench before the

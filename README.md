@@ -180,6 +180,25 @@ metrics switch are locked -- and it is hashed into the experiment, validated
 by preflight and applied when the server starts. Stock's launch line stays
 the baseline.
 
+**What an agent knows before it starts.** Two skills are written into each
+agent's working directory before every edit, where Claude Code discovers
+them as project skills. `tracedb` explains the GPU profile as a database:
+every full sweep of a promoted candidate captures ~20 decode steps of
+kernel timings at the priced concurrency, the harness ingests them, and the
+agent queries them through MCP tools (`trace_ops_grouped`, `trace_steps`,
+`trace_gpu_idle`, ...) alongside stock's profile, so a kernel change is
+judged by whether it shortened the step, not by whether it felt faster.
+`serving-facts` is the **skill bank**: general, falsifiable facts earlier
+runs established, written only by the manager and shared across sessions in
+`~/.auto-inference/skills.db`. A new fact is judged against those on the
+same topic; one it contradicts is marked superseded, never deleted.
+
+```bash
+harness skills list                      # what is held, by topic
+harness skills add "<claim>" --topic gsm8k-gate --evidence "..."   # a person's fact
+harness skills render                    # the SKILL.md agents read
+```
+
 **Tools agents can call.** An agent's feedback loop is otherwise one bit every
 25–60 minutes. These put signal in front of that:
 
