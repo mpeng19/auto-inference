@@ -403,6 +403,25 @@ def cmd_calls(a) -> int:
     return 0
 
 
+def cmd_paper(a) -> int:
+    """List the run's papers, or compile one agent's .tex again."""
+    from .paper import compile_tex, find_papers
+
+    root = pathlib.Path(_root_of(a))
+    if a.compile:
+        tex = pathlib.Path(a.compile)
+        out = compile_tex(tex)
+        print(out or f"compile failed; see {tex.parent / 'paper.log'}")
+        return 0 if out else 1
+    papers = find_papers(root)
+    if not papers:
+        print("no papers yet (written at the end of an idea that reached a full sweep)")
+        return 0
+    for idea_id, p in sorted(papers.items()):
+        print(f"  {idea_id:<20} {p}")
+    return 0
+
+
 def cmd_timeline(a) -> int:
     from . import timeline as tl
 
@@ -571,6 +590,11 @@ def main(argv: list[str] | None = None) -> int:
     cl.add_argument("--agent", default="", help="one agent only")
     cl.add_argument("-v", "--verbose", action="store_true", help="one line per message")
     cl.set_defaults(fn=cmd_calls)
+
+    pp = sub.add_parser("paper", help="the write-up PDFs, one per idea")
+    pp.add_argument("--root", default="", help="fleet root (default: the session's)")
+    pp.add_argument("--compile", default="", help="compile this PAPER.tex again")
+    pp.set_defaults(fn=cmd_paper)
 
     tl = sub.add_parser("timeline", help="the run as a readable timeline")
     tl.add_argument("--root", default="", help="fleet root (default: the session's)")

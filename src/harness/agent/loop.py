@@ -87,7 +87,7 @@ class Evaluator(Protocol):
 # Trace phases, folded into the four an operator reasons about.
 _PHASE_BUCKET = {"propose": "edit", "submit": "edit", "check": "edit", "edit": "edit",
                  "study": "study", "wait": "wait", "recall": "recall", "start": "other",
-                 "done": "other"}
+                 "done": "other", "paper": "paper"}
 
 
 @dataclass
@@ -294,6 +294,23 @@ class IterativeAgent:
                 break
             n += 1
 
+        if any(a.ok and a.tier == "full" for a in attempts):
+            # The write-up. Only after a full sweep: a paper about a screen
+            # would be a paper about warm-up. Never allowed to fail the idea.
+            since = time.time()
+            try:
+                write = getattr(self.proposer, "paper", None)
+                if write is not None:
+                    diff = ""
+                    with contextlib.suppress(Exception):
+                        diff = self.workspace.diff()
+                    path = write(self.workspace, idea, tuple(attempts),
+                                 self.baseline.get("bill_per_1k"), diff)
+                    self._append(trace, Turn(kind="tool_call", name="paper", content=str(path)),
+                                 since=since, phase="paper", call=True)
+            except Exception as e:
+                self._append(trace, Turn(kind="error", name="paper", content=str(e)),
+                             since=since, phase="paper")
         self.context.close(trace, outcome=stop, cost_usd=spent)
         return AgentOutcome(agent_id=self.agent_id, idea=idea, stop=stop,
                             attempts=tuple(attempts), best=best, cost_usd=spent,

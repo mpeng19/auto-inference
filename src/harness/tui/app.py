@@ -86,6 +86,8 @@ class FleetApp(App):
         ("-", "scale_down", "Remove agent"),
         ("s", "stop_fleet", "Stop fleet"),
         ("a", "ask", "Ask about the run"),
+        ("o", "open_artifact", "Open selected result's files"),
+        ("t", "open_timeline", "Open timeline (HTML)"),
         ("ctrl+up", "answer_grow", "Bigger answer box"),
         ("ctrl+down", "answer_shrink", "Smaller answer box"),
         ("tab", "next_tab", "Fleet / results"),
@@ -307,6 +309,12 @@ class FleetApp(App):
         if r.rank:
             x.append(f"rank {r.rank} on the OpenRouter board; one node serves "
                      f"{r.share_pct:.2f}% of the market\n", style="dim")
+        arts = self._artifacts_for(r)
+        if arts:
+            x.append("\nartifacts  (o opens the folder, Enter opens the paper or report)\n", style="bold")
+            for label, p in arts:
+                x.append(f"  {label:<9} {p}\n", style="dim")
+        self.result_artifacts = arts
         d.update(x)
 
     def on_data_table_row_highlighted(self, event) -> None:
@@ -382,6 +390,90 @@ class FleetApp(App):
                 self._pending.pop(agent_id, None)
         # scale/stop are fleet-level; they never show per agent
         self._pending.pop("", None)
+
+    def _artifacts_for(self, r) -> list[tuple[str, str]]:
+        """Everything on disk behind one result: the run directory of its
+        attempts, the report and plots, the paper if written, its trace, and
+        the profile if captured. Paths, so a person can open them."""
+        import pathlib
+
+        from ..paper import find_papers
+
+        root = self._root()
+        if not root:
+            return []
+        root = pathlib.Path(root)
+        out: list[tuple[str, str]] = []
+        agent = root / r.agent_id
+        runs = sorted((agent / "runs").glob("attempt-*")) if (agent / "runs").is_dir() else []
+        # the attempt whose report names this stack digest
+        for d in reversed(runs):
+            rep = d / "report.txt"
+            try:
+                if r.stack_digest and r.stack_digest in rep.read_text():
+                    out.append(("run", str(d)))
+                    out.append(("report", str(rep)))
+                    for png in sorted(d.glob("*.png")):
+                        out.append(("plot", str(png)))
+                    break
+            except OSError:
+                continue
+        papers = find_papers(root)
+        for idea_id, p in papers.items():
+            if idea_id and (r.metrics.get("idea_id") == idea_id or idea_id in r.trace_ref):
+                out.append(("paper", str(p)))
+        if not any(k == "paper" for k, _ in out) and papers:
+            # fall back: a paper by this agent whose directory is newest
+            mine = [p for p in papers.values() if p.parts and r.agent_id in p.parts]
+            if mine:
+                out.append(("paper", str(sorted(mine, key=lambda p: p.stat().st_mtime)[-1])))
+        if r.trace_ref:
+            t = root / "traces" / f"{r.trace_ref}.jsonl"
+            if t.is_file():
+                out.append(("trace", str(t)))
+        prof = r.metrics.get("profile_db")
+        if prof and pathlib.Path(prof).is_file():
+            out.append(("profile", str(prof)))
+        return out
+
+    @staticmethod
+    def _open(path: str) -> None:
+        import shutil
+        import subprocess
+
+        opener = shutil.which("open") or shutil.which("xdg-open")
+        if opener:
+            subprocess.Popen([opener, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def action_open_artifact(self) -> None:
+        arts = getattr(self, "result_artifacts", [])
+        run = next((p for k, p in arts if k == "run"), None)
+        if run:
+            self._open(run)
+            self.notify(f"opened {run}", timeout=2)
+
+    def on_data_table_row_selected(self, event) -> None:
+        if getattr(event.data_table, "id", "") != "results":
+            return
+        arts = getattr(self, "result_artifacts", [])
+        target = next((p for k, p in arts if k == "paper"), None) or \
+            next((p for k, p in arts if k == "report"), None)
+        if target:
+            self._open(target)
+            self.notify(f"opened {target}", timeout=2)
+
+    def action_open_timeline(self) -> None:
+        import pathlib
+
+        from ..timeline import render_html
+
+        root = self._root()
+        if not root:
+            return
+        p = pathlib.Path(root) / "timeline.html"
+        p.write_text(render_html(root))
+        self._open(str(p))
+        self.notify(f"opened {p}", timeout=2)
 
     def _recent_calls(self, agent_id: str, k: int = 5) -> list[dict]:
         """The agent's last k model calls from its call log, summarised.

@@ -548,6 +548,44 @@ class ClaudeCodeProposer:
                      "agents kept re-deriving them (run from your workspace):\n" + index)
         return text
 
+    def paper(self, ws: Workspace, idea: Idea, attempts: tuple[Attempt, ...],
+              baseline: float | None, diff: str) -> str:
+        """The write-up as a PDF, at the end of an idea that reached a full
+        sweep. The template carries the numbers; the model writes the prose."""
+        from ..paper import (
+            PaperInputs,
+            compile_tex,
+            figures_for,
+            paper_dir,
+            prompt_for,
+            render_template,
+        )
+
+        priced = [a for a in attempts if a.ok and a.metrics.get("bill_per_1k") is not None]
+        rows = []
+        for a in attempts:
+            q = a.metrics.get("quality") or []
+            gates = ", ".join(f"{x.get('suite')} {x.get('accuracy', 0):.0%}" for x in q
+                              if isinstance(x, dict)) or (a.failure or "")
+            rows.append({"n": a.n, "tier": a.tier, "bill": a.metrics.get("bill_per_1k"),
+                         "delta": a.delta.get("bill_per_1k_pct"),
+                         "n_star": a.metrics.get("n_star"), "gates": gates})
+        best_ns = sorted({a.n for a in priced if a.tier == "full"}) or sorted({a.n for a in priced})
+        inp = PaperInputs(title=idea.title, author=f"{ws.agent_id or ws.root.name} (auto-inference)",
+                          attempts=rows, baseline=baseline,
+                          figures=figures_for(ws.root, best_ns[-2:]))
+        d = paper_dir(ws.root, idea.id)
+        tex = render_template(inp, d)
+        design = ""
+        for cand in (ws.candidates / "DESIGN.md", ws.root / "DESIGN.md"):
+            if cand.is_file():
+                design = cand.read_text()[:6000]
+                break
+        prompt = prompt_for(inp, idea.hypothesis, design, diff)
+        _text, _ = self._run(prompt, cwd=str(d), phase="paper", timeout_s=1200.0)
+        pdf = compile_tex(tex)
+        return str(pdf or tex)
+
     def study(self, ws: Workspace, idea: Idea, brief: Brief,
               history: tuple[Attempt, ...],
               cancel: threading.Event | None = None) -> str:
