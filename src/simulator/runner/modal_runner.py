@@ -259,11 +259,29 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
             base = quality_baseline or {}
             for suite in (quality_suites or ()):
                 try:
-                    q = asyncio.run(quality_mod.run(
-                        SERVER_URL, sc.model, suite=suite, n=quality_n,
-                        baseline_accuracy=base.get(suite)))
+                    # Quality is a property of the stack, not of the sweep, so
+                    # it is scored once per (stack, suite, n) and reused: a
+                    # candidate promoted from a screen does not pay for GSM8K
+                    # and LongBench twice, and stock never pays again.
+                    cache = pathlib.Path(f"/results/quality/{st.digest}-{suite}-{quality_n}.json")
+                    if cache.is_file():
+                        cached = json.loads(cache.read_text())
+                        q = quality_mod.QualityResult(
+                            suite=suite, n=cached["n"], correct=cached["correct"],
+                            errors=cached["errors"], baseline_accuracy=base.get(suite),
+                            items=cached.get("items") or [])
+                        q_cached = True
+                    else:
+                        q = asyncio.run(quality_mod.run(
+                            SERVER_URL, sc.model, suite=suite, n=quality_n,
+                            baseline_accuracy=base.get(suite)))
+                        q_cached = False
+                        cache.parent.mkdir(parents=True, exist_ok=True)
+                        cache.write_text(json.dumps({"n": q.n, "correct": q.correct,
+                                                     "errors": q.errors, "items": q.items[:5]}))
+                        results_vol.commit()
                     bad, why = quality_mod.regressed(q, tolerance_pp=quality_tolerance_pp)
-                    row = {**q.as_dict(), "regressed": bad, "why": why}
+                    row = {**q.as_dict(), "regressed": bad, "why": why, "cached": q_cached}
                     rec["quality"].append(row)
                     print(f"quality {suite}: {q.correct}/{q.n} = "
                           f"{q.accuracy:.1%}"

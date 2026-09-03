@@ -55,3 +55,29 @@ def test_collapse_is_measured_not_averaged_away():
     assert not detect_collapse(flat)["collapsed"]
     runaway = [_r(i, 40 + max(0, i - 75) ** 2, 10) for i in range(150)]
     assert detect_collapse(runaway)["collapsed"]
+
+
+def test_a_level_ends_at_the_deadline_not_at_the_last_reply():
+    """Letting in-flight 2,000-token replies drain made a 120 s level take
+    six minutes; the cut-off cancels what is still streaming."""
+    import asyncio
+
+    from simulator.measure.loadgen import run_until
+
+    async def go():
+        async def quick():
+            await asyncio.sleep(0.01)
+            return "done"
+
+        async def slow():
+            await asyncio.sleep(10)
+            return "never"
+
+        tasks = [asyncio.create_task(quick()), asyncio.create_task(slow()),
+                 asyncio.create_task(slow())]
+        cancelled = await run_until(tasks, 0.2)
+        return cancelled, tasks[0].result(), tasks[1].cancelled()
+
+    cancelled, first, second_cancelled = asyncio.run(go())
+    assert cancelled == 2 and first == "done" and second_cancelled
+    assert asyncio.run(run_until([], 1.0)) == 0

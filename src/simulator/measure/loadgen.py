@@ -161,7 +161,8 @@ async def _user_worker(uid: int, make_session, base_url: str, model: str,
 async def run_concurrent_users(make_session, base_url: str, model: str,
                                n_users: int, duration_s: float,
                                timeout_s: float = 600.0,
-                               conn_limit: int = 8192) -> list[RequestResult]:
+                               conn_limit: int = 8192,
+                               grace_s: float = 3.0) -> list[RequestResult]:
     """Hold exactly `n_users` conversations in flight for `duration_s`.
 
     This is the marketplace question -- "how many users can we serve at once" --
@@ -170,6 +171,15 @@ async def run_concurrent_users(make_session, base_url: str, model: str,
     used for scheduler comparison, and deliberately so. Under overload a
     closed-loop population self-limits (users wait longer, so send less), which
     is what real users do and what makes the concurrency axis meaningful.
+
+    **The level ends at the deadline, not when the last reply finishes.** A
+    market reply is ~2,000 tokens, 35-60 s at these speeds; letting every
+    in-flight request drain made a 120 s level take six minutes and a full
+    sweep forty. Requests still streaming at `deadline + grace_s` are
+    cancelled (the server sees the disconnect and aborts them). Latency
+    samples come only from completed requests, as before; GPU-seconds and
+    token counts come from server counter deltas over the same window, so
+    aborted work is counted consistently on both sides of the price.
     """
     import aiohttp
 
@@ -179,13 +189,26 @@ async def run_concurrent_users(make_session, base_url: str, model: str,
     conn = aiohttp.TCPConnector(limit=conn_limit, force_close=False,
                                 enable_cleanup_closed=True)
     async with aiohttp.ClientSession(connector=conn) as http:
-        await asyncio.gather(*[
-            asyncio.create_task(_user_worker(i, make_session, base_url, model,
-                                             start_wall, deadline, timeout_s,
-                                             http, out))
-            for i in range(n_users)
-        ], return_exceptions=True)
+        tasks = [asyncio.create_task(_user_worker(i, make_session, base_url, model,
+                                                  start_wall, deadline, timeout_s,
+                                                  http, out))
+                 for i in range(n_users)]
+        await run_until(tasks, duration_s + grace_s)
     return sorted(out, key=lambda r: r.dispatched_s)
+
+
+async def run_until(tasks: list, timeout_s: float) -> int:
+    """Wait for `tasks` up to `timeout_s`, then cancel the rest. Returns
+    how many were cancelled. Separate so the cut-off is testable without a
+    server."""
+    if not tasks:
+        return 0
+    _done, pending = await asyncio.wait(tasks, timeout=timeout_s)
+    for t in pending:
+        t.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    return len(pending)
 
 
 async def _turn(history: list[dict], k, turn, uid, base_url, model, start_wall,
