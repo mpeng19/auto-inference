@@ -41,6 +41,7 @@ def main(argv=None):
     sp.add_parser("launches")
     g = sp.add_parser("idle"); g.add_argument("--min-gap", type=float, default=50)
     g = sp.add_parser("slowest"); g.add_argument("pattern", nargs="?", default="%"); g.add_argument("-k", type=int, default=20)
+    g.add_argument("--kind", default="gpu", help="gpu (default) | cpu | '' for every track")
     g = sp.add_parser("render"); g.add_argument("--t0", type=float, required=True); g.add_argument("--t1", type=float, required=True)
     g.add_argument("--out", default="out/timeline.png"); g.add_argument("--tracks", default="%")
     g.add_argument("--mark", type=float, action="append", default=[])
@@ -57,7 +58,7 @@ def main(argv=None):
     elif a.cmd == "stepdiff": _p(Q.step_diff(st, a.idx))
     elif a.cmd == "launches": _p(Q.launches(st))
     elif a.cmd == "idle": _p(Q.gpu_idle(st, a.min_gap))
-    elif a.cmd == "slowest": _p(Q.slowest(st, a.pattern, a.k))
+    elif a.cmd == "slowest": _p(Q.slowest(st, a.pattern, a.k, a.kind))
     elif a.cmd == "render": _p(timeline(st, a.t0, a.t1, a.out, a.tracks, marks=a.mark))
 
 

@@ -259,3 +259,80 @@ def test_gzipped_kineto_trace_ingests_like_the_plain_one(tmp_path):
         json.dump(events, f)
     out = ingest(gz, tmp_path / "t.sqlite")
     assert out["events"] == 2 and out["steps"] == 1
+
+
+def _sglang_like_trace(path):
+    """A capture shaped like SGLang's: `step[...]` annotations instead of
+    ProfilerStep, a Python stack frame spanning everything, and kernels."""
+    import json
+    ev = []
+    ev.append({"ph": "X", "name": "threading.py(1030): _bootstrap", "cat": "python_function",
+               "pid": 1, "tid": 1, "ts": 0.0, "dur": 10_000.0, "args": {}})
+    for i, (name, ts) in enumerate([("step[EXTEND bs=3 toks=8192]", 100.0),
+                                    ("step[DECODE bs=12]", 2100.0),
+                                    ("step[DECODE bs=12]", 4100.0)]):
+        ev.append({"ph": "X", "name": name, "cat": "user_annotation", "pid": 1, "tid": 1,
+                   "ts": ts, "dur": 1500.0, "args": {}})
+        ev.append({"ph": "X", "name": "scheduler.run_batch", "cat": "cpu_op", "pid": 1, "tid": 1,
+                   "ts": ts, "dur": 300.0, "args": {}})
+        ev.append({"ph": "X", "name": "flash_fwd_kernel", "cat": "kernel", "pid": 1, "tid": 7,
+                   "ts": ts + 400.0, "dur": 900.0, "args": {"correlation": i}})
+    path.write_text(json.dumps({"traceEvents": ev}))
+
+
+def test_sglang_step_annotations_become_numbered_steps(tmp_path):
+    from tracedb.ingest import ingest
+    from tracedb.store import TraceStore
+
+    tr = tmp_path / "t.json"; _sglang_like_trace(tr)
+    out = ingest(tr, tmp_path / "t.sqlite")
+    assert out["steps"] == 3
+    st = TraceStore(tmp_path / "t.sqlite")
+    assert [r[0] for r in st.conn.execute("SELECT idx FROM steps ORDER BY ts")] == [0, 1, 2]
+
+
+def test_slowest_means_kernels_not_the_interpreter(tmp_path):
+    from tracedb import query as Q
+    from tracedb.ingest import ingest
+    from tracedb.store import TraceStore
+
+    tr = tmp_path / "t.json"; _sglang_like_trace(tr)
+    ingest(tr, tmp_path / "t.sqlite")
+    st = TraceStore(tmp_path / "t.sqlite")
+    top = Q.slowest(st, k=3)
+    assert top and all(r["kind"] == "gpu" for r in top)
+    assert Q.slowest(st, k=1, kind="")[0]["name"].startswith("threading.py")
+
+
+def test_idle_blame_skips_python_stack_frames(tmp_path):
+    from tracedb import query as Q
+    from tracedb.ingest import ingest
+    from tracedb.store import TraceStore
+
+    tr = tmp_path / "t.json"; _sglang_like_trace(tr)
+    ingest(tr, tmp_path / "t.sqlite")
+    st = TraceStore(tmp_path / "t.sqlite")
+    idle = Q.gpu_idle(st, min_gap_us=100)
+    assert idle["gaps"] >= 1
+    assert not any(".py" in b["op"] for b in idle["blame_by_op"])
+
+
+def test_gpu_idle_is_the_union_across_streams(tmp_path):
+    """Two streams, each busy half the time, alternating: the GPU is never
+    idle. Per-stream accounting said it was idle 100%."""
+    import json
+
+    from tracedb import query as Q
+    from tracedb.ingest import ingest
+    from tracedb.store import TraceStore
+
+    ev = []
+    for i in range(10):
+        ev.append({"ph": "X", "name": "k_a", "cat": "kernel", "pid": 1, "tid": 7,
+                   "ts": i * 200.0, "dur": 100.0, "args": {}})
+        ev.append({"ph": "X", "name": "k_b", "cat": "kernel", "pid": 1, "tid": 8,
+                   "ts": i * 200.0 + 100.0, "dur": 100.0, "args": {}})
+    tr = tmp_path / "t.json"; tr.write_text(json.dumps({"traceEvents": ev}))
+    ingest(tr, tmp_path / "t.sqlite")
+    idle = Q.gpu_idle(TraceStore(tmp_path / "t.sqlite"), min_gap_us=10)
+    assert idle["gaps"] == 0 and idle["idle_total_us"] == 0

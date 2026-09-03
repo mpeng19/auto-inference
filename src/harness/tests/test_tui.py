@@ -291,3 +291,116 @@ async def test_a_dead_daemon_is_not_shown_as_running(tmp_path):
         assert "dead" in app.summary_text and "daemon is gone" in app.summary_text
         assert app.view.agents[0].status == "lost"
         assert "daemon exited" in app.detail_text
+
+
+async def test_the_header_names_eval_slots_not_gpus(store):
+    """`--evals` is how many evaluations may run at once, each in its own
+    Modal container; the fleet owns no GPUs."""
+    app = FleetApp(store, "demo")
+    async with app.run_test(size=(120, 26)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        assert "evals 2/3 running  1 queued  7 done" in app.summary_text
+        assert "GPU" not in app.summary_text
+
+
+async def test_dollars_include_what_the_daemon_never_counted(store, tmp_path):
+    """Two workbench results ($0.5, $0.7) in a00's directory, one named by
+    the ledger and drained: the table, the header and the detail all show
+    the snapshot's number plus the $0.7 that is on disk only."""
+    from dataclasses import replace
+
+    root = tmp_path / "agents" / "demo"
+    agent = root / "a00"
+    for n, usd in ((1, 0.5), (2, 0.7)):
+        d = agent / f"workbench-{n}"
+        d.mkdir(parents=True)
+        (d / "result.json").write_text(json.dumps({"ok": True, "cost_usd": usd}))
+    (agent / "spend.jsonl").write_text(json.dumps(
+        {"ts": 1.0, "tool": "gpu-run", "cost_usd": 0.5, "where": "workbench-1"}) + "\n")
+    (agent / "spend.seen").write_text(str((agent / "spend.jsonl").stat().st_size))
+    store.publish(replace(store.read("demo"), root=str(root)))
+    app = FleetApp(store, "demo")
+    async with app.run_test(size=(120, 26)) as pilot:
+        for _ in range(10):
+            await pilot.pause(0.2)
+            if app._unreported:
+                break
+        assert app._unreported == {"a00": 0.7}
+        assert "Modal spend $13.20 / $200.00" in app.summary_text       # 12.5 + 0.7
+        assert "Modal spend\n$8.90" in app.detail_text                  # 8.2 + 0.7
+        assert "of which $0.70 from its own GPU tool calls" in app.detail_text
+        table = app.query_one("#table")
+        row = table.get_row_at(0)
+        assert "$8.90" in str(row[8])
+        assert "$2.10" in str(table.get_row_at(1)[8])                   # a01: nothing on disk
+
+
+def _tall_run(tmp_path):
+    """A run with enough results that the main panel has to scroll."""
+    from harness.contracts import Experiment
+    from harness.memory import SqliteMemory
+
+    root = tmp_path / "agents" / "demo"
+    root.mkdir(parents=True)
+    m = SqliteMemory(root / "memory.db")
+    for i in range(40):
+        m.record(Experiment(agent_id="a00", idea_id=f"i{i}", verdict="neutral",
+                            hypothesis=f"hypothesis {i}", summary="x",
+                            metrics={"bill_per_1k": 12.0 + i * 0.01},
+                            baseline_metrics={"bill_per_1k": 12.23}))
+    s = SqliteSessionStore(tmp_path / "s.db")
+    v = SessionView(session_id="demo", phase="running", started_at=1.0, pid=1, root=str(root),
+                    target_agents=1, agents=(AgentView("a00", status="thinking"),))
+    s.create(v)
+    s.publish(v)
+    return s
+
+
+async def test_three_scroll_regions(tmp_path):
+    """The header is pinned; the main panel scrolls; the ask panel scrolls
+    on its own and a wheel at its edge does not move the main panel."""
+    from textual.events import MouseScrollDown, MouseScrollUp
+
+    app = FleetApp(_tall_run(tmp_path), "demo")
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("tab")
+        await pilot.pause()
+        main = app.query_one("#main")
+        summary = app.query_one("#summary")
+        baseline = app.query_one("#baseline")
+        assert main.max_scroll_y > 0, "the main panel must be the scroller"
+        assert summary.region.y < main.region.y and baseline.region.y < main.region.y
+        main.scroll_to(y=5, animate=False)
+        await pilot.pause()
+        assert main.scroll_y == 5 and summary.region.y == 1 and baseline.region.y == 5
+        await pilot.press("a")
+        await pilot.pause()
+        panel = app.query_one("#ask_panel")
+        box = app.query_one("#answer_box")
+        # a sibling docked below the main panel, not inside it
+        assert panel.parent is main.parent and panel.region.y >= main.region.bottom
+        assert box.scroll_y == 0
+        # a wheel at the top edge of the ask panel: over the answer log,
+        # the box's own padding, and the input
+        for target, offset in (("#answer", (0, 0)), ("#answer_box", (0, 0)), ("#ask", (2, 1))):
+            for cls in (MouseScrollUp, MouseScrollDown):
+                await pilot._post_mouse_events([cls], target, offset=offset)
+                await pilot.pause()
+                assert main.scroll_y == 5, (target, cls.__name__)
+        # keys from the ask panel stay there too
+        box.focus()
+        await pilot.press("up")
+        await pilot.press("pageup")
+        app.query_one("#ask").focus()
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert main.scroll_y == 5
+        # and the main panel itself still takes the wheel
+        await pilot._post_mouse_events([MouseScrollUp], "#main", offset=(2, 2))
+        await pilot.pause()
+        assert main.scroll_y < 5
+        # the header did not move through any of it
+        assert summary.region.y == 1 and baseline.region.y == 5

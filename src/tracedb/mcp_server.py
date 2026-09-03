@@ -104,9 +104,9 @@ def trace_gpu_idle(min_gap_us: float = 50) -> str:
 
 
 @mcp.tool()
-def trace_slowest(pattern: str = "*", k: int = 20) -> str:
+def trace_slowest(pattern: str = "*", k: int = 20, kind: str = "gpu") -> str:
     """Top-k individual span instances by duration for ops matching pattern."""
-    return _j(Q.slowest(_store(), pattern, k))
+    return _j(Q.slowest(_store(), pattern, k, kind))
 
 
 @mcp.tool()

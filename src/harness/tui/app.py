@@ -24,7 +24,18 @@ and the dashboard says so instead of showing a spinner that will not end.
 
 **Dollars are Modal.** The only money on this screen is GPU spend
 (evaluations and the agent's own GPU tools). Claude runs on the
-subscription; its use is shown as tokens and never priced.
+subscription; its use is shown as tokens and never priced. The figure is
+what Modal bills, not what the daemon has counted: the agents' own
+`gpu-run` / `ncu` / `equivalence` calls are read from their directories
+and added to the snapshot's number (`results.unreported_tool_spend`), so
+a fleet whose daemon predates the spend ledger still shows its real bill.
+
+**Three scroll regions.** The header (session, spend, evals, baseline) is
+pinned. Everything under it -- both tabs, tables and detail panes -- is
+one scrolling panel, `#main`. The ask panel is docked below `#main` as its
+sibling, never its child, and its containers end every wheel event they
+receive: at its top or bottom edge, the wheel stops there instead of
+carrying on into the main panel, which is what textual does by default.
 """
 from __future__ import annotations
 
@@ -38,6 +49,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import MouseScrollDown, MouseScrollUp
 from textual.widgets import (
     DataTable,
     Footer,
@@ -87,27 +99,79 @@ def _tokens(n: int) -> str:
     return str(n)
 
 
+class IsolatedScroll(VerticalScroll):
+    """A scroll region the wheel cannot leave.
+
+    Textual's own handler stops a wheel event only when it managed to
+    scroll, so at an edge the event bubbles to the next scroller up -- for
+    the ask panel that would be the main panel, which then moves under a
+    reader who was only trying to reach the top of an answer. Here the
+    event is handled and stopped whichever way it turns, and the default
+    handler is skipped so nothing scrolls twice."""
+
+    def _wheel(self, event, direction: int) -> None:
+        event.prevent_default()
+        event.stop()
+        self.scroll_relative(y=direction * self.app.scroll_sensitivity_y, animate=False)
+
+    def on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
+        self._wheel(event, -1)
+
+    def on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
+        self._wheel(event, +1)
+
+
+class _WheelToAnswer:
+    """Mixin for the ask panel and the answer log: a wheel anywhere on
+    them scrolls the answer box, and goes no further."""
+
+    def _wheel(self, event, direction: int) -> None:
+        event.prevent_default()
+        event.stop()
+        try:
+            box = self.screen.query_one("#answer_box", IsolatedScroll)
+        except Exception:
+            return
+        box.scroll_relative(y=direction * self.app.scroll_sensitivity_y, animate=False)
+
+    def on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
+        self._wheel(event, -1)
+
+    def on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
+        self._wheel(event, +1)
+
+
+class AnswerLog(_WheelToAnswer, Static):
+    pass
+
+
+class AskPanel(_WheelToAnswer, Vertical):
+    pass
+
+
 class FleetApp(App):
     """One table of agents, one summary, one detail pane."""
 
-    # The summary is a fixed-height widget above the tabs, not part of any
-    # scrolling container, so it stays put; the detail panes are the only
-    # things that scroll.
+    # Header widgets are fixed-height and outside every scroller, so they
+    # stay put. `#main` is the one scroller for both tabs: every pane in it
+    # is `height: auto`, so the panel grows with its content and `#main`
+    # scrolls it. The ask panel is docked at the bottom of the screen, a
+    # sibling of `#main`.
     CSS = """
     Screen { layout: vertical; overflow: hidden; }
     #summary { height: 4; padding: 0 1; }
     #baseline { height: 1; padding: 0 1; color: $text-muted; }
-    #body { height: 1fr; }
+    #main { height: 1fr; }
+    #tabs, #fleet_pane, #results_pane, #body, #results_body, #agents { height: auto; }
+    DataTable { max-height: 100vh; }
     #agents { width: 2fr; }
-    #detail_scroll { width: 1fr; border-left: solid $panel; }
+    #detail_pane { width: 1fr; height: auto; border-left: solid $panel; }
     #detail { padding: 0 1; height: auto; }
-    #results_body { height: 1fr; }
     #results { width: 2fr; }
-    #result_detail_scroll { width: 1fr; border-left: solid $panel; }
+    #result_detail_pane { width: 1fr; height: auto; border-left: solid $panel; }
     #result_detail { padding: 0 1; height: auto; }
-    #ask { dock: bottom; }
-    #answer_box { height: 12; padding: 0 1; border-top: solid $panel; display: none; }
-    #ask { display: none; }
+    #ask_panel { dock: bottom; height: auto; border-top: solid $panel; display: none; }
+    #answer_box { height: 12; padding: 0 1; }
     #answer { height: auto; }
     """
 
@@ -157,27 +221,30 @@ class FleetApp(App):
         self._results_at = 0.0
         self._baseline_root = None
         self.result_artifacts: list[tuple[str, str]] = []
+        # agent id -> Modal dollars its directory holds that the snapshot's
+        # cost_usd does not; read off the UI thread with the snapshot.
+        self._unreported: dict[str, float] = {}
 
     # ── layout ───────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="summary")
-        with TabbedContent(id="tabs"):
-            with TabPane("fleet", id="tab_fleet"), Vertical():
-                yield Static(id="baseline")
-                with Horizontal(id="body"):
-                    with Vertical(id="agents"):
-                        yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
-                    with VerticalScroll(id="detail_scroll"):
-                        yield Static(id="detail")
-            with TabPane("results", id="tab_results"), Vertical():
-                with Horizontal(id="results_body"):
-                    yield DataTable(id="results", cursor_type="row", zebra_stripes=True)
-                    with VerticalScroll(id="result_detail_scroll"):
-                        yield Static(id="result_detail")
-                with VerticalScroll(id="answer_box"):
-                    yield Static(id="answer")
-                yield Input(placeholder="ask about this run (Enter to send; ctrl+up/down resizes)", id="ask")
+        yield Static(id="baseline")
+        with VerticalScroll(id="main"), TabbedContent(id="tabs"):
+            with TabPane("fleet", id="tab_fleet"), Vertical(id="fleet_pane"), Horizontal(id="body"):
+                with Vertical(id="agents"):
+                    yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
+                with Vertical(id="detail_pane"):
+                    yield Static(id="detail")
+            with TabPane("results", id="tab_results"), Vertical(id="results_pane"), \
+                    Horizontal(id="results_body"):
+                yield DataTable(id="results", cursor_type="row", zebra_stripes=True)
+                with Vertical(id="result_detail_pane"):
+                    yield Static(id="result_detail")
+        with AskPanel(id="ask_panel"):
+            with IsolatedScroll(id="answer_box"):
+                yield AnswerLog(id="answer")
+            yield Input(placeholder="ask about this run (Enter to send; ctrl+up/down resizes)", id="ask")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -204,6 +271,7 @@ class FleetApp(App):
             v = None
         pend: tuple[Command, ...] = ()
         acked: list[tuple[str, Command]] = []
+        unrep: dict[str, float] = {}
         if v is not None:
             try:
                 pend = self.store.pending(v.session_id)
@@ -213,7 +281,14 @@ class FleetApp(App):
                         acked.append((label, c))
             except Exception:
                 pend = ()
-        self.call_from_thread(self._apply, v, pend, acked)
+            if v.root:
+                from ..results import unreported_by_agent
+
+                try:
+                    unrep = unreported_by_agent(v.root)
+                except Exception:
+                    unrep = {}
+        self.call_from_thread(self._apply, v, pend, acked, unrep)
 
     def refresh_view(self) -> None:
         self._load()
@@ -241,7 +316,9 @@ class FleetApp(App):
         """Can a command written now be delivered?"""
         return self.view is not None and self.view.phase in LIVE_PHASES
 
-    def _apply(self, v, pend=(), acked=()) -> None:
+    def _apply(self, v, pend=(), acked=(), unrep=None) -> None:
+        if unrep is not None:
+            self._unreported = unrep
         if v is not None and v.phase in LIVE_PHASES and not self._daemon_alive(v):
             # Dead daemon: say so, and stop showing agents as busy.
             from dataclasses import replace
@@ -290,7 +367,8 @@ class FleetApp(App):
             return
         age = time.time() - v.updated_at
         stale = "  [stale]" if age > 10 else ""
-        bar = _bar(v.cost_usd, v.budget_usd)
+        spend = self._fleet_spend()
+        bar = _bar(spend, v.budget_usd)
         t = Text()
         t.append(f"{v.session_id}  ", style="bold")
         t.append(f"{v.phase}{stale}",
@@ -303,17 +381,27 @@ class FleetApp(App):
         if v.phase == "dead":
             t.append("the daemon is gone; this is its last snapshot\n", style="red")
         t.append(f"agents {v.live_agents}/{v.target_agents}    "
-                 f"Modal spend {_money(v.cost_usd)} / {_money(v.budget_usd)} {bar}    "
+                 f"Modal spend {_money(spend)} / {_money(v.budget_usd)} {bar}    "
                  f"tokens {_tokens(v.tokens.total)}"
                  f" (cache {_tokens(v.tokens.cache_read)})\n")
-        t.append(f"GPUs {v.evals_running}/{v.evals_capacity} busy  "
+        # Evaluation slots (`--evals`), each its own Modal container: not
+        # GPUs the fleet owns.
+        t.append(f"evals {v.evals_running}/{v.evals_capacity} running  "
                  f"{v.evals_queued} queued  {v.evals_completed} done  "
-                 f"{v.evals_deduped} deduped  {v.gpu_utilisation:.0%} utilisation",
+                 f"{v.evals_deduped} deduped  {v.gpu_utilisation:.0%} slot utilisation",
                  style="cyan")
         if v.note:
             t.append(f"\n{v.note}", style="bold red")
         self.summary_text = t.plain
         s.update(t)
+
+    def _fleet_spend(self) -> float:
+        """What Modal bills for the fleet: the snapshot's figure plus every
+        agent directory's unreported tool spend."""
+        return (self.view.cost_usd if self.view else 0.0) + sum(self._unreported.values())
+
+    def _agent_spend(self, a) -> float:
+        return a.cost_usd + self._unreported.get(a.agent_id, 0.0)
 
     def _render_baseline(self) -> None:
         """The numbers every delta on this screen is against, from the
@@ -362,7 +450,7 @@ class FleetApp(App):
                       a.idea_title[:22] or "-", str(a.attempt),
                       Text(d, style="green" if d.startswith("-") else ""),
                       bill, a.last_rank or "-", share,
-                      _money(a.cost_usd), _tokens(a.tokens.total),
+                      _money(self._agent_spend(a)), _tokens(a.tokens.total),
                       key=a.agent_id)
         if row is not None and t.row_count:
             t.move_cursor(row=min(row, t.row_count - 1))
@@ -387,7 +475,12 @@ class FleetApp(App):
         t.append("doing now\n", style="bold")
         t.append(f"{a.activity or '-'}\n\n")
         t.append("Modal spend\n", style="bold")
-        t.append(f"{_money(a.cost_usd)}   {a.attempts_total} attempts\n\n")
+        t.append(f"{_money(self._agent_spend(a))}   {a.attempts_total} attempts\n")
+        unrep = self._unreported.get(a.agent_id, 0.0)
+        if unrep > 0:
+            t.append(f"of which {_money(unrep)} from its own GPU tool calls, "
+                     "not in the fleet's count\n", style="dim")
+        t.append("\n")
         t.append("Claude tokens (subscription; not billed here)\n", style="bold")
         t.append(f"in {_tokens(a.tokens.input)}  out {_tokens(a.tokens.output)}  "
                  f"cache read {_tokens(a.tokens.cache_read)}  "
@@ -514,7 +607,7 @@ class FleetApp(App):
     @property
     def _ask_open(self) -> bool:
         try:
-            return self.query_one("#ask", Input).display
+            return self.query_one("#ask_panel", AskPanel).display
         except Exception:
             return False
 
@@ -541,17 +634,14 @@ class FleetApp(App):
     def action_ask(self) -> None:
         self.query_one("#tabs", TabbedContent).active = "tab_results"
         self._render_results(force=True)
-        self.query_one("#answer_box", VerticalScroll).display = True
-        box = self.query_one("#ask", Input)
-        box.display = True
-        box.focus()
+        self.query_one("#ask_panel", AskPanel).display = True
+        self.query_one("#ask", Input).focus()
         self.refresh_bindings()
 
     def action_close_ask(self) -> None:
         """Escape: hide the ask box and the answer, hand focus back to the
         results table. The conversation is kept; `a` reopens it."""
-        self.query_one("#ask", Input).display = False
-        self.query_one("#answer_box", VerticalScroll).display = False
+        self.query_one("#ask_panel", AskPanel).display = False
         self.query_one("#results", DataTable).focus()
         self.refresh_bindings()
 

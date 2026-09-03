@@ -11,7 +11,13 @@ from .store import TraceStore
 # No bare "cuda": it matched the CPU-side cuda_runtime/cuda_driver spans and
 # could classify a launch thread as GPU on its first span.
 _GPU_CATS = ("kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation", "mps")
+# torch.profiler's own markers are `ProfilerStep#N`; SGLang's scheduler
+# annotates each forward as `step[EXTEND bs=3 toks=8192]` / `step[DECODE ...]`
+# with no number, so those are numbered in time order at the end of ingest.
+# Before this the steps table was empty on every real profile, and every
+# per-step query answered nothing.
 _STEP_RE = re.compile(r"ProfilerStep#?\s*(\d+)")
+_SGLANG_STEP_RE = re.compile(r"^step\[")
 
 
 def _iter_events(path: Path):
@@ -57,6 +63,8 @@ def ingest(trace_path: str | Path, db_path: str | Path) -> dict:
         m = _STEP_RE.search(name)
         if m:
             steps.append((int(m.group(1)), ts, dur))
+        elif _SGLANG_STEP_RE.match(name):
+            steps.append((-1, ts, dur))          # numbered below, by time
         kind = "gpu" if any(c in cat for c in _GPU_CATS) else ("cpu" if cat else "")
         tid = ev.get("tid", 0)
         track = st.track_id(ev.get("pid", 0), tid, kind=kind)
@@ -71,6 +79,8 @@ def ingest(trace_path: str | Path, db_path: str | Path) -> dict:
             st.add_spans(rows); rows = []
     if rows:
         st.add_spans(rows)
+    if steps and all(i < 0 for i, _, _ in steps):
+        steps = [(i, ts, dur) for i, (_, ts, dur) in enumerate(sorted(steps, key=lambda t: t[1]))]
     st.conn.executemany("INSERT INTO steps(idx, ts, dur) VALUES (?,?,?)", steps)
     # mark gpu tracks by content when cat heuristics were empty
     st.conn.execute("""UPDATE tracks SET kind='gpu' WHERE kind='' AND id IN

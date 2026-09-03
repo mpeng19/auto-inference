@@ -194,11 +194,16 @@ def steps(store: TraceStore) -> dict:
             "dur_min_us": min(durs), "dur_max_us": max(durs), "outliers": outliers, "first": rows[:3]}
 
 
-def slowest(store: TraceStore, pattern: str = "%", k: int = 20) -> list[dict]:
+def slowest(store: TraceStore, pattern: str = "%", k: int = 20, kind: str = "gpu") -> list[dict]:
+    """The longest spans, GPU tracks by default: on a real profile the
+    longest spans of all are the Python stack frames that wrap the whole
+    capture (`threading.py: _bootstrap`, 1.3 s), which is never the answer
+    to "what is slow". `kind=""` looks at every track."""
     rows = store.conn.execute("""
         SELECT s.id, n.name, s.ts, s.dur, t.name track, t.kind
         FROM spans s JOIN names n ON n.id=s.name_id JOIN tracks t ON t.id=s.track_id
-        WHERE n.name LIKE ? ORDER BY s.dur DESC LIMIT ?""", (_like(pattern), k)).fetchall()
+        WHERE n.name LIKE ? AND (? = '' OR t.kind = ?)
+        ORDER BY s.dur DESC LIMIT ?""", (_like(pattern), kind, kind, k)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -226,15 +231,22 @@ def launches(store: TraceStore, limit: int = 20) -> dict:
 
 
 def gpu_idle(store: TraceStore, min_gap_us: float = 50, limit: int = 25) -> dict:
-    """Gaps on GPU tracks, each blamed on what the CPU was doing during the gap."""
+    """Gaps in which NO GPU track is busy, each blamed on what the CPU was
+    doing during the gap. The union across streams, not per stream: a real
+    profile has ~50 GPU tracks and per-stream gaps summed to more idle than
+    the capture was long."""
     gpu_tracks = [r["id"] for r in store.conn.execute("SELECT id FROM tracks WHERE kind='gpu'")]
     out, blame_total = [], defaultdict(float)
-    for tid in gpu_tracks:
-        rows = store.conn.execute("""
-            WITH seq AS (SELECT ts, dur, LEAD(ts) OVER (ORDER BY ts) nts
-                         FROM spans WHERE track_id=?)
-            SELECT ts + dur gap_start, nts gap_end, (nts - ts - dur) gap_us
-            FROM seq WHERE (nts - ts - dur) >= ?""", (tid, min_gap_us)).fetchall()
+    if gpu_tracks:
+        marks = ",".join("?" * len(gpu_tracks))
+        busy = store.conn.execute(
+            f"SELECT ts, ts + dur AS te FROM spans WHERE track_id IN ({marks}) ORDER BY ts",
+            gpu_tracks).fetchall()
+        rows, end = [], None
+        for r in busy:
+            if end is not None and r["ts"] - end >= min_gap_us:
+                rows.append({"gap_start": end, "gap_end": r["ts"], "gap_us": r["ts"] - end})
+            end = r["te"] if end is None else max(end, r["te"])
         for g in rows:
             cpu = store.conn.execute("""
                 SELECT n.name, SUM(MIN(s.ts + s.dur, ?) - MAX(s.ts, ?)) cover
@@ -242,11 +254,16 @@ def gpu_idle(store: TraceStore, min_gap_us: float = 50, limit: int = 25) -> dict
                      JOIN names n ON n.id = s.name_id
                 WHERE s.ts < ? AND s.ts + s.dur > ? AND n.name NOT LIKE 'ProfilerStep%'
                       AND n.name NOT LIKE 'PyTorch Profiler%' AND n.name NOT LIKE '%profiler%'
+                      -- Python stack frames (`threading.py(1030): _bootstrap`) span the
+                      -- whole capture and would take every blame; the operator
+                      -- wants the op, not the interpreter.
+                      AND s.cat NOT IN ('python_function', 'python_functions')
+                      AND n.name NOT LIKE '%.py(%'
                 GROUP BY n.id ORDER BY cover DESC LIMIT 3""",
                 (g["gap_end"], g["gap_start"], g["gap_end"], g["gap_start"])).fetchall()
             blamed = canon_name(cpu[0]["name"]) if cpu else "(nothing on CPU)"
             blame_total[blamed] += g["gap_us"]
-            out.append({"track_id": tid, "gap_start": g["gap_start"], "gap_us": round(g["gap_us"], 1),
+            out.append({"gap_start": g["gap_start"], "gap_us": round(g["gap_us"], 1),
                         "cpu_during_gap": [{"op": canon_name(c["name"]), "cover_us": round(c["cover"], 1)}
                                            for c in cpu]})
     out.sort(key=lambda r: -r["gap_us"])

@@ -51,8 +51,12 @@ def _roots(root: str | pathlib.Path | None) -> list[pathlib.Path]:
 
 
 def find(root: str | pathlib.Path | None = None, *, session_id: str = "",
-         agent_id: str = "") -> list[TraceFile]:
-    """Every trace, newest first, with its sidecar folded in."""
+         agent_id: str = "", outcome: str = "", min_turns: int = 0) -> list[TraceFile]:
+    """Every trace, newest first, with its sidecar folded in.
+
+    `outcome` and `min_turns` exist because an API outage on build-4 left
+    4,700 three-line error traces beside the 60 that record work; without
+    a filter the listing's first page is all outage."""
     out: list[TraceFile] = []
     for d in _roots(root):
         for f in sorted(d.glob("*.jsonl")):
@@ -72,11 +76,16 @@ def find(root: str | pathlib.Path | None = None, *, session_id: str = "",
                 continue
             if agent_id and aid != agent_id:
                 continue
+            if outcome and meta.get("outcome", "") != outcome:
+                continue
+            n_turns = int(meta.get("n_turns", 0) or 0) or _count(f)
+            if min_turns and n_turns < min_turns:
+                continue
             out.append(TraceFile(
                 path=f, trace_id=meta.get("id") or f.stem, session_id=sid,
                 agent_id=aid, idea_id=meta.get("idea_id", ""),
                 attempt=int(meta.get("attempt", 0) or 0),
-                n_turns=int(meta.get("n_turns", 0) or 0) or _count(f),
+                n_turns=n_turns,
                 started_at=float(meta.get("started_at", 0) or 0),
                 ended_at=float(meta.get("ended_at", 0) or 0),
                 outcome=meta.get("outcome", ""),

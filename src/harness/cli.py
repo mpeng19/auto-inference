@@ -174,16 +174,22 @@ def cmd_status(a) -> int:
         from dataclasses import asdict
         print(json.dumps(asdict(v), indent=1, default=str))
         return 0
+    from . import results as rs
+
     age = time.time() - v.updated_at
     v = _mark_dead(v)
+    # Dollars are what Modal bills: the fleet's figure plus the agents' own
+    # GPU tool calls that only their directories know about.
+    root = _root_for(a, v)
+    unrep = rs.unreported_by_agent(root) if root else {}
     print(f"{v.session_id}   {v.phase}   {v.live_agents}/{v.target_agents} agents"
-          f"   ${v.cost_usd:.2f} of ${v.budget_usd:.0f}"
+          f"   ${rs.fleet_modal_spend(root, v.cost_usd, unrep):.2f} of ${v.budget_usd:.0f}"
           f"   {v.tokens.total:,} tokens   updated {age:.0f}s ago")
     if v.note:
         print(f"note:  {v.note}")
     print(f"evals: {v.evals_running} running, {v.evals_queued} queued, "
           f"{v.evals_completed} done, {v.evals_deduped} deduped, "
-          f"{v.gpu_utilisation:.0%} GPU utilisation")
+          f"{v.gpu_utilisation:.0%} eval-slot utilisation")
     print()
     print(f"{'agent':<7}{'status':<12}{'idea':<26}{'att':>4}{'Δ%':>8}"
           f"{'$/1k':>8}{'rank':>6}{'share':>7}{'$':>8}{'tokens':>11}  activity")
@@ -194,15 +200,19 @@ def cmd_status(a) -> int:
         share = "-" if ag.last_share_pct is None else f"{ag.last_share_pct:.2f}%"
         print(f"{ag.agent_id:<7}{ag.status:<12}{ag.idea_title[:24]:<26}"
               f"{ag.attempt:>4}{d:>8}{bill:>8}{rank:>6}{share:>7}"
-              f"{ag.cost_usd:>8.2f}{ag.tokens.total:>11,}"
+              f"{ag.cost_usd + unrep.get(ag.agent_id, 0.0):>8.2f}{ag.tokens.total:>11,}"
               f"  {ag.activity[:40]}")
     return 0
 
 
 def cmd_sessions(a) -> int:
+    from . import results as rs
+
     for v in _store(a).sessions(limit=a.limit):
+        root = _root_for(a, v)
+        usd = rs.fleet_modal_spend(root, v.cost_usd) if root else v.cost_usd
         print(f"{v.session_id:<22}{v.phase:<10}{len(v.agents):>3} agents"
-              f"  ${v.cost_usd:>8.2f}  {v.tokens.total:>12,} tok")
+              f"  ${usd:>8.2f}  {v.tokens.total:>12,} tok")
     return 0
 
 
@@ -651,7 +661,8 @@ def cmd_traces(a) -> int:
     from . import traces
 
     if a.action == "list":
-        found = traces.find(a.root or None, session_id=a.session)
+        found = traces.find(a.root or None, session_id=a.session,
+                            agent_id=a.agent, outcome=a.outcome, min_turns=a.min_turns)
         if not found:
             print("no traces found", file=sys.stderr)
             return 1
@@ -850,6 +861,11 @@ def main(argv: list[str] | None = None) -> int:
     tr.add_argument("action", choices=["list", "show", "export"])
     tr.add_argument("trace_id", nargs="?", default="")
     tr.add_argument("--root", default="", help="fleet root (default: ./agents)")
+    tr.add_argument("--agent", default="", help="list: only this agent")
+    tr.add_argument("--outcome", default="", help="list: won | lost | neutral | diverged | error")
+    tr.add_argument("--min-turns", dest="min_turns", type=int, default=4,
+                    help="list: hide traces shorter than this (an API outage leaves "
+                         "thousands of 3-line error traces); 0 shows all")
     tr.add_argument("--out", default="trace-export", help="export destination")
     tr.add_argument("--kind", default="", help="comma-separated turn kinds")
     tr.add_argument("--query", default="", help="substring filter")
