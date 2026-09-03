@@ -415,6 +415,7 @@ class FleetApp(App):
                            Command(kind=kind, agent_id=agent_id, value=value))
         if agent_id:
             self._pending[agent_id] = kind
+            self._render_detail()
         self.notify(f"{kind} {agent_id or value}".strip(), timeout=2)
 
     def action_pause(self) -> None:
