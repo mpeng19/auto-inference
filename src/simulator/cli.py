@@ -3,7 +3,7 @@
     simulate run     --root runs/baseline
     simulate submit  --root runs/baseline           # a sweep is 25-60 min
     simulate collect --root runs/baseline           # picks up the stored call
-    simulate rescore --root runs/baseline --slo ttft:p99:1000,tpot:mean:20
+    simulate rescore --root runs/baseline --slo ttft:p90:2818,tpot:p90:25,tpot:mean:20
     simulate ls
 
     simulate workbench   --root runs/k --stack k/ probe.py   # one script, one GPU

@@ -27,29 +27,16 @@ def profiles_dir(root: str | pathlib.Path) -> pathlib.Path:
     return d
 
 
-def databases(root: str | pathlib.Path) -> list[pathlib.Path]:
-    """Ingested trace databases for this fleet, newest first."""
-    d = profiles_dir(root)
-    return sorted(d.glob("*.sqlite"), key=lambda f: -f.stat().st_mtime)
-
-
-def mcp_config(db: str | pathlib.Path) -> dict:
-    """The `--mcp-config` payload that gives an agent the trace tools.
+def mcp_config(dbs: dict[str, str | pathlib.Path]) -> dict:
+    """The `--mcp-config` payload that gives an agent the trace tools: one
+    server per database, `tracedb` for the agent's own latest profile and
+    `tracedb_stock` for the baseline's, so the same tools answer "what does
+    my kernel do" and "what did stock do" side by side.
 
     Uses this interpreter rather than a bare `tracedb-mcp`, so it works from a
     venv that is not on the agent subprocess's PATH -- the same trap that made
     `preflight` silently skip its lint.
     """
-    return {"mcpServers": {MCP_SERVER_NAME: {
-        "command": sys.executable,
-        "args": ["-m", "tracedb.mcp_server", "--db", str(db)],
-    }}}
-
-
-def mcp_config_many(dbs: dict[str, str | pathlib.Path]) -> dict:
-    """One server per database: `tracedb` for the agent's own latest
-    profile, `tracedb_stock` for the baseline's, so the same tools answer
-    "what does my kernel do" and "what did stock do" side by side."""
     return {"mcpServers": {name: {
         "command": sys.executable,
         "args": ["-m", "tracedb.mcp_server", "--db", str(db)],
@@ -57,12 +44,11 @@ def mcp_config_many(dbs: dict[str, str | pathlib.Path]) -> dict:
 
 
 def write_mcp_config(workspace_root: str | pathlib.Path,
-                     db: str | pathlib.Path | dict) -> pathlib.Path:
+                     dbs: dict[str, str | pathlib.Path]) -> pathlib.Path:
     """Write the config beside the agent's workspace and return its path."""
     p = pathlib.Path(workspace_root) / "mcp.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    cfg = mcp_config_many(db) if isinstance(db, dict) else mcp_config(db)
-    p.write_text(json.dumps(cfg, indent=1))
+    p.write_text(json.dumps(mcp_config(dbs), indent=1))
     return p
 
 

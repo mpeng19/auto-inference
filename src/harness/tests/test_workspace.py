@@ -17,10 +17,6 @@ class FakeStock:
     def read(self, rel):
         return (self.root / rel).read_text()
 
-    def ls(self, prefix="srt"):
-        return tuple(sorted(str(p.relative_to(self.root))
-                            for p in (self.root / prefix).rglob("*.py")))
-
     def sha(self, rel):
         import hashlib
         return hashlib.sha256(self.read(rel).encode()).hexdigest()[:16]
@@ -55,11 +51,7 @@ def test_syntax_errors_are_caught_before_a_gpu_is_rented(ws):
 
 
 def test_a_no_op_is_not_a_stack(ws):
-    """A stack of unmodified files is a no-op wearing a diff's clothes.
-
-    Exactly what the deleted `overlays/` turned out to be: two pristine
-    vendored files whose "application" changed nothing.
-    """
+    """A stack of unmodified files is a no-op wearing a diff's clothes."""
     ok, why = ws.check()
     assert not ok and "no files changed" in why
     # An agent editing in place starts from stock copies; those alone are still

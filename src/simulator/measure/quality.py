@@ -22,16 +22,15 @@ in the loop:
                but a single token is a weak signal per item; it earns its place
                by covering knowledge rather than arithmetic.
 
-The shipped gate is `gsm8k` **and** `longbench` (`Simulator.quality_suites`):
-GSM8K alone passed a change that only engages above 4,096 tokens, because the
-path it altered never ran. `mmlu` is available but not in the default gate.
+All three run by default (`Simulator.quality_suites`). GSM8K alone once passed
+a change that only engages above 4,096 tokens, because the path it altered
+never ran; `longbench` is the one that exercises it.
 
 All three are pinned by dataset revision. A benchmark that moves underneath
 you cannot detect a regression -- it *is* one.
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 
@@ -345,7 +344,3 @@ def regressed(result: QualityResult, tolerance_pp: float = 10.0) -> tuple[bool, 
                       f"({result.baseline_accuracy:.1%} -> {result.accuracy:.1%}) "
                       f"on {result.suite}; a speed win that costs accuracy is not a win")
     return False, ""
-
-
-def summarise(results: list[QualityResult]) -> str:
-    return json.dumps([r.as_dict() for r in results], indent=1)

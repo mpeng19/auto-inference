@@ -5,10 +5,7 @@ message text, so the replay needs plausible prose to fill each turn to its
 recorded length. `_pad_to` cycles a reshuffled deck of English paragraphs so
 nothing repeats back to back -- identical repeated spans would hand the prefix
 cache an unrealistically easy time and read as machine-generated. The system
-prompts are the shared prefixes real deployments put in front of every turn.
-
-The synthetic request generator that used to live here (categories, slot
-vocabularies, `make_request`) was superseded by TraceLab replay and removed.
+prompt is the shared prefix real deployments put in front of every turn.
 """
 from __future__ import annotations
 
@@ -16,21 +13,10 @@ import random
 
 CHARS_PER_TOKEN = 4.0
 
-SYSTEM_PROMPTS = [
-    ("assistant_v1",
-     "You are a helpful, careful assistant. Answer accurately and concisely. "
-     "If you are unsure, say so rather than guessing. Prefer concrete examples "
-     "over abstract description, and keep formatting simple."),
-    ("support_v2",
-     "You are a customer support agent for a cloud infrastructure company. Be "
-     "polite and practical. Ask a clarifying question when the request is "
-     "ambiguous. Never promise refunds or timelines you cannot verify. Escalate "
-     "billing disputes to a human."),
-    ("code_reviewer",
-     "You are an experienced code reviewer. Point out correctness bugs first, "
-     "then performance, then style. Quote the specific line you mean. Do not "
-     "restate what the code does unless it is unclear."),
-]
+SYSTEM_PROMPT = (
+    "You are an experienced code reviewer. Point out correctness bugs first, "
+    "then performance, then style. Quote the specific line you mean. Do not "
+    "restate what the code does unless it is unclear.")
 
 _PROSE = [
     "The team reviewed the rollout plan and agreed the migration should proceed in stages.",

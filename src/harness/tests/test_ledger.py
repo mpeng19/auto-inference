@@ -12,7 +12,6 @@ def test_ledger_drains_once_and_survives_a_restart(tmp_path):
     assert ledger.drain(tmp_path) == 0.0            # nothing new
     ledger.append(tmp_path, "equivalence", 0.4)
     assert ledger.drain(tmp_path) == 0.4            # only the new line
-    assert ledger.total(tmp_path) == 1.9
     # a fresh loop over the same directory starts from the recorded offset
     assert (tmp_path / ledger.SEEN).read_text().strip() == str((tmp_path / ledger.LEDGER).stat().st_size)
 

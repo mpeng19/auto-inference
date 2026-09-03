@@ -21,8 +21,6 @@ import json
 import pathlib
 from dataclasses import dataclass
 
-from .direct import effective_in
-
 # qwen/qwen3.8-27b provider table, from the OpenRouter model page 2026-08-30.
 # (provider, input $/M, output $/M, cache read $/M)
 MARKET_QWEN38_27B = [
@@ -79,51 +77,9 @@ MARKET_AS_OF = "2026-08-31"
 
 MARKET_REALISED = MARKET_SNAPSHOTS[MARKET_AS_OF]
 
-# Weighted average price actually paid across the market.
-MARKET_WEIGHTED_IN = 0.2116
-
+# Token-weighted average output price across the board; the fallback listed
+# output price for a provider missing from `MARKET_QWEN38_27B`.
 MARKET_WEIGHTED_OUT = 2.868
-
-# The target: beat the best realised effective input price. This MOVES -- it was
-# Chutes at $0.1310 two days earlier, and the leader changed because Chutes' hit
-# rate fell 69.5%->65.4% while Novita's rose 81.8%->87.4%. Nobody changed a
-# posted price. Any "we beat the market" claim is against a moving target.
-MARKET_BEST_EFF_IN = 0.1272          # Novita, 87.4% hit
-
-# Real traffic for this model is overwhelmingly input-dominated: 17.6B prompt
-# tokens against 448M completion + 508M reasoning in one day, so roughly 18:1
-# counting reasoning as output, 39:1 counting only completion. Our synthetic
-# workloads run about 2:1, which models chat rather than the agentic coding
-# traffic this model actually serves -- the top apps on it are pi, Hermes
-# Agent, Claude Code and DeepSeek Harness.
-#
-# This matters for the objective: at 18:1, input is roughly 60% of revenue at
-# market prices, so effective *input* price really is the number that decides
-# competitiveness, and prefill is where the cost sits.
-MARKET_INPUT_OUTPUT_RATIO = 18.4
-
-
-def rank_vs_market(eff: float, market: list[tuple[str, float, float, float | None]],
-                   hit_rate: float) -> dict:
-    """Where would we sit on the live provider table?
-
-    `market` rows are (provider, input $/M, output $/M, cache_read $/M).
-    """
-    scored = []
-    for name, pin, _pout, pcache in market:
-        e = pin if pcache is None else effective_in(pin, pcache, hit_rate)
-        scored.append((name, e))
-    scored.sort(key=lambda r: r[1])
-    rank = sum(1 for _, e in scored if e < eff) + 1
-    return {
-        "hit_rate": hit_rate,
-        "our_effective_in_per_mtok": round(eff, 5),
-        "rank": rank,
-        "of": len(scored) + 1,
-        "best_competitor": scored[0][0],
-        "best_competitor_price": round(scored[0][1], 4),
-        "table": [{"provider": n, "eff_in": round(e, 4)} for n, e in scored],
-    }
 
 
 def burst_utilisation(daily_volumes: list[float]) -> dict:
@@ -132,24 +88,10 @@ def burst_utilisation(daily_volumes: list[float]) -> dict:
     A provider serving one model must provision for its peak or shed traffic
     at the peak, so it runs at roughly mean/peak. Measured on this model's
     OpenRouter volume (17 days) that is **48%** -- derived from the traffic,
-    not assumed.
-
-    A multi-model fleet does better for a reason that has nothing to do with
-    how much of *this* model it serves: GPUs are fungible, so what matters is
-    fleet utilisation, and uncorrelated demands add in quadrature. With N
-    similar, weakly-correlated models the aggregate coefficient of variation
-    falls as 1/sqrt(N), so peak/mean approaches 1 and utilisation approaches
-    100%. **That, not scale in any single model, is the incumbent advantage.**
-
-        models on fleet    aggregate cv    peak/mean    utilisation
-                      1            0.51         2.03            49%
-                     10            0.16         1.33            75%
-                    100            0.05         1.10            91%
-
-    Two caveats, both making our 48% optimistic: the series is daily, so
-    intra-day bursts are invisible; and real model demands are positively
-    correlated (they share business hours), so a fleet's benefit is smaller
-    than 1/sqrt(N) suggests -- but so is ours if we ever multiplex.
+    not assumed, and what `Market.utilisation_ceiling` reports. Optimistic
+    on two counts: the series is daily, so intra-day bursts are invisible;
+    and a multi-model fleet does better because uncorrelated peaks add in
+    quadrature (`docs/methodology.md`).
     """
     import statistics as st
     if len(daily_volumes) < 3:
@@ -160,12 +102,6 @@ def burst_utilisation(daily_volumes: list[float]) -> dict:
     return {"available": True, "mean": mean, "peak": peak,
             "peak_over_mean": round(peak / mean, 2), "cv": round(cv, 3),
             "single_model_utilisation": round(mean / peak, 3)}
-
-
-def fleet_utilisation(cv_single: float, n_models: int, sigma: float = 2.0) -> float:
-    """Utilisation an N-model fleet holds, given one model's burstiness."""
-    cv = cv_single / (n_models ** 0.5)
-    return 1.0 / (1.0 + sigma * cv)
 
 
 # ── the market snapshot, as scraped ──────────────────────────────────────
@@ -252,10 +188,6 @@ class Market:
         """What a buyer pays for 1,000 average requests. The honest score."""
         return (eff_in_per_m * self.in_per_request
                 + out_per_m * self.out_per_request) / 1e6 * 1000
-
-    def blended_per_m(self, eff_in_per_m: float, out_per_m: float) -> float:
-        return self.bill_per_1k(eff_in_per_m, out_per_m) / 1000 / (
-            self.in_per_request + self.out_per_request) * 1e6
 
     def leaderboard(self, eff_in_per_m: float, out_per_m: float,
                     label: str = "us") -> list[dict]:

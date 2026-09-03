@@ -31,19 +31,16 @@ from .common import new_id, now
 TurnKind = Literal["prompt", "thought", "tool_call", "tool_result", "message",
                    "eval_submit", "eval_result", "error"]
 
-# Which part of an attempt a turn closes. Every turn carries one in
-# `Turn.data["phase"]`, next to `data["elapsed_s"]`, because a trace that says
-# only *what* happened cannot answer why a night produced three attempts: on
-# 2026-09-02 a five-hour host sleep and a model thinking for five hours left
-# exactly the same trace. Phases are data, not a schema -- an implementation
-# may add its own -- but these are the ones the reference loop emits.
-Phase = Literal["start", "recall", "propose", "check", "submit", "study",
-                "wait", "done"]
-
-
 @dataclass(frozen=True)
 class Turn:
-    """One line of a trace."""
+    """One line of a trace.
+
+    `data` is free-form, but the reference loop always stamps `phase` (which
+    part of an attempt the turn closes: recall, propose, check, submit,
+    study, wait, paper) and `elapsed_s`: a trace that says only *what*
+    happened cannot tell a five-hour host sleep from a model thinking for
+    five hours.
+    """
     kind: TurnKind
     ts: float = field(default_factory=now)
     name: str = ""                  # tool name, or the eval's run id

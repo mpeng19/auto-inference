@@ -1,5 +1,5 @@
-# The product is `simulator`. Everything below is a thin wrapper over it.
-.PHONY: test lint fix notebook run submit collect rescore ls deploy spend market help
+# Thin wrappers over `simulate`; `harness` and `tracedb` are their own CLIs.
+.PHONY: test lint fix notebook run submit collect rescore ls deploy market help
 
 test:            ## unit tests, no GPU, no network
 	uv run pytest -q
@@ -30,9 +30,6 @@ ls:              ## list sweeps on the results volume
 
 deploy:          ## push the runner so `submit` can find it
 	uv run modal deploy src/simulator/runner/modal_runner.py
-
-spend:           ## current Modal spend
-	uv run python monitor/spend_monitor.py
 
 market:          ## refresh data/market-*.json from OpenRouter
 	uv run python -m simulator.price.market_pull

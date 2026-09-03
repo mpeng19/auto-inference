@@ -160,6 +160,29 @@ class SqliteSessionStore:
                             (command_id,)).fetchone()
         return _cmd(r) if r else None
 
+    def pending(self, session_id: str) -> tuple[Command, ...]:
+        """Commands the fleet has not acknowledged, oldest first.
+
+        The same rows `take_commands` returns, under the name a watcher
+        means: "pending" is defined by `applied_at == 0` and nothing else,
+        so a dashboard restarted mid-flight shows exactly the marks the
+        previous one did, and one is never stranded on a guess about
+        status. Whether a pending row is *deliverable* is the watcher's
+        call (is the daemon alive?), not the store's."""
+        return self.take_commands(session_id)
+
+    def delete_session(self, session_id: str) -> dict[str, int]:
+        """Remove every row about a session: its snapshot, its per-agent
+        tokens, its commands. Returns what was removed, by table, so the
+        caller can print it. The run directory is not the store's business."""
+        out = {}
+        for table in ("sessions", "tokens", "commands"):
+            col = "id" if table == "sessions" else "session_id"
+            out[table] = self._c.execute(
+                f"DELETE FROM {table} WHERE {col}=?", (session_id,)).rowcount
+        self._c.commit()
+        return out
+
     def _latest_session(self) -> str:
         r = self._c.execute(
             "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1").fetchone()

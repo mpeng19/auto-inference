@@ -4,19 +4,13 @@ TraceLab (SyFI Lab, University of Washington, CC-BY-4.0) is a sanitised trace of
 665,453 Claude Code and Codex invocations across 8,058 sessions, published
 specifically for LLM serving research. https://tracelab.cs.washington.edu/
 
-Why this replaces guessing. Our synthetic workloads were built from plausible
-assumptions and are wrong by two orders of magnitude on the axis that matters:
-
-                              ours    TraceLab
-    median input tokens        537     132,092
-    input:output ratio         2.3       291.4
-    cache hit rate            0.96       0.956
-
-Output length we happened to get right (233 vs 249), which is precisely why the
-ratio came out so badly. The traffic is not chat with a bit of context -- it is
-a ~130k-token context resent every turn with a ~1k increment, hundreds of times
-per session. That is a different serving problem: overwhelmingly prefill,
-overwhelmingly cached, and bounded by KV capacity rather than compute.
+Real traffic, not a guess: a median input of 132,092 tokens, 291:1
+input:output, 95.6% prefix reuse. It is a ~130k-token context resent every
+turn with a ~1k increment, hundreds of times per session -- overwhelmingly
+prefill, overwhelmingly cached, and bounded by KV capacity rather than
+compute. `scale_to_market` then rescales it to the marketplace's own token
+counts, since TraceLab is Claude Code alone and the market mixes in agents
+that generate far more output.
 
 The trace carries no message text (sanitised), which is fine: we need the
 *shape*, not the content. Token counts, prefix reuse and session structure are
@@ -62,8 +56,8 @@ def download_rounds(local_dir: str | None = None) -> str:
 
 def load_sessions(path: str | None = None, min_rounds: int = 4,
                   max_rounds: int = 60, max_sessions: int | None = 400,
-                  seed: int = 0, provider: str | None = None) -> list[list[TraceRound]]:
-    """Load sessions, longest-context first, with the documented correction.
+                  seed: int = 0) -> list[list[TraceRound]]:
+    """Load a seeded shuffle of sessions, with the documented correction.
 
     TraceLab warns that a small fraction of adjacent rounds report
     `prefix_tokens` larger than the reconstructable previous context, and
@@ -76,8 +70,6 @@ def load_sessions(path: str | None = None, min_rounds: int = 4,
     import pandas as pd
 
     df = pd.read_parquet(path or download_rounds())
-    if provider:
-        df = df[df.provider == provider]
     df = df.sort_values(["session_id", "round_index"])
 
     out: list[list[TraceRound]] = []
@@ -156,7 +148,7 @@ def to_sessions(traces: list[list[TraceRound]], system_tokens: int = 400,
     from .sessions import Session, Turn
 
     rng = _r.Random(seed)
-    system = _p._pad_to(_p.SYSTEM_PROMPTS[2][1], system_tokens, _r.Random(seed * 31))
+    system = _p._pad_to(_p.SYSTEM_PROMPT, system_tokens, _r.Random(seed * 31))
 
     out = []
     for i, rounds in enumerate(traces):
@@ -166,9 +158,9 @@ def to_sessions(traces: list[list[TraceRound]], system_tokens: int = 400,
             # prompt is the conversation the client resends, which the runner
             # rebuilds from prior replies.
             turns.append(Turn(_p._pad_to("", max(1, r.new_tokens), rng),
-                              max(1, r.output_tokens), "agentic"))
+                              max(1, r.output_tokens)))
             think.append(min(60.0, rng.lognormvariate(think_mu, think_sigma)))
-        out.append(Session(idx=i, arrival_s=0.0, system=system,
+        out.append(Session(idx=i, system=system,
                            turns=tuple(turns), think_s=tuple(think)))
     return out
 
@@ -176,18 +168,13 @@ def to_sessions(traces: list[list[TraceRound]], system_tokens: int = 400,
 def scale_sessions(sessions: list[list[TraceRound]], factor: float,
                    out_factor: float | None = None
                    ) -> list[list[TraceRound]]:
-    """Shrink every context by `factor`, preserving cache structure.
+    """Scale every context by `factor`, preserving cache structure.
 
-    Needed because the real traffic will not fit. At a 132k median context and
-    144 KiB/token of KV, one conversation is ~19GB -- an L40S holds two, which
-    is too few to study batching at all. Scaling keeps the *ratios* that drive
-    serving behaviour (hit rate, input:output, increment size) while fitting
-    the memory available.
-
-    This is a compromise and should be recorded as one: a scaled replay tests
-    the same *structure* at a different absolute scale, and results from it do
-    not automatically transfer to full-size contexts, where KV pressure and
-    eviction dominate.
+    Keeps the *ratios* that drive serving behaviour (hit rate, increment size,
+    which turn reuses what) while moving the absolute token counts. A scaled
+    replay tests the same *structure* at a different scale, and results from
+    it do not automatically transfer to full-size contexts, where KV pressure
+    and eviction dominate.
 
     `out_factor` scales output independently. Uniform scaling preserves
     TraceLab's 291:1 input:output ratio, but the marketplace this model

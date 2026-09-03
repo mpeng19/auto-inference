@@ -146,7 +146,7 @@ def overlap(store: TraceStore, a_pat: str, b_pat: str, limit: int = 20) -> dict:
         if not ids:
             return []
         return store.conn.execute(
-            f"SELECT id, track_id, ts, dur, name_id FROM spans WHERE name_id IN ({','.join(map(str, ids))}) "
+            f"SELECT id, track_id, ts, dur FROM spans WHERE name_id IN ({','.join(map(str, ids))}) "
             "ORDER BY ts LIMIT 200000").fetchall()
     A, B = spans_of(a_pat), spans_of(b_pat)
     total_a = sum(r["dur"] for r in A)

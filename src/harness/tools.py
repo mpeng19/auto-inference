@@ -24,12 +24,13 @@ and a batch, what step time and cost per output token should follow, both from
 first principles and from what this stack actually measures. The gap between
 those two is the optimisation headroom (`docs/methodology.md` §8.3).
 
-`gpu_run` and `equivalence` are the two that make kernel work possible at all.
-Everything above is free and everything below a sweep was, until now, a sweep:
-17-35 minutes and a price. A Triton kernel needs to be asked whether it
-compiles, how fast it is, and whether it still computes the same numbers, and
-none of those questions has anything to do with a price. Both rent an H100 for
-minutes and cost real money -- `cost_usd` comes back with the answer.
+`gpu_run`, `ncu` and `equivalence` are the GPU workbench, the part that makes
+kernel work possible at all. A Triton kernel needs to be asked whether it
+compiles, how fast it is, what its counters say, and whether it still computes
+the same numbers -- none of which has anything to do with a price, and a
+sweep is 17-35 minutes and a price. Each rents an H100 for minutes and costs
+real money: `cost_usd` comes back with the answer and lands in the agent's
+ledger (`harness.agent.ledger`), so the fleet's spend counts it.
 """
 from __future__ import annotations
 

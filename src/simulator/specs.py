@@ -1,26 +1,18 @@
-"""Roofline capacity model: what the hardware *should* be able to do.
+"""Architecture facts about the target model, and the card it runs on.
 
-Sizing a load suite by guesswork is what produced the first calibration, which
-was ~10x too low and measured an idle server. This derives the ceiling from
-first principles instead, so a workload can be expressed as a fraction of
-capacity rather than an arbitrary requests-per-second number.
+Two callers, neither of which prices anything:
 
-The essential point about serving an MoE: **prefill and decode sit on opposite
-sides of the roofline.**
+  * `ServingConfig.validate()` reads `sglang_moe_check_intermediate` to catch
+    a launch-time constraint before a GPU is rented.
+  * `harness.tools.roofline` reads `active_params`, `bytes_per_seq` and
+    `HardwareSpec.hbm_bandwidth` to report how far a measured decode step
+    sits from the bandwidth floor. That ratio is a diagnostic; the price
+    itself comes from the device timer, never from these numbers.
 
-  * Prefill is compute-bound. A long prompt is a big matmul; the limit is
-    FLOP/s.
-  * Decode is memory-bound. Each step reads weights to produce one token per
-    sequence, so the limit is HBM bandwidth. And for an MoE this is worse than
-    it looks: at any real batch size the tokens in a step collectively route to
-    nearly *every* expert, so a step reads close to the whole model rather than
-    just the active parameters. `active_params` predicts FLOPs; it badly
-    under-predicts bytes.
-
-Every number here is a ceiling, not a forecast. Real systems land well under it
-(attention, KV traffic, imperfect overlap, prefill stealing decode steps). The
-useful output is the ratio: measuring 50% of the bandwidth roofline is a
-healthy server, 5% means something is wrong.
+Every field is taken from the model's own `config.json`. Two earlier versions
+of this spec were wrong in opposite directions and one of them killed a launch
+128 s in, which is why the checks in `tests/test_specs.py` pin the parameter
+count against the model's name.
 """
 from __future__ import annotations
 
@@ -29,16 +21,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """Architecture, from the model's own config.json."""
+    """A dense transformer, from its config.json."""
     name: str
     hidden_size: int
     n_layers: int
     n_heads: int
     n_kv_heads: int
     head_dim: int
-    moe_intermediate: int
-    n_experts: int
-    n_experts_active: int
+    intermediate_size: int
     vocab_size: int
     bytes_per_param: float = 1.0        # FP8
     tie_embeddings: bool = False
@@ -48,9 +38,6 @@ class ModelSpec:
     # layers cache is a 4x overestimate of memory, which changes what hardware
     # a workload needs.
     n_kv_layers: int | None = None
-    # A dense model is the degenerate MoE: one "expert", always active. Keeping
-    # one code path means the roofline maths does not fork by architecture.
-    dense: bool = False
 
     # SGLang runs `check_quantized_moe_compatibility` on some models that have
     # no MoE at all, using its own fallback `moe_intermediate_size` rather than
@@ -85,45 +72,25 @@ class ModelSpec:
         return q + k + v + o
 
     @property
-    def expert_params(self) -> int:
+    def ffn_params_per_layer(self) -> int:
         # SwiGLU: gate, up, down
-        return 3 * self.hidden_size * self.moe_intermediate
-
-    @property
-    def moe_params_per_layer(self) -> int:
-        if self.dense:
-            return self.expert_params          # no router, single FFN
-        router = self.hidden_size * self.n_experts
-        return self.n_experts * self.expert_params + router
-
-    @property
-    def active_moe_params_per_layer(self) -> int:
-        if self.dense:
-            return self.expert_params
-        return self.n_experts_active * self.expert_params + self.hidden_size * self.n_experts
+        return 3 * self.hidden_size * self.intermediate_size
 
     @property
     def total_params(self) -> int:
-        body = self.n_layers * (self.attn_params_per_layer + self.moe_params_per_layer)
+        body = self.n_layers * (self.attn_params_per_layer + self.ffn_params_per_layer)
         heads = 1 if self.tie_embeddings else 2
         return body + heads * self.vocab_size * self.hidden_size
 
     @property
     def active_params(self) -> int:
-        """Params touched by one token. Drives FLOPs, NOT bytes read."""
-        body = self.n_layers * (self.attn_params_per_layer + self.active_moe_params_per_layer)
-        return body + self.vocab_size * self.hidden_size       # lm_head only
+        """Params touched by one token: the whole body plus the lm_head, since
+        a dense model reads every weight every step. The input embedding is a
+        lookup, not a read of the table."""
+        body = self.n_layers * (self.attn_params_per_layer + self.ffn_params_per_layer)
+        return body + self.vocab_size * self.hidden_size
 
-    # ── per-token costs ──────────────────────────────────────────
-    def dense_flops_per_token(self) -> float:
-        """2 FLOPs per parameter per token (one multiply, one add)."""
-        return 2.0 * self.active_params
-
-    def attn_flops_per_token(self, context_len: int) -> float:
-        """QK^T and AV, both linear in context length."""
-        per_layer = 2 * 2 * self.n_heads * self.head_dim * context_len
-        return per_layer * self.n_layers
-
+    # ── per-sequence memory ──────────────────────────────────────
     def kv_bytes_per_token(self, dtype_bytes: float = 2.0) -> float:
         """KV cache written per token, per sequence.
 
@@ -154,115 +121,39 @@ class ModelSpec:
         return (context * self.kv_bytes_per_token(kv_dtype_bytes)
                 + self.linear_state_bytes_per_seq)
 
-    def experts_touched(self, batch: int) -> float:
-        """Expected distinct experts activated by `batch` tokens in one step.
-
-        With uniform routing, P(expert unused) = (1 - k/E)^batch. This
-        saturates fast: at batch 64 with 8-of-128 routing, ~127 of 128 experts
-        are touched. That is why decode bytes track *total* params, not active.
-        """
-        if self.dense:
-            return 1.0
-        p_unused = (1.0 - self.n_experts_active / self.n_experts) ** batch
-        return self.n_experts * (1.0 - p_unused)
-
-    def decode_bytes_per_step(self, batch: int) -> float:
-        """Weight bytes read for one decode step at a given batch size."""
-        attn = self.n_layers * self.attn_params_per_layer
-        experts = self.n_layers * self.experts_touched(batch) * self.expert_params
-        head = self.vocab_size * self.hidden_size
-        return (attn + experts + head) * self.bytes_per_param
-
 
 @dataclass(frozen=True)
 class HardwareSpec:
     name: str
-    n_gpus: int
-    peak_flops_dense: float     # FLOP/s, at the serving dtype
     hbm_bandwidth: float        # bytes/s
-    hbm_bytes: float            # per GPU
-
-    @property
-    def total_flops(self) -> float:
-        return self.peak_flops_dense * self.n_gpus
-
-    @property
-    def total_bandwidth(self) -> float:
-        return self.hbm_bandwidth * self.n_gpus
+    hbm_bytes: float
 
 
-# ── known specs ──────────────────────────────────────────────────
-QWEN3_30B_A3B = ModelSpec(
-    name="Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
-    hidden_size=2048, n_layers=48, n_heads=32, n_kv_heads=4, head_dim=128,
-    moe_intermediate=768, n_experts=128, n_experts_active=8, vocab_size=151936,
-)
-
-# Dense small models, for cheap iteration. They lose the MoE dynamics (expert
-# routing, the all-experts-touched decode read) but keep every scheduling,
-# batching, KV and prefix-cache behaviour, which is most of what the serving
-# layer actually does. Qwen3-4B is the pick: 262k native context, so it can
-# hold an agentic conversation, on a GPU that costs a fraction of an H100.
-QWEN3_4B = ModelSpec(
-    name="Qwen/Qwen3-4B-Instruct-2507-FP8",
-    hidden_size=2560, n_layers=36, n_heads=32, n_kv_heads=8, head_dim=128,
-    moe_intermediate=9728, n_experts=1, n_experts_active=1, vocab_size=151936,
-    tie_embeddings=True, dense=True,
-)
-
-QWEN3_8B = ModelSpec(
-    name="Qwen/Qwen3-8B-FP8",
-    hidden_size=4096, n_layers=36, n_heads=32, n_kv_heads=8, head_dim=128,
-    moe_intermediate=12288, n_experts=1, n_experts_active=1, vocab_size=151936,
-    tie_embeddings=False, dense=True,
-)
-
-# THE TARGET. A **dense** hybrid-attention vision-language model. Two earlier
-# versions of this comment were wrong in opposite directions; the config is:
+# THE TARGET. A **dense** hybrid-attention vision-language model. The config:
 #
 #   * 64 layers, but only **16 use full attention** (`layer_types` gives full
 #     attention every 4th layer). Linear attention keeps a fixed-size state, so
 #     only those 16 contribute growing KV. Counting all 64 overestimates 4x.
-#     This part of the earlier correction was right.
 #   * **No MoE.** `has_moe: false`, `intermediate_size: 17408`, a plain dense
 #     FFN. An earlier spec guessed 128 experts x 512 -- that is a 64B-parameter
-#     model, more than twice the 27B on the tin, which is exactly the check
-#     below. It also underestimated FFN FLOPs ~4.3x.
-#     Consequently `--ep-size` is meaningless here, and the FP8 128x128 block
-#     constraint applies to 17408 (divisible by 128 for every TP we use).
+#     model, more than twice the 27B on the tin, which is exactly what
+#     `test_every_spec_matches_the_parameter_count_in_its_own_name` checks.
+#     `--ep-size` is therefore meaningless here.
 #   * `head_dim=256`, unusually large, which is why KV is still 64 KiB/token
 #     despite only a quarter of the layers caching.
-#
-# One real 132k-token agentic conversation is ~8.7 GB: an L40S holds two, an
-# H100 about six, 8xH100 about seventy.
 QWEN3_8_27B = ModelSpec(
     name="Qwen/Qwen3.8-27B-FP8",
     hidden_size=5120, n_layers=64, n_kv_layers=16,
     n_heads=24, n_kv_heads=4, head_dim=256,
-    moe_intermediate=17408, n_experts=1, n_experts_active=1,
-    vocab_size=248320, tie_embeddings=False, dense=True,
+    intermediate_size=17408,
+    vocab_size=248320, tie_embeddings=False,
     sglang_moe_check_intermediate=512,
     linear_num_value_heads=48, linear_value_head_dim=128,
     linear_key_head_dim=128, linear_conv_kernel_dim=4,
 )
 
-QWEN3_235B_A22B = ModelSpec(
-    name="Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
-    hidden_size=4096, n_layers=94, n_heads=64, n_kv_heads=4, head_dim=128,
-    moe_intermediate=1536, n_experts=128, n_experts_active=8, vocab_size=151936,
-)
+# H100 SXM5: 3.35 TB/s HBM3, 80 GB.
+H100 = HardwareSpec("H100 SXM5", 3.35e12, 80e9)
 
-# H100 SXM5: 989.4 TFLOP/s dense FP8 (1979 with 2:4 sparsity, which serving
-# does not use), 3.35 TB/s HBM3.
-H100 = HardwareSpec("H100 SXM5", 1, 989.4e12, 3.35e12, 80e9)
-H100_8X = HardwareSpec("8x H100 SXM5", 8, 989.4e12, 3.35e12, 80e9)
-# Cheaper accelerators for iteration. Note how much bandwidth they give up:
-# decode is bandwidth-bound, so an L4 is ~11x slower at decode than an H100
-# while costing only ~5x less. Cheaper per hour is not cheaper per token.
-L40S = HardwareSpec("L40S", 1, 362e12, 864e9, 48e9)
-A10G = HardwareSpec("A10G", 1, 125e12, 600e9, 24e9)
-L4 = HardwareSpec("L4", 1, 121e12, 300e9, 24e9)
-
-MODELS = {m.name: m for m in (QWEN3_4B, QWEN3_8B, QWEN3_30B_A3B,
-                              QWEN3_8_27B, QWEN3_235B_A22B)}
-HARDWARE = {"H100": H100, "L40S": L40S, "A10G": A10G, "L4": L4}
+MODELS = {QWEN3_8_27B.name: QWEN3_8_27B}
+HARDWARE = {"H100": H100}

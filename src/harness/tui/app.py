@@ -6,22 +6,37 @@ the fleet tab answers four questions and stops: who is running and what each
 is doing now, what it has cost in dollars and tokens (and minutes by phase),
 whether the GPUs are busy or the fleet is stalled behind them, and which agent
 to pause or kill. The results tab is the morning view: every experiment best
-first, its artifacts, and a box to ask Claude about the run.
+first, its artifacts, and a box to ask Claude about the run. It is a viewer
+of saved logs -- nothing on it controls the fleet, and its keys open files.
 
 It talks only to the session store, so it can be started and stopped at will
 and a crash here cannot touch a running fleet. Commands are written as rows;
-the fleet applies them on its next tick. A snapshot is the daemon's last word,
-not a heartbeat, so the dashboard also asks the OS whether the daemon is still
-alive before believing "running".
+the fleet applies them on its next checkpoint. A snapshot is the daemon's
+last word, not a heartbeat, so the dashboard also asks the OS whether the
+daemon is still alive before believing "running".
+
+**What "pending" means.** A command is pending exactly while its row has no
+`applied_at`. The fleet sets that only after it has applied the command and
+published the snapshot that shows it, so the mark and the status never
+disagree for more than one refresh, and the mark is never cleared by
+guessing from a status. If the daemon is dead the row cannot be delivered,
+and the dashboard says so instead of showing a spinner that will not end.
+
+**Dollars are Modal.** The only money on this screen is GPU spend
+(evaluations and the agent's own GPU tools). Claude runs on the
+subscription; its use is shown as tokens and never priced.
 """
 from __future__ import annotations
 
+import json
+import pathlib
 import time
 from typing import ClassVar
 
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     DataTable,
@@ -35,7 +50,11 @@ from textual.widgets import (
 
 from ..contracts.session import Command
 
-REFRESH_S = 1.0
+REFRESH_S = 0.5
+# A live fleet acknowledges within a tick or two. A command still unapplied
+# after this long is on a daemon that is not ticking (asleep, hung), which
+# is a different thing from "pending" and is labelled as such.
+UNACKNOWLEDGED_S = 15.0
 
 STATUS_STYLE = {
     "evaluating": "bold cyan",
@@ -48,6 +67,12 @@ STATUS_STYLE = {
     "idle": "dim",
     "lost": "bold red",
 }
+
+LIVE_PHASES = ("running", "stopping", "starting", "paused")
+
+FLEET_ACTIONS = ("pause", "resume", "kill_agent", "scale_up", "scale_down", "stop_fleet")
+RESULT_ACTIONS = ("open_artifact", "open_report")
+ASK_ACTIONS = ("answer_grow", "answer_shrink", "close_ask")
 
 
 def _money(x: float) -> str:
@@ -65,15 +90,21 @@ def _tokens(n: int) -> str:
 class FleetApp(App):
     """One table of agents, one summary, one detail pane."""
 
+    # The summary is a fixed-height widget above the tabs, not part of any
+    # scrolling container, so it stays put; the detail panes are the only
+    # things that scroll.
     CSS = """
-    Screen { layout: vertical; }
+    Screen { layout: vertical; overflow: hidden; }
     #summary { height: 4; padding: 0 1; }
+    #baseline { height: 1; padding: 0 1; color: $text-muted; }
     #body { height: 1fr; }
     #agents { width: 2fr; }
-    #detail { width: 1fr; padding: 0 1; border-left: solid $panel; }
+    #detail_scroll { width: 1fr; border-left: solid $panel; }
+    #detail { padding: 0 1; height: auto; }
     #results_body { height: 1fr; }
     #results { width: 2fr; }
-    #result_detail { width: 1fr; padding: 0 1; border-left: solid $panel; }
+    #result_detail_scroll { width: 1fr; border-left: solid $panel; }
+    #result_detail { padding: 0 1; height: auto; }
     #ask { dock: bottom; }
     #answer_box { height: 12; padding: 0 1; border-top: solid $panel; display: none; }
     #ask { display: none; }
@@ -89,11 +120,13 @@ class FleetApp(App):
         ("s", "stop_fleet", "Stop fleet"),
         ("a", "ask", "Ask about the run"),
         ("escape", "close_ask", "Close the ask box"),
-        ("o", "open_artifact", "Open selected result's files"),
+        ("o", "open_artifact", "Open result's files"),
+        ("b", "open_report", "Open report/paper in browser"),
         ("t", "open_timeline", "Open timeline (HTML)"),
         ("ctrl+up", "answer_grow", "Bigger answer box"),
         ("ctrl+down", "answer_shrink", "Smaller answer box"),
-        ("tab", "next_tab", "Fleet / results"),
+        # priority: the screen otherwise takes Tab for focus-cycling first
+        Binding("tab", "next_tab", "Fleet / results", priority=True),
         ("q", "quit", "Quit (fleet keeps running)"),
     ]
 
@@ -102,31 +135,46 @@ class FleetApp(App):
         self.store = store
         self.session_id = session_id
         self.view = None
-        self._pending: dict[str, str] = {}
+        # agent id -> its oldest unacknowledged command; fleet-level ones
+        # (scale, stop) in the list. Both come from the store on every
+        # refresh, so a dashboard restarted mid-flight shows the same marks.
+        self._pending: dict[str, Command] = {}
+        self._pending_fleet: list[Command] = []
+        # Commands this dashboard sent and has not yet seen acknowledged:
+        # the result ("paused", "a03 is already done") is shown once.
+        self._awaiting: dict[str, str] = {}
         # What was last rendered, as plain text. Kept because a widget's
         # rendered content is not reliably readable across textual versions,
         # and a dashboard nobody can assert on is a dashboard that silently
         # stops updating.
         self.summary_text = ""
+        self.baseline_text = ""
         self.detail_text = ""
         self.results_text = ""
         self.answer_text = ""
         self._asker = None
+        self._results = []
         self._results_at = 0.0
+        self._baseline_root = None
+        self.result_artifacts: list[tuple[str, str]] = []
 
     # ── layout ───────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="summary")
         with TabbedContent(id="tabs"):
-            with TabPane("fleet", id="tab_fleet"), Horizontal(id="body"):
-                with Vertical(id="agents"):
-                    yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
-                yield Static(id="detail")
+            with TabPane("fleet", id="tab_fleet"), Vertical():
+                yield Static(id="baseline")
+                with Horizontal(id="body"):
+                    with Vertical(id="agents"):
+                        yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
+                    with VerticalScroll(id="detail_scroll"):
+                        yield Static(id="detail")
             with TabPane("results", id="tab_results"), Vertical():
                 with Horizontal(id="results_body"):
                     yield DataTable(id="results", cursor_type="row", zebra_stripes=True)
-                    yield Static(id="result_detail")
+                    with VerticalScroll(id="result_detail_scroll"):
+                        yield Static(id="result_detail")
                 with VerticalScroll(id="answer_box"):
                     yield Static(id="answer")
                 yield Input(placeholder="ask about this run (Enter to send; ctrl+up/down resizes)", id="ask")
@@ -134,9 +182,9 @@ class FleetApp(App):
 
     def on_mount(self) -> None:
         t = self.query_one("#table", DataTable)
-        for col, w in (("agent", 6), ("status", 11), ("idea", 22), ("att", 4),
+        for col, w in (("agent", 6), ("status", 12), ("idea", 22), ("att", 4),
                        ("Δ%", 7), ("$/1k", 7), ("rank", 6), ("share", 7),
-                       ("cost", 9), ("tokens", 8)):
+                       ("$ modal", 9), ("tokens", 8)):
             t.add_column(col, width=w)
         r = self.query_one("#results", DataTable)
         for col, w in (("verdict", 8), ("tier", 6), ("Δ%", 7), ("$/1k", 7), ("rank", 6),
@@ -148,11 +196,24 @@ class FleetApp(App):
     # ── data ─────────────────────────────────────────────────────────────
     @work(thread=True, exclusive=True)
     def _load(self) -> None:
+        """Read the snapshot and the unacknowledged commands in one go, off
+        the UI thread; the store is a file and must never stall a keypress."""
         try:
             v = self.store.read(self.session_id)
         except Exception:
             v = None
-        self.call_from_thread(self._apply, v)
+        pend: tuple[Command, ...] = ()
+        acked: list[tuple[str, Command]] = []
+        if v is not None:
+            try:
+                pend = self.store.pending(v.session_id)
+                for cid, label in list(self._awaiting.items()):
+                    c = self.store.command_status(cid)
+                    if c is not None and c.applied_at:
+                        acked.append((label, c))
+            except Exception:
+                pend = ()
+        self.call_from_thread(self._apply, v, pend, acked)
 
     def refresh_view(self) -> None:
         self._load()
@@ -175,9 +236,13 @@ class FleetApp(App):
         except (ProcessLookupError, OSError):
             return False
 
-    def _apply(self, v) -> None:
-        if v is not None and v.phase in ("running", "stopping", "starting", "paused") \
-                and not self._daemon_alive(v):
+    @property
+    def _alive(self) -> bool:
+        """Can a command written now be delivered?"""
+        return self.view is not None and self.view.phase in LIVE_PHASES
+
+    def _apply(self, v, pend=(), acked=()) -> None:
+        if v is not None and v.phase in LIVE_PHASES and not self._daemon_alive(v):
             # Dead daemon: say so, and stop showing agents as busy.
             from dataclasses import replace
             v = replace(v, phase="dead",
@@ -185,11 +250,36 @@ class FleetApp(App):
                                              activity="daemon exited; last: " + (a.activity or "-"))
                                      for a in v.agents))
         self.view = v
-        self._settle_pending()
+        self._pending = {}
+        self._pending_fleet = []
+        for c in pend:                       # oldest first; keep the oldest per agent
+            if c.agent_id:
+                self._pending.setdefault(c.agent_id, c)
+            else:
+                self._pending_fleet.append(c)
+        for label, c in acked:
+            self._awaiting.pop(c.id, None)
+            self.notify(f"{label}: {c.result}", timeout=3)
         self._render_summary()
+        self._render_baseline()
         self._render_table()
         self._render_detail()
         self._render_results()
+        self.refresh_bindings()
+
+    # ── pending marks ───────────────────────────────────────────────────
+    def _pending_label(self, c: Command) -> tuple[str, str]:
+        """What to say about an unacknowledged command, and in what colour.
+        Three states, none of them a spinner: pending (a live daemon will
+        take it within a tick), unacknowledged (the daemon exists but is
+        not ticking -- asleep or hung), undeliverable (the daemon is gone)."""
+        what = f"{c.kind}{' ' + c.value if c.value else ''}"
+        if not self._alive:
+            return f"{what} undeliverable: the daemon is gone", "bold red"
+        age = max(0.0, time.time() - c.issued_at)
+        if age > UNACKNOWLEDGED_S:
+            return f"{what} unacknowledged for {age:.0f}s (daemon not ticking?)", "bold red"
+        return f"{what} pending ({age:.0f}s)", "yellow"
 
     def _render_summary(self) -> None:
         s = self.query_one("#summary", Static)
@@ -203,13 +293,17 @@ class FleetApp(App):
         bar = _bar(v.cost_usd, v.budget_usd)
         t = Text()
         t.append(f"{v.session_id}  ", style="bold")
-        t.append(f"{v.phase}{stale}\n",
+        t.append(f"{v.phase}{stale}",
                  style="bold green" if v.phase == "running"
                  else "bold red" if v.phase == "dead" else "yellow")
+        for c in self._pending_fleet:
+            label, style = self._pending_label(c)
+            t.append(f"   {label}", style=style)
+        t.append("\n")
         if v.phase == "dead":
             t.append("the daemon is gone; this is its last snapshot\n", style="red")
         t.append(f"agents {v.live_agents}/{v.target_agents}    "
-                 f"spend {_money(v.cost_usd)} / {_money(v.budget_usd)} {bar}    "
+                 f"Modal spend {_money(v.cost_usd)} / {_money(v.budget_usd)} {bar}    "
                  f"tokens {_tokens(v.tokens.total)}"
                  f" (cache {_tokens(v.tokens.cache_read)})\n")
         t.append(f"GPUs {v.evals_running}/{v.evals_capacity} busy  "
@@ -221,18 +315,50 @@ class FleetApp(App):
         self.summary_text = t.plain
         s.update(t)
 
+    def _render_baseline(self) -> None:
+        """The numbers every delta on this screen is against, from the
+        fleet's own `fleet.json`. Read once per root: it does not change
+        while a fleet runs."""
+        root = self._root()
+        if root == self._baseline_root:
+            return
+        self._baseline_root = root
+        base = {}
+        if root:
+            try:
+                base = json.loads((pathlib.Path(root) / "fleet.json").read_text()).get("baseline") or {}
+            except (OSError, ValueError):
+                base = {}
+        if not base:
+            self.baseline_text = "baseline: none recorded (deltas cannot be judged)"
+            self.query_one("#baseline", Static).update(Text(self.baseline_text, style="yellow"))
+            return
+        bits = []
+        if isinstance(base.get("bill_per_1k"), (int, float)):
+            bits.append(f"full ${base['bill_per_1k']:.2f}/1k")
+        screen = base.get("screen") if isinstance(base.get("screen"), dict) else {}
+        if isinstance(screen.get("bill_per_1k"), (int, float)):
+            bits.append(f"screen ${screen['bill_per_1k']:.2f}/1k")
+        for suite, acc in sorted((base.get("quality") or {}).items()):
+            if isinstance(acc, (int, float)):
+                bits.append(f"{suite} {acc:.0%}")
+        self.baseline_text = "baseline (stock)   " + "   ".join(bits)
+        self.query_one("#baseline", Static).update(Text(self.baseline_text))
+
     def _render_table(self) -> None:
         t = self.query_one("#table", DataTable)
         row = t.cursor_row
         t.clear()
         for a in (self.view.agents if self.view else ()):
-            pend = self._pending.get(a.agent_id, "")
-            status = f"{a.status}{'*' if pend else ''}"
+            pend = self._pending.get(a.agent_id)
+            mark = ""
+            if pend is not None:
+                mark = "*" if self._alive else "!"
             d = "-" if a.best_delta_pct is None else f"{a.best_delta_pct:+.1f}"
             bill = "-" if a.last_bill_per_1k is None else f"{a.last_bill_per_1k:.2f}"
             share = "-" if a.last_share_pct is None else f"{a.last_share_pct:.2f}%"
             t.add_row(a.agent_id,
-                      Text(status, style=STATUS_STYLE.get(a.status, "")),
+                      Text(f"{a.status}{mark}", style=STATUS_STYLE.get(a.status, "")),
                       a.idea_title[:22] or "-", str(a.attempt),
                       Text(d, style="green" if d.startswith("-") else ""),
                       bill, a.last_rank or "-", share,
@@ -250,18 +376,24 @@ class FleetApp(App):
             return
         t = Text()
         t.append(f"{a.agent_id}\n", style="bold")
-        t.append(f"{a.status}\n\n", style=STATUS_STYLE.get(a.status, ""))
-        t.append("idea\n", style="bold")
+        t.append(f"{a.status}\n", style=STATUS_STYLE.get(a.status, ""))
+        pend = self._pending.get(a.agent_id)
+        if pend is not None:
+            label, style = self._pending_label(pend)
+            t.append(f"{label}\n", style=style)
+        t.append("\nidea\n", style="bold")
         t.append(f"{a.idea_title or '-'}\n")
         t.append(f"{a.idea_hypothesis or ''}\n\n", style="dim")
         t.append("doing now\n", style="bold")
         t.append(f"{a.activity or '-'}\n\n")
-        t.append("cost\n", style="bold")
-        t.append(f"{_money(a.cost_usd)}   {a.attempts_total} attempts\n")
-        t.append(f"in {_tokens(a.tokens.input)}  out {_tokens(a.tokens.output)}\n")
-        t.append(f"cache read {_tokens(a.tokens.cache_read)}\n\n", style="dim")
+        t.append("Modal spend\n", style="bold")
+        t.append(f"{_money(a.cost_usd)}   {a.attempts_total} attempts\n\n")
+        t.append("Claude tokens (subscription; not billed here)\n", style="bold")
+        t.append(f"in {_tokens(a.tokens.input)}  out {_tokens(a.tokens.output)}  "
+                 f"cache read {_tokens(a.tokens.cache_read)}  "
+                 f"cache write {_tokens(a.tokens.cache_write)}\n\n")
         if a.phase_s:
-            t.append("time\n", style="bold")
+            t.append("time by phase\n", style="bold")
             t.append("  ".join(f"{k} {_dur(v)}" for k, v in sorted(
                 a.phase_s.items(), key=lambda kv: -kv[1])) + "\n")
         calls = self._recent_calls(a.agent_id)
@@ -277,9 +409,6 @@ class FleetApp(App):
             t.append(f"idle: {a.idle_s:.0f}s\n", style="dim")
         if a.note:
             t.append(f"\n{a.note}\n", style="yellow")
-        pend = self._pending.get(a.agent_id)
-        if pend:
-            t.append(f"\n{pend} pending…\n", style="yellow")
         self.detail_text = t.plain
         d.update(t)
 
@@ -322,15 +451,21 @@ class FleetApp(App):
         self.results_text = "\n".join(f"{r.verdict} {r.delta_pct} {r.title}" for r in rows)
         self._render_result_detail()
 
-    def _render_result_detail(self) -> None:
-        d = self.query_one("#result_detail", Static)
-        rows = getattr(self, "_results", [])
+    def _selected_result(self):
+        rows = self._results
         t = self.query_one("#results", DataTable)
         i = t.cursor_row
         if not rows or i is None or i >= len(rows):
+            return None
+        return rows[i]
+
+    def _render_result_detail(self) -> None:
+        d = self.query_one("#result_detail", Static)
+        r = self._selected_result()
+        if r is None:
+            self.result_artifacts = []
             d.update(Text("select a result", style="dim"))
             return
-        r = rows[i]
         x = Text()
         x.append(f"{r.experiment_id}  {r.agent_id}\n", style="bold")
         x.append(f"{r.verdict}\n\n", style="bold green" if r.verdict == "win" else "")
@@ -343,9 +478,12 @@ class FleetApp(App):
                      f"{r.share_pct:.2f}% of the market\n", style="dim")
         arts = self._artifacts_for(r)
         if arts:
-            x.append("\nartifacts  (o opens the folder, Enter opens the paper or report)\n", style="bold")
+            x.append("\nartifacts  (o opens the run folder, b opens the paper or report)\n",
+                     style="bold")
             for label, p in arts:
                 x.append(f"  {label:<9} {p}\n", style="dim")
+        else:
+            x.append("\nno files on disk for this result (not a completed run)\n", style="dim")
         self.result_artifacts = arts
         d.update(x)
 
@@ -354,12 +492,24 @@ class FleetApp(App):
             self._render_result_detail()
         else:
             self._render_detail()
+        self.refresh_bindings()
+
+    @property
+    def _tab(self) -> str:
+        try:
+            return self.query_one("#tabs", TabbedContent).active
+        except Exception:
+            return "tab_fleet"
 
     def action_next_tab(self) -> None:
         tabs = self.query_one("#tabs", TabbedContent)
         tabs.active = "tab_results" if tabs.active == "tab_fleet" else "tab_fleet"
         if tabs.active == "tab_results":
             self._render_results(force=True)
+        self.refresh_bindings()
+
+    def on_tabbed_content_tab_activated(self, event) -> None:
+        self.refresh_bindings()
 
     @property
     def _ask_open(self) -> bool:
@@ -369,10 +519,23 @@ class FleetApp(App):
             return False
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        """Keys that only make sense with the ask box open are hidden from
-        the footer otherwise; a footer full of keys that do nothing is noise."""
-        if action in ("answer_grow", "answer_shrink", "close_ask"):
+        """Which keys the footer lists, per tab. The fleet tab controls the
+        fleet; the results tab is a viewer of saved logs and has no pause,
+        kill or scale -- a footer full of keys that do nothing is noise, and
+        a kill key on a page of old results is a trap. Opening a result's
+        files needs files: only a completed run has them."""
+        if action in ASK_ACTIONS:
             return self._ask_open
+        if action in FLEET_ACTIONS:
+            if self._tab != "tab_fleet":
+                return False
+            return True if self._alive else None       # shown dimmed when dead
+        if action in RESULT_ACTIONS:
+            if self._tab != "tab_results":
+                return False
+            kinds = {k for k, _ in self.result_artifacts}
+            need = {"run"} if action == "open_artifact" else {"paper", "report"}
+            return bool(kinds & need)
         return True
 
     def action_ask(self) -> None:
@@ -400,12 +563,18 @@ class FleetApp(App):
         self._set_answer(f"you: {q}\n\nthinking…", "dim")
         self._answer(q)
 
+    def _live_view(self):
+        """The snapshot for the ask context: the store's while the daemon is
+        alive, nothing once it is not -- a finished run is answered from its
+        directory, which is what outlives the store."""
+        return self.view if self._alive else None
+
     @work(thread=True, exclusive=True, group="ask")
     def _answer(self, question: str) -> None:
         try:
             if self._asker is None:
                 from ..ask import Asker
-                self._asker = Asker(self._root())
+                self._asker = Asker(self._root(), view_source=self._live_view)
             text = self._asker.ask(question)
             u = self._asker.last_usage
             foot = (f"\n\n[{u.get('input', 0):,} in, {u.get('output', 0):,} out, "
@@ -431,30 +600,10 @@ class FleetApp(App):
     def action_answer_shrink(self) -> None:
         self._resize_answer(-4)
 
-    def _settle_pending(self) -> None:
-        """Drop a pending mark once the fleet's view reflects the command.
-        Pause is cooperative, so `paused` appears at once but the agent
-        finishes its current call first; the mark says "sent", the status
-        says "applied", and neither should outlive the other by more than
-        one refresh."""
-        if not self.view:
-            return
-        status = {a.agent_id: a.status for a in self.view.agents}
-        done = {"pause": ("paused", "done", "failed"), "resume": ("thinking", "evaluating",
-                                                                   "queued", "idle", "done"),
-                "kill": ("done", "failed", "stopping")}
-        for agent_id, kind in list(self._pending.items()):
-            if status.get(agent_id) in done.get(kind, ()):
-                self._pending.pop(agent_id, None)
-        # scale/stop are fleet-level; they never show per agent
-        self._pending.pop("", None)
-
     def _artifacts_for(self, r) -> list[tuple[str, str]]:
         """Everything on disk behind one result: the run directory of its
         attempts, the report and plots, the paper if written, its trace, and
         the profile if captured. Paths, so a person can open them."""
-        import pathlib
-
         from ..paper import find_papers
 
         root = self._root()
@@ -519,25 +668,25 @@ class FleetApp(App):
             subprocess.Popen([opener, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def action_open_artifact(self) -> None:
-        arts = getattr(self, "result_artifacts", [])
-        run = next((p for k, p in arts if k == "run"), None)
+        run = next((p for k, p in self.result_artifacts if k == "run"), None)
         if run:
             self._open(run, kind="dir")
             self.notify(f"opened {run} in the IDE", timeout=2)
 
-    def on_data_table_row_selected(self, event) -> None:
-        if getattr(event.data_table, "id", "") != "results":
-            return
-        arts = getattr(self, "result_artifacts", [])
+    def action_open_report(self) -> None:
+        arts = self.result_artifacts
         target = next((p for k, p in arts if k == "paper"), None) or \
             next((p for k, p in arts if k == "report"), None)
         if target:
             self._open(target, kind="browser")
             self.notify(f"opened {target} in the browser", timeout=2)
 
-    def action_open_timeline(self) -> None:
-        import pathlib
+    def on_data_table_row_selected(self, event) -> None:
+        """Enter on a result row does what `b` does."""
+        if getattr(event.data_table, "id", "") == "results":
+            self.action_open_report()
 
+    def action_open_timeline(self) -> None:
         from ..timeline import render_html
 
         root = self._root()
@@ -549,36 +698,11 @@ class FleetApp(App):
         self.notify(f"opened {p}", timeout=2)
 
     def _recent_calls(self, agent_id: str, k: int = 5) -> list[dict]:
-        """The agent's last k model calls from its call log, summarised.
-        Read from disk, throttled by the caller's refresh; a running call
-        shows its messages so far."""
-        import json
-        import pathlib
+        """The agent's last k model calls, from `results.recent_calls`."""
+        from ..results import recent_calls
 
         root = self._root()
-        if not root:
-            return []
-        d = pathlib.Path(root) / agent_id / "calls"
-        if not d.is_dir():
-            return []
-        out = []
-        for f in sorted(d.glob("*.jsonl"))[-k:]:
-            try:
-                rows = [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
-            except (OSError, ValueError):
-                continue
-            msgs = [r for r in rows if r.get("type") == "assistant"]
-            tools: dict[str, int] = {}
-            for r in msgs:
-                for name in r.get("tools") or ():
-                    tools[name] = tools.get(name, 0) + 1
-            span = (rows[-1]["ts"] - rows[0]["ts"]) / 60 if len(rows) > 1 else 0.0
-            out.append({"phase": f.stem.split("-")[0], "min": span, "msgs": len(msgs),
-                        "out": sum(r.get("output", 0) for r in msgs),
-                        "cache": sum(r.get("cache_read", 0) for r in msgs),
-                        "tools": " ".join(f"{n}x{c}" for n, c in
-                                          sorted(tools.items(), key=lambda kv: -kv[1])[:3])})
-        return out
+        return recent_calls(root, agent_id, k=k) if root else []
 
     def _selected(self):
         if not self.view or not self.view.agents:
@@ -591,14 +715,28 @@ class FleetApp(App):
 
     # ── commands ─────────────────────────────────────────────────────────
     def _send(self, kind: str, agent_id: str = "", value: str = "") -> None:
+        """Write a command row, or refuse. A row for a daemon that is gone
+        is not "pending", it is a mark that never clears; say so instead."""
         if self.view is None:
             return
-        self.store.send_to(self.view.session_id,
-                           Command(kind=kind, agent_id=agent_id, value=value))
+        what = f"{kind} {agent_id or value}".strip()
+        if not self._alive:
+            self.notify(f"{what}: not sent, the daemon is {self.view.phase}",
+                        severity="warning", timeout=4)
+            return
+        cmd = Command(kind=kind, agent_id=agent_id, value=value)
+        self.store.send_to(self.view.session_id, cmd)
+        self._awaiting[cmd.id] = what
+        # Show the mark now rather than after the next refresh; the store
+        # will confirm it on the next read.
         if agent_id:
-            self._pending[agent_id] = kind
-            self._render_detail()
-        self.notify(f"{kind} {agent_id or value}".strip(), timeout=2)
+            self._pending.setdefault(agent_id, cmd)
+        else:
+            self._pending_fleet.append(cmd)
+        self._render_summary()
+        self._render_table()
+        self._render_detail()
+        self.notify(what, timeout=2)
 
     def action_pause(self) -> None:
         a = self._selected()

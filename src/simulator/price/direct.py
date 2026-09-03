@@ -3,13 +3,13 @@
 The objective is an OpenRouter listing price, not a latency number. Getting
 there needs three things the harness can measure and one it cannot:
 
-  1. **The SLO frontier.** The largest offered load that still meets the
-     marketplace's latency targets. Measured (`sweep_concurrency`).
+  1. **The SLO frontier.** The largest concurrency that still meets the
+     marketplace's latency targets. Measured (`runner.modal_runner.sweep`).
   2. **Phase-split GPU time.** How many GPU-seconds prefill and decode each
      consume, read straight off SGLang's CUDA-event device timer. Measured.
-     There is no regression here any more: splitting input cost into cached
-     and uncached is needed only to re-blend at a competitor's hit rate, and
-     caching well *is* serving well, so we price at our own.
+     Nothing is fitted: splitting input cost into cached and uncached is
+     needed only to re-blend at a competitor's hit rate, and caching well
+     *is* serving well, so we price at our own.
   3. **A cost basis.** Dollars per GPU-hour. *Not* measured — an input.
   4. **Utilisation.** What fraction of paid-for capacity carries traffic. Not
      measurable here at all; it depends on how much traffic the marketplace
@@ -61,10 +61,6 @@ class DirectPrice:
     utilization: float
     margin: float
 
-    def bill_per_request(self, in_tok: float, out_tok: float) -> float:
-        return (self.effective_in_per_m * in_tok
-                + self.out_per_m * out_tok) / 1e6
-
 
 def price_direct(gpu_seconds_input: float, gpu_seconds_output: float,
                  input_tokens: float, output_tokens: float,
@@ -86,8 +82,7 @@ def price_direct(gpu_seconds_input: float, gpu_seconds_output: float,
 
         effective input price = input GPU-seconds / input tokens x rate / util
 
-    is directly measurable. No mixes, no NNLS, no identifiability gate, and no
-    per-sequence-versus-per-context confound.
+    is directly measurable.
 
     The price of that simplicity: the hit rate becomes load-bearing, so it has
     to be earned on representative traffic rather than normalised away.
@@ -136,13 +131,10 @@ def gpu_seconds_per_request(gpu_seconds_input: float, gpu_seconds_output: float,
 def usable(level: dict, n_gpu: int = 1) -> tuple[bool, str]:
     """Can this level be priced at all? Returns (ok, reason-if-not).
 
-    Five earlier attempts at per-token cost all produced *plausible-looking*
-    numbers from unusable data (`docs/methodology.md` §7), which is worse
-    than producing none. An automated caller cannot sanity-check a price, so
-    refusing has to be the default rather than a warning.
-
-    The direct method's failure modes are different from the regression's, so
-    the checks are too:
+    Earlier cost models produced *plausible-looking* numbers from unusable
+    data (`docs/methodology.md` §7), which is worse than producing none. An
+    automated caller cannot sanity-check a price, so refusing has to be the
+    default rather than a warning. The checks:
 
       * the device timer was off, so the phase split is missing entirely;
       * forward time exceeds wall time x n_gpu, which is physically impossible

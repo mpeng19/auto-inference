@@ -54,22 +54,23 @@ class TraceStore:
             self._names[name] = nid
         return nid
 
-    def track_id(self, pid, tid, name: str = "", kind: str = "") -> int:
+    def track_id(self, pid, tid, kind: str = "") -> int:
+        """The track for (pid, tid), created on first sight. `kind` is set
+        only at creation; a label comes later via `set_track_label`."""
         key = (pid, str(tid))
         t = self._tracks.get(key)
         if t is None:
             cur = self.conn.execute("INSERT INTO tracks(pid, tid, name, kind) VALUES (?,?,?,?)",
-                                    (pid, str(tid), name, kind))
+                                    (pid, str(tid), "", kind))
             t = cur.lastrowid
             self._tracks[key] = t
         return t
 
-    def set_track_label(self, pid, tid, name: str | None = None, kind: str | None = None) -> None:
+    def set_track_label(self, pid, tid, name: str) -> None:
+        """Name a track from a `thread_name` metadata event; first name wins."""
         t = self.track_id(pid, tid)
         if name:
             self.conn.execute("UPDATE tracks SET name=? WHERE id=? AND (name='' OR name IS NULL)", (name, t))
-        if kind:
-            self.conn.execute("UPDATE tracks SET kind=? WHERE id=?", (kind, t))
 
     def add_spans(self, rows: list[tuple]) -> None:
         # rows: (name_id, track_id, ts, dur, cat, corr)

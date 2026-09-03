@@ -97,9 +97,19 @@ def test_overlap_measures_comm_against_compute(store):
 
 
 def test_between_reports_latency_from_a_to_the_next_b(store):
-    out = Q.between(store, "fwd_launch*", "attn*")
-    if out:
-        assert out[0]["summary"]["latency_mean_us"] >= 0
+    """Every `attn_qkv` span (CPU op and its kernel) is followed by a
+    `kernel_attn_core`, so the query must pair all of them but the last
+    kernel of the trace, which has no successor.
+
+    Pinned with names the fixture actually contains: this test used to ask
+    for `fwd_launch*`, which matches nothing, and passed by asserting nothing.
+    """
+    out = Q.between(store, "attn_qkv", "kernel_attn_core")
+    assert out, "no pairs found"
+    head, rows = out[0]["summary"], out[1:]
+    assert head["instances"] == 39                    # 20 steps x 2 spans, minus the last kernel
+    assert all(r["latency_us"] >= 0 for r in rows)
+    assert rows == sorted(rows, key=lambda r: -r["latency_us"])
 
 
 def test_render_writes_a_window(store, tmp_path):

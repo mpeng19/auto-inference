@@ -1,10 +1,14 @@
 """tracedb CLI: ingest a trace once, then query it cheaply.
 
-  tracedb ingest trace.json --db t.sqlite
-  tracedb summary --db t.sqlite
-  tracedb ops 'attn*' | gaps 'attn_out' 'mlp_in' --min-gap 100 | between a b
-  tracedb overlap 'nccl*' 'gemm*' | steps | slowest '*' -k 10
-  tracedb render --t0 5000 --t1 20000 --out win.png
+  tracedb --db t.sqlite ingest trace.json.gz
+  tracedb --db t.sqlite summary
+  tracedb --db t.sqlite ops 'attn*' | gaps 'attn_out' 'mlp_in' --min-gap 100 | between a b
+  tracedb --db t.sqlite overlap 'nccl*' 'gemm*' | steps | slowest '*' -k 10
+  tracedb --db t.sqlite render --t0 5000 --t1 20000 --out win.png
+
+`--db` goes before the subcommand: it belongs to the top-level parser, and
+argparse rejects it after one ("unrecognized arguments"). The examples here
+used to show it last, which is the form that does not work.
 """
 from __future__ import annotations
 

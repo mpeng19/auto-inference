@@ -62,7 +62,12 @@ async def test_it_renders_every_agent(store):
 
 
 async def test_keys_issue_commands_the_fleet_will_see(store):
-    """The TUI cannot call the fleet -- it is another process. It writes rows."""
+    """The TUI cannot call the fleet -- it is another process. It writes rows.
+
+    The mark stays until the fleet *acknowledges* the row, not until the
+    status happens to look right: a status is the agent's word, the
+    acknowledgement is the fleet's, and only the second one means the
+    command landed."""
     app = FleetApp(store, "demo")
     async with app.run_test(size=(120, 26)) as pilot:
         await pilot.pause()
@@ -72,16 +77,98 @@ async def test_keys_issue_commands_the_fleet_will_see(store):
         cmds = store.take_commands("demo")
         assert [(c.kind, c.agent_id) for c in cmds] == [("pause", "a00")]
         assert "pause pending" in app.detail_text
-        # the fleet applies it and publishes; the mark must go away
+        # A snapshot that already says "paused" is not enough on its own...
         v = store.read("demo")
         from dataclasses import replace
         agents = tuple(replace(a, status="paused") if a.agent_id == "a00" else a for a in v.agents)
         store.publish(replace(v, agents=agents))
-        for _ in range(20):                          # the view refreshes once a second
+        await pilot.pause(0.7)
+        assert "pause pending" in app.detail_text
+        # ...the fleet's acknowledgement is what clears the mark.
+        store.acknowledge(cmds[0].id, "paused")
+        for _ in range(20):
             await pilot.pause(0.25)
             if "pending" not in app.detail_text:
                 break
         assert "pending" not in app.detail_text and "paused" in app.detail_text
+        assert not app._awaiting
+
+
+async def test_a_pending_mark_survives_a_restart_and_a_dead_daemon_is_undeliverable(store):
+    """Pending is a property of the store row, so a fresh dashboard shows
+    the marks the last one left; and once the daemon is gone those rows can
+    never be applied, which is a different word from "pending"."""
+    from harness.contracts.session import Command
+
+    store.send_to("demo", Command(kind="kill", agent_id="a01"))
+    app = FleetApp(store, "demo")
+    async with app.run_test(size=(120, 26)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        app.query_one("#table").move_cursor(row=1)
+        await pilot.pause()
+        assert "kill pending" in app.detail_text
+    # the daemon dies: same rows, different verdict
+    from dataclasses import replace
+    v = store.read("demo")
+    store.publish(replace(v, pid=999_999_999))
+    app = FleetApp(store, "demo")
+    async with app.run_test(size=(120, 26)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        app.query_one("#table").move_cursor(row=1)
+        await pilot.pause()
+        assert "kill undeliverable" in app.detail_text
+        # and nothing new is written for a daemon that cannot read it
+        await pilot.press("p")
+        await pilot.pause()
+        assert [c.kind for c in store.take_commands("demo")] == ["kill"]
+        assert app.check_action("pause", ()) is None      # listed, but dimmed
+
+
+async def test_the_results_tab_is_a_viewer_with_its_own_keys(store):
+    """No pause/kill/scale on the results tab: it is a page of saved logs.
+    Its own keys open files, so they need a completed run to open."""
+    app = FleetApp(store, "demo")
+    async with app.run_test(size=(120, 26)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        assert app.check_action("pause", ()) is True
+        assert app.check_action("open_artifact", ()) is False
+        await pilot.press("tab")
+        await pilot.pause()
+        for act in ("pause", "resume", "kill_agent", "scale_up", "scale_down", "stop_fleet"):
+            assert app.check_action(act, ()) is False, act
+        # no run directory behind any result here: nothing to open
+        assert app.check_action("open_artifact", ()) is False
+        assert app.check_action("open_report", ()) is False
+        for key in ("p", "k", "plus", "s"):
+            await pilot.press(key)
+        await pilot.pause()
+        assert store.take_commands("demo") == ()
+
+
+async def test_header_shows_modal_spend_and_the_baseline(store, tmp_path):
+    """Dollars on the screen are Modal; the baseline every delta is against
+    is on the fleet tab, read from the fleet's own config."""
+    from dataclasses import replace
+
+    root = tmp_path / "agents" / "demo"
+    root.mkdir(parents=True)
+    (root / "fleet.json").write_text(json.dumps({
+        "baseline": {"bill_per_1k": 14.96, "screen": {"bill_per_1k": 17.52},
+                     "quality": {"gsm8k": 0.69}}}))
+    store.publish(replace(store.read("demo"), root=str(root)))
+    app = FleetApp(store, "demo")
+    async with app.run_test(size=(120, 26)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        assert "Modal spend $12.50 / $200.00" in app.summary_text
+        assert "full $14.96/1k" in app.baseline_text
+        assert "screen $17.52/1k" in app.baseline_text and "gsm8k 69%" in app.baseline_text
+        assert "Modal spend\n$8.20" in app.detail_text
+        assert "cache write 4k" in app.detail_text
+        assert "$" not in app.detail_text.split("Claude tokens")[1]
 
 
 async def test_scaling_keys_target_the_session_not_an_agent(store):

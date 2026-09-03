@@ -1,10 +1,9 @@
 """Every product module must import cleanly.
 
-Not busywork. Splitting `bench.py` into `measure/server.py` silently dropped
-its module-level `aiohttp`, `os`, `time` and `asyncio` imports, and moving
-`rank_vs_market` into `price/market.py` dropped `effective_in`. Both would have
-failed at run time -- `wait_until_ready` is the *first* thing a sweep calls,
-about six GPU-minutes into a run that costs real money.
+Not busywork. Two earlier module moves silently dropped imports the moved
+code depended on, and both would have failed at run time -- `wait_until_ready`
+is the *first* thing a sweep calls, about six GPU-minutes into a run that
+costs real money.
 
 Nothing else in the suite exercises the server lifecycle, because doing so
 needs a server. This is the cheap guard that covers the gap.

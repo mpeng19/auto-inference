@@ -11,41 +11,33 @@ Claude Code a workspace and a brief and let it work.
            --permission-mode acceptEdits --allowedTools "Bash(harness tool:*)" ...
            (cwd = the agent's candidate tree)
 
-Five choices worth stating.
+Four choices worth stating.
 
 **The subscription, not the API.** `claude` billed through a Max/Team plan is
-the cheap way to run ten agents for hours; the same traffic over the API is
-not. That is why this shells out rather than calling the SDK with a key -- and
-why it **strips `ANTHROPIC_API_KEY` from the subprocess environment**. Claude
-Code prefers an API key over the subscription when both are present, so simply
-inheriting the parent environment silently bills the wrong account. On this
-machine that key is set for unrelated reasons, and the first real fleet run
-printed "claude.ai connectors are disabled because ANTHROPIC_API_KEY ... takes
-precedence" before every call. Set `use_api_key=True` to opt in deliberately.
+the cheap way to run several agents for hours; the same traffic over the API
+is not. That is why this shells out rather than calling the SDK with a key --
+and why it **strips `ANTHROPIC_API_KEY` from the subprocess environment**.
+Claude Code prefers an API key over the subscription when both are present, so
+inheriting the parent environment silently bills the wrong account: the only
+sign is a "claude.ai connectors are disabled because ANTHROPIC_API_KEY ...
+takes precedence" line before each call. Set `use_api_key=True` to opt in
+deliberately.
 
 **The tools have to be allowed, or the agent guesses.** `acceptEdits`
 auto-approves edits and a handful of filesystem commands; every other Bash
 command still asks, and in headless mode there is nobody to ask, so it is
-refused. Night-3 write-ups were full of "This command needs your approval to
-run (it's a harness tool...)" -- the agents never ran `harness tool preflight`
-or `recall` once and reasoned from memory instead. `allowed_tools` is passed
-as `--allowedTools`, which is *additive* on top of the permission mode: it
-grants the harness tools without turning the run into `--dangerously-skip-
-permissions`.
+refused. With only the permission mode set, agents never ran `harness tool
+preflight` or `recall` once and reasoned from memory instead, reporting the
+refusal as a choice. `allowed_tools` is passed as `--allowedTools`, which is
+*additive* on top of the permission mode: it grants the harness tools without
+turning the run into `--dangerously-skip-permissions`.
 
-**Model per phase, not per fleet.** Seeding an idea and reviewing a diff are
-short; writing the diff is the long, expensive part. `model` picks the default
-and `seed_model` can be cheaper. Prefer `opus` or `sonnet` here -- a reasoning-
-heavy frontier model spends its budget thinking about a task whose difficulty
-lives in the codebase, not in the prompt.
-
-**Two modes, because "smallest edit" and "build a kernel" are different jobs.**
-`mode="tune"` asks for the smallest edit that tests a hypothesis, and on
-scheduler constants that produced fifteen one-line changes all inside the
-measurement noise. `mode="build"` takes an idea that already has a mechanism,
-targets, an expected gain and its risks written down, and asks for the
-kernel-scale change: a design note first, a multi-file diff, and a correctness
-and micro-benchmark run on a real GPU before a sweep is spent.
+**The job is a kernel-scale build, not a tweak.** The idea comes from the bank
+with a mechanism, targets, an expected gain and its risks written down, and
+the prompt asks for the change at that scale: a design note first, a
+multi-file diff, and a correctness and micro-benchmark run on a real GPU
+before a sweep is spent. Asking for "the smallest edit that tests the
+hypothesis" produced one-line constant changes inside the measurement noise.
 
 **Edits happen in the workspace, and we read the diff back.** We do not ask for
 a patch in the response. Claude Code is good at editing files and bad at
@@ -72,7 +64,6 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Literal
 
 from ..contracts.agent import Attempt, Idea
 from ..contracts.memory import Brief
@@ -80,23 +71,13 @@ from ..contracts.session import TokenUse
 from ..profile import MCP_SERVER_NAME
 from .workspace import Workspace
 
-# Files an agent is allowed to start from. Not a hard limit -- it may edit
-# anything under `srt/` -- but a menu, because "here are 1602 modules" is not a
-# useful opening position and the ones that matter for serving cost are few.
+# Files an agent starts from when its idea names none. Not a hard limit -- it
+# may edit anything under `srt/` -- but a menu, because "here are 1602
+# modules" is not a useful opening position, and these are where a
+# kernel-scale change lands. Every path is checked against the pinned wheel
+# (`test_build_targets_exist_in_the_pinned_wheel`): a menu of paths that do
+# not exist costs the agent its first ten minutes discovering that.
 DEFAULT_TARGETS = (
-    "srt/managers/schedule_policy.py",
-    "srt/managers/schedule_batch.py",
-    "srt/managers/scheduler.py",
-    "srt/mem_cache/radix_cache.py",
-    "srt/mem_cache/memory_pool.py",
-)
-
-# Where a kernel-scale change actually lands. Five scheduler files can only be
-# tuned; these can be rewritten. Every path is checked against the pinned
-# wheel (`test_build_targets_exist_in_stock`) because a menu of paths that do
-# not exist is worse than no menu -- the agent spends its first ten minutes
-# discovering that.
-DEFAULT_BUILD_TARGETS = (
     "srt/layers/attention/triton_backend.py",
     "srt/layers/attention/flashinfer_backend.py",
     "srt/layers/attention/flashattention_backend.py",
@@ -111,9 +92,9 @@ DEFAULT_BUILD_TARGETS = (
     "srt/speculative/spec_info.py",
 )
 
-# A build turn writes a kernel, runs it on an H100 and scores equivalence.
-# Fifteen minutes is a tuning budget; this is the other kind of work.
-DEFAULT_BUILD_TIMEOUT_S = 2 * 3600
+# An edit writes a kernel, runs it on an H100 and scores equivalence; two
+# hours is the size of that job.
+DEFAULT_EDIT_TIMEOUT_S = 2 * 3600
 
 # Rules for `--allowedTools`. Two forms of Bash prefix match are documented and
 # equivalent -- `Bash(cmd:*)` and `Bash(cmd *)` -- and both are listed because
@@ -127,21 +108,18 @@ DEFAULT_ALLOWED_TOOLS = (
     "Bash(uv run harness tool:*)",
     "Bash(harness tool *)",
     "Bash(uv run harness tool *)",
-    # Built in parallel with this file: `gpu-run` puts a script on an H100
-    # inside the agent's own stack (~$1, 3-8 min) and `equivalence` teacher-
-    # force-scores the candidate against stock (~$1, ~6 min). Listed
-    # explicitly as well as under the `harness tool` prefixes above, so the
-    # rules survive someone narrowing that prefix.
+    # The GPU workbench, listed explicitly as well as under the `harness tool`
+    # prefixes above, so the rules survive someone narrowing that prefix.
     "Bash(harness tool gpu-run:*)",
     "Bash(harness tool equivalence:*)",
     "Bash(harness tool ncu:*)",
     "Bash(python -c:*)",
     "Bash(python3 -c:*)",
     "Bash(ruff:*)",
-    # Reading and running inside its own copy of the package. The first
-    # build-mode agent was refused eight commands in one call and gave up
-    # before the workbench; a sandboxed copy of sglang is not worth guarding
-    # command by command.
+    # Reading and running inside its own copy of the package. Without these
+    # an agent was refused eight commands in one call and gave up before the
+    # workbench; a sandboxed copy of sglang is not worth guarding command by
+    # command.
     "Bash(python:*)", "Bash(python3:*)", "Bash(harness:*)", "Bash(uv run harness:*)",
     "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
     "Bash(grep:*)", "Bash(rg:*)", "Bash(find:*)", "Bash(sed -n:*)", "Bash(diff:*)",
@@ -181,10 +159,10 @@ class CallStats:
     duration_api_ms: int = 0
     num_turns: int = 0
     is_error: bool = False
-    # How many tool calls the permission system refused. Non-zero is the
-    # signature of the night-3 bug -- an agent that "decided not to run
-    # preflight" was in fact told it could not -- and it is invisible in the
-    # write-up, which reports the refusal as if it were a choice.
+    # How many tool calls the permission system refused. An agent that
+    # "decided not to run preflight" was in fact told it could not, and the
+    # write-up reports the refusal as if it were a choice; this is the only
+    # place the difference shows.
     denials: int = 0
     returncode: int = 0
     cancelled: bool = False
@@ -207,13 +185,14 @@ class CallStats:
 class ClaudeCodeProposer:
     """Runs Claude Code in the agent's workspace and reads back the diff."""
 
+    # `claude --model`. Prefer opus or sonnet: a reasoning-heavy frontier
+    # model spends its budget thinking about a task whose difficulty lives in
+    # the codebase, not in the prompt.
     model: str = "sonnet"
-    seed_model: str = ""            # defaults to `model`
+    # The study and paper calls; an edit gets `DEFAULT_EDIT_TIMEOUT_S`
+    # unless `edit_timeout_s` says otherwise.
     timeout_s: float = 900.0
-    # 0 means "derive from the mode": a tuning edit is a 15-minute job and a
-    # build is a two-hour one, and one default cannot be both.
     edit_timeout_s: float = 0.0
-    mode: Literal["tune", "build"] = "tune"
     targets: tuple[str, ...] = DEFAULT_TARGETS
     binary: str = "claude"
     permission_mode: str = "acceptEdits"
@@ -236,7 +215,6 @@ class ClaudeCodeProposer:
     # The skill bank, rendered: what earlier runs established. A callable
     # for the same reason as `session_tools`.
     session_skills: object | None = None
-    last_usage: TokenUse = field(default_factory=TokenUse)
     # Where per-call event logs go (`<agent>/calls/<phase>-<ts>.jsonl`);
     # set by the loop's workspace before a call. Empty: no log.
     calls_dir: str = ""
@@ -253,12 +231,6 @@ class ClaudeCodeProposer:
     # SIGTERM, then SIGKILL. Claude Code flushes its transcript on TERM; a
     # process still alive after this was not going to flush anything.
     KILL_GRACE_S = 5.0
-
-    def __post_init__(self):
-        # Build mode starts from the kernels, not the scheduler -- but only
-        # when the caller left the menu alone. An explicit list always wins.
-        if self.mode == "build" and self.targets == DEFAULT_TARGETS:
-            self.targets = DEFAULT_BUILD_TARGETS
 
     # ── invocation ───────────────────────────────────────────────────────
     def available(self) -> bool:
@@ -366,8 +338,7 @@ class ClaudeCodeProposer:
                 *(("--allowedTools", *self._tools()) if self._tools() else ())]
 
     def _edit_timeout(self) -> float:
-        return self.edit_timeout_s or (
-            DEFAULT_BUILD_TIMEOUT_S if self.mode == "build" else self.timeout_s)
+        return self.edit_timeout_s or DEFAULT_EDIT_TIMEOUT_S
 
     # Waits between retries of a call the API refused for its own reasons.
     # build-4, 09:30 on 2026-09-03: opus returned 529 Overloaded for an hour,
@@ -466,7 +437,6 @@ class ClaudeCodeProposer:
         if not cancelled and proc.returncode:
             raise RuntimeError(
                 f"claude exited {proc.returncode}: {(err or out)[-800:]}")
-        self.last_usage = use
         if self.on_tokens is not None:
             # The stream already reported each message as it landed; report
             # only what the envelope adds, so the total matches the envelope
@@ -539,16 +509,8 @@ class ClaudeCodeProposer:
                 time.sleep(0.05)
 
     # ── the Proposer surface ─────────────────────────────────────────────
-    def seed(self, live_ideas: tuple[Idea, ...], brief: Brief) -> Idea:
-        taken = "\n".join(f"  - {i.title}: {i.hypothesis}" for i in live_ideas)
-        prompt = _SEED_PROMPT.format(
-            brief=brief.text or "(nothing on record yet)",
-            taken=taken or "  (none)",
-            targets="\n".join(f"  - {t}" for t in self.targets))
-        text, _ = self._run(prompt, cwd=os.getcwd(), phase="seed",
-                            model=self.seed_model or self.model)
-        return _parse_idea(text, self.targets)
-
+    # No `seed`: ideas come from the bank (the daemon refuses to run without
+    # one), so this proposer never invents its own.
     def edit(self, ws: Workspace, idea: Idea, brief: Brief, attempt: int,
              history: tuple[Attempt, ...]) -> str:
         # Give it real files to open. Without this the first thing it does is
@@ -564,8 +526,7 @@ class ClaudeCodeProposer:
             ws.materialise(*files)
         else:
             files = tuple(present)
-        template = _BUILD_PROMPT if self.mode == "build" else _EDIT_PROMPT
-        prompt = template.format(
+        prompt = _EDIT_PROMPT.format(
             hypothesis=idea.hypothesis, title=idea.title, attempt=attempt,
             design=_indent(idea.design) or "    (the idea bank recorded none; "
                                            "work it out and say so in DESIGN.md)",
@@ -637,8 +598,7 @@ class ClaudeCodeProposer:
         that point is time spent answering a question that has been answered,
         so the call is killed and whatever it had written is kept.
         """
-        template = _BUILD_STUDY_PROMPT if self.mode == "build" else _STUDY_PROMPT
-        prompt = template.format(
+        prompt = _STUDY_PROMPT.format(
             hypothesis=idea.hypothesis, brief=self._brief_text(brief, "(nothing yet)"),
             history=_history(history))
         try:
@@ -808,105 +768,7 @@ class _CallAccounting:
                 self._fh.close()
 
 
-def _parse_idea(text: str, targets: tuple[str, ...]) -> Idea:
-    """Take the first fenced JSON object; fall back to the raw text as a title."""
-    import re
-    m = re.search(r"\{.*\}", text, re.S)
-    if m:
-        try:
-            d = json.loads(m.group(0))
-            return Idea(title=str(d.get("title", ""))[:80],
-                        hypothesis=str(d.get("hypothesis", ""))[:400],
-                        design=str(d.get("design", ""))[:4000],
-                        targets=tuple(d.get("targets") or targets))
-        except json.JSONDecodeError:
-            pass
-    first = text.strip().splitlines()[0] if text.strip() else "unnamed idea"
-    return Idea(title=first[:80], hypothesis=text.strip()[:400] or first,
-                targets=targets)
-
-
-_SEED_PROMPT = """You are one agent in a fleet improving SGLang's serving cost.
-
-The fleet is measured on ONE number: dollars per 1,000 marketplace requests,
-at 20,583 input / 2,076 output tokens each, subject to latency SLOs. Lower is
-better. Output tokens are ~95% of that bill, so decode throughput per GPU is
-what matters; prefill is nearly free by comparison.
-
-What the fleet already knows:
-{brief}
-
-Ideas other agents are working on RIGHT NOW (do not duplicate these):
-{taken}
-
-Files most likely to matter:
-{targets}
-
-Propose ONE idea nobody is working on. Reply with a single JSON object and
-nothing else:
-{{"title": "3-5 words", "hypothesis": "X will lower cost per output token because Y",
-  "targets": ["srt/..."]}}"""
-
-_EDIT_PROMPT = """You are improving SGLang's serving cost. This directory is a
-copy of SGLang's `sglang/` package; edit the files here directly.
-
-Your idea: {title}
-Hypothesis: {hypothesis}
-This is attempt {attempt}.
-
-What the fleet already knows (read this before proposing something tried):
-{brief}
-
-Your previous attempts on this idea:
-{history}
-
-Files you started with:
-{files}
-
-Tools available in your shell (use them; they are far cheaper than a sweep):
-  harness tool recall "<what you are about to try>"
-      what the fleet has already tried, including what failed and why
-  harness tool roofline --context 20583 --batch 12
-      predicted decode step time and $/M for a batch, from first principles
-      and from what this stack actually measures. The gap is the headroom.
-  harness tool preflight --workspace .
-      parses your edit and checks for undefined names. Run this before you
-      finish; a NameError costs six GPU-minutes to discover otherwise.
-
-These are allowed to run without asking. If a command is refused, say so in
-your reply instead of guessing at what it would have printed.
-
-**Accuracy is checked, not assumed.** Every evaluation scores GSM8K on an
-idle server before load. A change that makes the model faster but answers
-worse is rejected outright, however good the price looks -- so do not touch
-sampling, numerics, KV precision or eviction in ways that could change what
-the model says, unless testing exactly that is the hypothesis.
-
-**This directory is the package root.** `srt/` is right here; new files go
-under it (e.g. `srt/layers/attention/my_kernel.py`) or beside it. Do not
-create a `sglang/` directory here, and run tools as `harness tool <name>
---workspace .` from this directory.
-
-**The launch line is yours too.** Write `serving.json` in this directory to
-change how the server is started for your evaluation:
-  {{"serving": {{"chunked_prefill_size": 16384, "mem_fraction_static": 0.90,
-               "max_running_requests": 64, "schedule_policy": "lpm",
-               "extra_args": ["--flag", "value"]}},
-   "env": {{"SGLANG_SOME_VAR": "1"}}}}
-Any ServingConfig field except model, gpu, n_gpu and enable_metrics. Stock's
-launch line is the baseline, so a win must beat stock's deployment, not just
-its code. `harness tool preflight` validates the file.
-
-Make the smallest edit that tests the hypothesis. Constraints:
-  - Python must parse; a syntax error wastes a GPU sweep.
-  - Do not add imports of packages SGLang does not already depend on.
-  - Do not change public function signatures other modules call.
-  - Prefer one file. A diff spanning five files cannot be attributed.
-
-When done, reply with 2-4 sentences: what you changed and the mechanism by
-which it should lower cost per output token."""
-
-_BUILD_PROMPT = """You are building a kernel-scale change to SGLang. This
+_EDIT_PROMPT = """You are building a kernel-scale change to SGLang. This
 directory is a copy of SGLang's `sglang/` package; edit the files here
 directly. This is not a tuning task -- constant tweaks land inside the
 measurement noise and are not worth a sweep.
@@ -1001,23 +863,7 @@ When done, reply with 4-8 sentences: the mechanism you implemented, and the
 numbers off your workbench -- micro-benchmark speedup, the correctness error
 you measured against stock, and what equivalence reported."""
 
-_STUDY_PROMPT = """A GPU evaluation of your current diff is running; it will
-take 25-60 minutes. Do NOT edit any files -- the diff under test is frozen.
-
-Your hypothesis: {hypothesis}
-What the fleet knows:
-{brief}
-Your attempts so far:
-{history}
-
-Spend this time reading the code around your change and answer, in under 200
-words: if this attempt shows no improvement, what is the single most likely
-reason, and what would you change next?
-
-You may be interrupted the moment the result lands. Write the answer as you
-go rather than saving it for the end."""
-
-_BUILD_STUDY_PROMPT = """A GPU evaluation of your current diff is running; it
+_STUDY_PROMPT = """A GPU evaluation of your current diff is running; it
 will take 25-60 minutes. Do NOT edit any files -- the diff under test is
 frozen, and the sweep is already paid for.
 

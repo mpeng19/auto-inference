@@ -9,9 +9,7 @@ about *where* its shape came from.
 The one thing worth knowing is that a session is **closed-loop**: the runner
 sends turn `k+1` only after the reply to turn `k` has arrived, then waits
 `think_s[k]`. That is what makes the concurrency axis mean "users", and it is
-why a session carries think times rather than arrival times. The open-loop
-arrival generators this module used to hold were removed with the synthetic
-workloads they served.
+why a session carries think times rather than arrival times.
 """
 from __future__ import annotations
 
@@ -23,14 +21,12 @@ class Turn:
     """One user message inside a conversation."""
     text: str
     max_tokens: int
-    category: str = ""
 
 
 @dataclass(frozen=True)
 class Session:
-    """A conversation: arrives once, then runs closed-loop turn by turn."""
+    """A conversation, run closed-loop turn by turn."""
     idx: int
-    arrival_s: float
     system: str                     # stable preamble, shared across sessions
     turns: tuple[Turn, ...]
     think_s: tuple[float, ...]      # gap after each turn before the next

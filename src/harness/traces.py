@@ -88,12 +88,10 @@ def read(path: str | pathlib.Path, *, kinds: tuple[str, ...] = (),
          query: str = "", limit: int = 0) -> list[dict]:
     """Records, filtered and normalised.
 
-    Traces written before the envelope existed have no `v` and no `seq`. They
-    are read as `v: 0` with `seq` taken from position, because a debugging tool
-    that refuses yesterday's traces is not much of a debugging tool -- and a
-    downstream loader will meet the same files. Newer-than-known versions are
-    refused, though: guessing at a field whose meaning changed is worse than
-    stopping.
+    Every record comes back with `v`, `seq`, `trace_id` and the agent/idea
+    ids, filled from position and the sidecar when a line lacks them, so a
+    loader can rely on the envelope. A newer-than-known `v` is refused:
+    guessing at a field whose meaning changed is worse than stopping.
     """
     path = pathlib.Path(path)
     side = path.parent / (path.stem + ".meta.json")

@@ -43,7 +43,6 @@ class FleetBudget:
 
 @dataclass(frozen=True)
 class FleetSpec:
-    baseline_stack_digest: str = ""
     baseline_metrics: dict = field(default_factory=dict)
     seeds: tuple[Idea, ...] = ()
     agent_budget: AgentBudget = field(default_factory=AgentBudget)

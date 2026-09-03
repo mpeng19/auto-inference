@@ -9,6 +9,7 @@ Running a fleet:
     harness agent pause a03
     harness stop                       # graceful: finish paid work, then wind up
     harness kill                       # flat: everything, now
+    harness delete --session S --yes   # a finished fleet's directory and rows
 
 Reading one, during or after:
 
@@ -21,7 +22,7 @@ Reading one, during or after:
 
 Filling the banks, and the tools an agent calls from its own shell:
 
-    harness ideas import docs/ideas/book.jsonl --source book
+    harness ideas seed                                      # the packaged bank
     harness skills list                                    # facts across runs
     harness tool recall "raise chunked prefill"             # what is known
     harness tool preflight --workspace agents/S/a01         # free checks
@@ -99,10 +100,10 @@ def cmd_start(a) -> int:
     cfg = FleetConfig(
         session_id=session_id, root=str(root), agents=a.agents,
         eval_capacity=a.evals, budget_usd=a.budget, model=a.model,
-        seed_model=a.seed_model, gpu=a.gpu, n_gpu=a.n_gpu,
+        gpu=a.gpu, n_gpu=a.n_gpu,
         agent_max_attempts=a.max_attempts, agent_max_usd=a.agent_budget,
         dry_run=a.dry_run, fake_agents=a.fake_agents, note=a.note,
-        bank=_bank_path(a.bank) if a.bank else "", mode=a.mode, manager=a.manager,
+        bank=_bank_path(a.bank) if a.bank else "", manager=a.manager,
         profile_level=a.profile_level,
         seeds=tuple(s for s in (a.seed or [])),
         baseline=json.loads(a.baseline) if a.baseline else {})
@@ -294,6 +295,83 @@ def _pid_from_disk(a, v) -> int:
     return int(f.read_text().strip()) if f.is_file() else 0
 
 
+def _dir_size(path: pathlib.Path) -> int:
+    total = 0
+    for p in path.rglob("*"):
+        with contextlib.suppress(OSError):
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+    return total
+
+
+def _human(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def cmd_delete(a) -> int:
+    """Wipe a finished fleet: its directory (`agents/<S>`: workspaces, runs,
+    profiles, traces) and its rows in the session store. The directory is
+    the run's record and the bulk of the space -- a night's profiles alone
+    are gigabytes -- so this says what it will remove and how big it is,
+    and needs `--yes` or a typed confirmation. A session whose daemon is
+    still alive is refused: deleting workspaces under a running agent is
+    how the first build run lost its kernel."""
+    store = _store(a)
+    session_id = a.del_session or a.session
+    if not session_id:
+        print("delete needs --session S", file=sys.stderr)
+        return 2
+    v = store.read(session_id)
+    root = pathlib.Path(a.root or (v.root if v and v.root else "")
+                        or (pathlib.Path.cwd() / "agents" / session_id))
+    if v is None and not root.is_dir():
+        print(f"no session {session_id!r} in {store.path} and no directory {root}",
+              file=sys.stderr)
+        return 1
+    if v is not None and v.phase in ("running", "starting", "stopping", "paused"):
+        if daemon_alive(v.pid):
+            print(f"{session_id} is {v.phase} and its daemon (pid {v.pid}) is alive; "
+                  f"`harness --session {session_id} stop` first", file=sys.stderr)
+            return 1
+        print(f"{session_id} reads {v.phase} but its daemon is gone; treating it as finished")
+    if root.is_dir() and running_daemon(root):
+        print(f"a daemon is running on {root} (pid {running_daemon(root)}); refusing",
+              file=sys.stderr)
+        return 1
+    had_dir = root.is_dir()
+    size = _dir_size(root) if had_dir else 0
+    n_cmd = 0
+    with contextlib.suppress(Exception):
+        n_cmd = len(store._c.execute("SELECT id FROM commands WHERE session_id=?",
+                                     (session_id,)).fetchall())
+    print(f"will remove for session {session_id}:")
+    if had_dir:
+        print(f"  {root}  ({_human(size)})")
+    else:
+        print(f"  (no directory at {root})")
+    if v is not None:
+        print(f"  session row, {len(store.tokens(session_id))} token rows and "
+              f"{n_cmd} command rows in {store.path}")
+    if not a.yes:
+        if not sys.stdin.isatty():
+            print("not a terminal; pass --yes to confirm", file=sys.stderr)
+            return 1
+        if input(f"type {session_id} to confirm: ").strip() != session_id:
+            print("not deleted")
+            return 1
+    if had_dir:
+        shutil.rmtree(root)
+    removed = store.delete_session(session_id)
+    print(f"deleted {root if had_dir else 'no directory'}; rows: "
+          + ", ".join(f"{k} {n}" for k, n in removed.items())
+          + f"; freed {_human(size)}")
+    return 0
+
+
 def cmd_tool(a) -> int:
     from . import tools
     return tools.main(a.action, a)
@@ -337,6 +415,23 @@ def cmd_ideas(a) -> int:
     if a.action == "release":
         bank.release(a.arg)
         print(f"released {a.arg}")
+        return 0
+    if a.action == "seed":
+        n = bank.seed(a.arg or "book")
+        print(f"seeded {n} records from {a.arg or 'book'} -> {bank.path}")
+        return 0
+    if a.action == "claim":
+        # What the fleet does for an agent, done by hand: the record least
+        # like what is live, or with --seed the one most like the seed.
+        r = bank.claim(a.agent or "operator", seed=a.seed)
+        if r is None:
+            print("nothing available to claim")
+            return 1
+        print(f"{r.id}  {r.title}")
+        return 0
+    if a.action == "related":
+        for r in bank.related(a.arg, k=a.k):
+            print(f"  {r.id}  {r.scale:12s} {r.status:9s}  {r.title[:70]}")
         return 0
     if a.action == "extract-pdf":
         from .ideas import pdf as book
@@ -614,8 +709,6 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--max-attempts", dest="max_attempts", type=int, default=6,
                    help="diffs one agent may evaluate on one idea (default 6)")
     s.add_argument("--model", default="sonnet", help="claude model: sonnet | opus (default sonnet)")
-    s.add_argument("--seed-model", dest="seed_model", default="",
-                   help="cheaper model for seeding an idea (default: --model)")
     s.add_argument("--gpu", default="H100", help="GPU every evaluation rents (default H100)")
     s.add_argument("--n-gpu", dest="n_gpu", type=int, default=1,
                    help="GPUs per evaluation")
@@ -630,8 +723,6 @@ def main(argv: list[str] | None = None) -> int:
                         "and serve it to agents over MCP (default 12; 0 = none)")
     s.add_argument("--manager", action="store_true",
                    help="review outcomes and stash reusable tools under <root>/tools/")
-    s.add_argument("--mode", choices=["tune", "build"], default="tune",
-                   help="build: kernel-scale ideas with a design note and workbench checks")
     s.add_argument("--seed", action="append", help="a starting hypothesis; repeatable")
     s.add_argument("--baseline", default="",
                    help='stock, measured on this grid; required. JSON: '
@@ -730,10 +821,15 @@ def main(argv: list[str] | None = None) -> int:
     ask.set_defaults(fn=cmd_ask)
 
     ideas = sub.add_parser("ideas", help="the idea bank: fill it, inspect it")
-    ideas.add_argument("action", choices=["list", "show", "search", "import", "release",
+    ideas.add_argument("action", choices=["list", "show", "search", "import", "seed",
+                                          "claim", "related", "release",
                                           "extract-pdf", "arxiv"])
     ideas.add_argument("arg", nargs="?", default="",
-                       help="id | query | jsonl path | pdf path")
+                       help="id | query | jsonl path | pdf path | seed set (default book)")
+    ideas.add_argument("--agent", default="",
+                       help="claim: who holds the record (default operator)")
+    ideas.add_argument("--seed", default="",
+                       help="claim: steer toward this text instead of away from what is live")
     ideas.add_argument("--bank", default="",
                        help="database path (default: ~/.auto-inference/ideas.db, "
                             "shared by every run on this machine)")
@@ -745,7 +841,8 @@ def main(argv: list[str] | None = None) -> int:
     ideas.add_argument("--source", default="", help="import/extract-pdf: source label")
     ideas.add_argument("--model", default="opus", help="extract-pdf/arxiv: claude model")
     ideas.add_argument("--pages", type=int, default=20, help="extract-pdf: window size")
-    ideas.add_argument("-k", type=int, default=25, help="search: hits; arxiv: per query")
+    ideas.add_argument("-k", type=int, default=25,
+                       help="search/related: hits; arxiv: per query")
     ideas.add_argument("--json", action="store_true")
     ideas.set_defaults(fn=cmd_ideas)
 
@@ -765,6 +862,15 @@ def main(argv: list[str] | None = None) -> int:
     k = sub.add_parser("kill", help="flat kill: everything, now")
     k.add_argument("--root", default="")
     k.set_defaults(fn=cmd_kill)
+
+    de = sub.add_parser("delete", help="wipe a finished fleet's directory and store rows")
+    # Its own --session so `harness delete --session S` reads naturally; the
+    # global one (before the subcommand) still works.
+    de.add_argument("--session", dest="del_session", default="", metavar="S",
+                    help="session id")
+    de.add_argument("--root", default="", help="fleet root (default: the session's)")
+    de.add_argument("--yes", action="store_true", help="skip the confirmation")
+    de.set_defaults(fn=cmd_delete)
 
     sc = sub.add_parser("scale", help="change the number of agents in flight")
     sc.add_argument("n", type=int)

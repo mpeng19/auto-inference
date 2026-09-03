@@ -142,10 +142,10 @@ class ServingConfig:
     def validate(self) -> list[str]:
         """Catch launch-time constraints before spending GPU minutes on them.
 
-        Two 8xH100 attempts died in the first minutes for reasons a check could
-        have caught: TP=8 requested against a single allocated GPU, and an
-        MoE/FP8 block-size constraint. Both were cheap only because the
-        fast-fail path works; neither needed a GPU to detect.
+        Both checks are failures that happened: a TP size requested against
+        fewer GPUs than were allocated, and SGLang's quantized-MoE block check
+        rejecting this dense model 128 s into a run. Neither needs a GPU to
+        detect.
         """
         from .specs import MODELS
 
@@ -159,10 +159,8 @@ class ServingConfig:
 
         spec = MODELS.get(self.model)
         # SGLang applies its quantized-MoE block check to some dense models
-        # too, with a fallback intermediate size of its own. Qwen3.8-27B-FP8
-        # died 128s into a run this way: the model has no experts, so the
-        # `n_experts > 1` gate below skipped the check entirely, and SGLang
-        # then rejected `tp=8, ep=1` because (512 / 8) % 128 != 0.
+        # too, with a fallback intermediate size of its own: it rejected
+        # `tp=8, ep=1` on Qwen3.8-27B-FP8 because (512 / 8) % 128 != 0.
         if spec is not None and spec.sglang_moe_check_intermediate:
             block, sg = 128, spec.sglang_moe_check_intermediate
             moe_tp = max(1, self.tp_size // max(1, self.ep_size or 1))
@@ -175,22 +173,6 @@ class ServingConfig:
                     f"even though it is dense: {sg} / moe_tp={moe_tp} = "
                     f"{sg / moe_tp:.0f}, not a multiple of {block}. "
                     f"Set ep_size to one of {ok or 'none -- change tp_size'}.")
-        if spec is not None and spec.n_experts > 1:
-            # FP8 weights are stored in 128x128 blocks, so each rank's slice of
-            # an expert must be a whole number of blocks.
-            block = 128
-            moe_tp = max(1, self.tp_size // max(1, self.ep_size or 1))
-            per_rank = spec.moe_intermediate / moe_tp
-            if per_rank % block != 0:
-                ok = [e for e in (1, 2, 4, 8, 16)
-                      if e <= self.n_gpu
-                      and (spec.moe_intermediate /
-                           max(1, self.tp_size // e)) % block == 0]
-                problems.append(
-                    f"MoE/FP8 block constraint: moe_intermediate="
-                    f"{spec.moe_intermediate} / moe_tp={moe_tp} = {per_rank:.0f}, "
-                    f"not a multiple of {block}. Valid ep_size for tp_size="
-                    f"{self.tp_size}: {ok or 'none -- change tp_size'}")
         return problems
 
     def digest(self) -> str:

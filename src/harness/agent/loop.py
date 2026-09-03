@@ -22,16 +22,16 @@ loop while there is still budget to spend on a fresh idea.
 last three to establish a dead idea more precisely is the most expensive thing
 this system can do by accident.
 
-And two things a night of real runs added:
+Two more, earned on real runs:
 
 **A study ends when its result lands.** The point of studying during a sweep is
 that waiting is free; a study that outlives its evaluation is the opposite,
-and it holds the attempt open. It runs in a thread with a cancel flag now, and
-the partial thought is kept.
+and it holds the attempt open. It runs in a thread with a cancel flag, and the
+partial thought is kept.
 
 **Every turn is timed.** A trace that records what happened but not how long
-cannot tell a slow model from a sleeping laptop -- which is exactly the
-question a five-hour gap on 2026-09-02 raised and nothing could answer.
+cannot tell a slow model from a sleeping laptop -- a five-hour lid-close once
+left exactly the same trace as a model thinking for five hours.
 """
 from __future__ import annotations
 
@@ -52,7 +52,11 @@ from .workspace import Workspace
 class Proposer(Protocol):
     """Turns knowledge into an edit. The only place a model belongs."""
 
-    def seed(self, live_ideas: tuple[Idea, ...], brief: Brief) -> Idea: ...
+    def seed(self, live_ideas: tuple[Idea, ...], brief: Brief) -> Idea:
+        """Optional. Invent an idea. Only called when the fleet has no bank to
+        claim from and no seed left; the daemon requires a bank for real
+        agents, so only fakes implement this."""
+        ...
 
     def edit(self, ws: Workspace, idea: Idea, brief: Brief, attempt: int,
              history: tuple[Attempt, ...]) -> str:
@@ -170,7 +174,11 @@ class IterativeAgent:
             agent_id=self.agent_id, k=10))
         if seed is not None:
             return seed
-        return self.proposer.seed(live_ideas, brief)
+        invent = getattr(self.proposer, "seed", None)
+        if invent is None:
+            raise RuntimeError(f"{self.agent_id}: no seed and no bank record, and "
+                               "this proposer cannot invent an idea")
+        return invent(live_ideas, brief)
 
     # ── the loop ─────────────────────────────────────────────────────────
     def run(self, idea: Idea, budget: AgentBudget) -> AgentOutcome:
@@ -212,9 +220,8 @@ class IterativeAgent:
                 tokens_in=brief.est_tokens), since=t_phase, phase="recall")
 
             self.workspace.reset()
-            # A build-mode edit can run for hours and tokens land only when
-            # it returns; say when it started so a long call is not read as
-            # a stall.
+            # An edit can run for hours; say when it started so a long call
+            # is not read as a stall.
             self._report(activity=f"attempt {n}: writing a diff (since {time.strftime('%H:%M')})")
             t_phase = time.time()
             try:
@@ -413,13 +420,12 @@ class IterativeAgent:
                             budget: AgentBudget):
         """Study while the sweep runs, and stop the moment the result lands.
 
-        The study used to run to completion and only then did the agent block
-        on `collect`, so a study that outlived its evaluation left the agent
-        answering a question the GPU had already answered -- and holding the
-        attempt open while it did. Now the study runs in a thread with a
-        cancel flag, this loop watches both, and whichever finishes first ends
-        the other. A partial thought is still worth keeping, so the note is
-        appended either way, flagged when it was cut off.
+        The study runs in a thread with a cancel flag, this loop watches both,
+        and whichever finishes first ends the other: a study that outlives its
+        evaluation is answering a question the GPU has already answered, and
+        holding the attempt open while it does. A partial thought is still
+        worth keeping, so the note is appended either way, flagged when it was
+        cut off.
 
         The ticket is polled rather than collected outright because `collect`
         with a timeout reports its own timeout as a failed record -- fine to

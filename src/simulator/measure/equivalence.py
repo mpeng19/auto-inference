@@ -456,21 +456,16 @@ def compare(reference: dict, candidate: dict) -> EquivalenceResult:
 # the 64, so a different-but-correct summation order lands near 0.84. The line
 # sits under that floor and above the lossy approximation.
 MIN_DECODE_AGREEMENT = 0.80
+
+
 def regressed(result: EquivalenceResult, min_agreement: float = MIN_AGREEMENT,
               max_mean_dlogprob: float = MAX_MEAN_DLOGPROB,
               min_decode_agreement: float = MIN_DECODE_AGREEMENT) -> tuple[bool, str]:
     """Has this stack changed what the model computes? Returns (yes, why).
 
-    Both thresholds are **provisional** and should be set from a measured noise
-    floor rather than kept. The floor is not zero: FP8 greedy decoding is not
-    bitwise deterministic -- kernel selection, batch composition and reduction
-    order all move the last bits -- and the coarse version of this gate already
-    shows how wide that can be, with two stock sweeps scoring 62% and 70% on
-    the same 50 GSM8K items. Run this stock against stock twice and read the
-    numbers off; until then 0.97 / 0.05 are chosen to sit clear of what
-    ordinary numerical jitter should produce, not measured to.
-
-    `aligned=False` is always a rejection: the comparison did not happen.
+    The teacher-forced thresholds are provisional (module docstring); the
+    decode threshold was calibrated above. `aligned=False` is always a
+    rejection: the comparison did not happen.
     """
     if not result.aligned:
         return True, result.note or "the two runs did not score the same sequences"

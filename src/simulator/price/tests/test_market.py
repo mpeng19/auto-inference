@@ -8,12 +8,9 @@ import pytest
 
 from simulator.price.direct import effective_in
 from simulator.price.market import (
-    MARKET_BEST_EFF_IN,
-    MARKET_INPUT_OUTPUT_RATIO,
     MARKET_QWEN38_27B,
     MARKET_REALISED,
     MARKET_SNAPSHOTS,
-    MARKET_WEIGHTED_IN,
 )
 
 _LISTED = {n: (i, o, c) for n, i, o, c in MARKET_QWEN38_27B}
@@ -38,15 +35,16 @@ def test_effective_price_formula_matches_published_values():
     assert near >= 9, [(n, round(e, 4)) for n, e in errs]
 
 
-def test_realised_hit_rates_stay_below_our_synthetic_assumption():
-    """Our workloads hit 96%. The best real provider reaches 87%.
+def test_realised_hit_rates_stay_below_the_traces_intrinsic_reuse():
+    """TraceLab's sessions carry 95.6% prefix reuse. The best real provider
+    realises 87%.
 
     The ceiling moves: on 2026-08-29 the best was Novita at 81.8%, and two days
     later the same provider realised 87.4%, which broke an earlier version of
     this test that hard-coded 85%. So assert the *relationship* that matters --
-    no provider reaches the 95.6% our replayed traces achieve -- rather than a
-    level that drifts. Sizing a business case on 95% would overstate the cache
-    discount's benefit.
+    no provider reaches what the traces make available -- rather than a level
+    that drifts. Pricing on the traces' own reuse would overstate the hit rate
+    a deployment earns.
     """
     for date, snap in MARKET_SNAPSHOTS.items():
         hits = [h for _n, _e, h, _s in snap]
@@ -80,51 +78,23 @@ def test_hit_rate_is_provider_controlled_not_workload_luck():
     assert eff["Venice"] > eff["Novita"] * 2.5
 
 
-def test_weighted_average_is_consistent_with_the_table():
-    tot = sum(s for *_x, s in MARKET_REALISED)
-    wavg = sum(e * s for _n, e, _h, s in MARKET_REALISED) / tot
-    assert abs(wavg - MARKET_WEIGHTED_IN) / MARKET_WEIGHTED_IN < 0.10, wavg
-
-
-def test_target_is_the_best_realised_price():
-    best = min(e for _n, e, _h, _s in MARKET_REALISED)
-    assert best == pytest.approx(MARKET_BEST_EFF_IN)
-
-
-def test_traffic_is_input_dominated():
-    """18:1 input:output, against ~2:1 in our synthetic suite."""
-    assert MARKET_INPUT_OUTPUT_RATIO > 10
-    # At market prices, input is the majority of revenue at this ratio.
-    in_rev = MARKET_INPUT_OUTPUT_RATIO * MARKET_WEIGHTED_IN
-    out_rev = 1 * 2.866
-    assert in_rev > out_rev, (in_rev, out_rev)
-
-
 def test_burst_utilisation_is_derived_not_assumed():
     """Utilisation for a single-model deployment comes from the traffic.
 
     Sizing for peak means running at mean/peak. On this model's 17-day
-    OpenRouter series that is ~48%, which replaces the 60% that earlier
-    price tables simply assumed.
+    OpenRouter series that is ~48%, which is what `Market.utilisation_ceiling`
+    offers as the alternative to the agreed 50%.
     """
     import json
 
-    from simulator.price.market import (
-        _find_snapshot,
-        burst_utilisation,
-        fleet_utilisation,
-    )
+    from simulator.price.market import Market, _find_snapshot, burst_utilisation
     v = [r["total_prompt_tokens"]
          for r in json.loads(_find_snapshot().read_text())["daily"]]
     b = burst_utilisation(v)
     assert b["available"]
     assert 0.40 < b["single_model_utilisation"] < 0.60, b
     assert b["peak_over_mean"] > 1.8
-
-    # A fleet beats it purely through uncorrelated peaks, not through serving
-    # more of this model.
-    assert fleet_utilisation(b["cv"], 1) < 0.60
-    assert fleet_utilisation(b["cv"], 100) > 0.85
+    assert 0.40 < Market.load().utilisation_ceiling < 0.60
 
 
 def test_pricing_defaults_are_the_agreed_basis():
@@ -294,56 +264,3 @@ def test_default_environment_is_one_h100_on_the_target_model():
     m = MODELS[sc.model]
     kv = HARDWARE["H100"].hbm_bytes * 0.85 - m.active_params
     assert kv / m.bytes_per_seq(20_583) > 20, "too few conversations fit"
-
-
-def test_rank_vs_market_scores_everyone_at_one_hit_rate():
-    """The matched comparison, kept as a diagnostic (§5e). Every provider is
-    re-blended to OUR hit rate, which is exactly what makes it a diagnostic and
-    not the headline: it isolates cost per token from cache achievement."""
-    from simulator.price.market import rank_vs_market
-
-    board = [("cheap", 0.40, 3.0, 0.04), ("dear", 0.50, 3.0, 0.10),
-             ("nocache", 0.45, 3.0, None)]
-    got = rank_vs_market(0.10, board, hit_rate=0.8)
-    # 0.8*0.04 + 0.2*0.40 = 0.112; 0.8*0.10 + 0.2*0.50 = 0.180; nocache stays 0.45.
-    assert got["best_competitor"] == "cheap"
-    assert got["best_competitor_price"] == 0.112
-    assert got["rank"] == 1 and got["of"] == 4
-    assert [r["provider"] for r in got["table"]] == ["cheap", "dear", "nocache"]
-
-
-def test_rank_counts_only_providers_strictly_cheaper():
-    from simulator.price.market import rank_vs_market
-
-    board = [("a", 0.40, 3.0, None), ("b", 0.50, 3.0, None)]
-    assert rank_vs_market(0.45, board, hit_rate=0.0)["rank"] == 2
-    assert rank_vs_market(0.60, board, hit_rate=0.0)["rank"] == 3
-
-
-def test_blended_per_m_is_the_bill_expressed_per_token():
-    """Same money, different denominator -- so it must agree with `bill_per_1k`
-    exactly, or one of the two is quoting a different request."""
-    from simulator.price.market import Market
-
-    m = Market.load()
-    eff_in, out = 0.0126, 6.45
-    per_m = m.blended_per_m(eff_in, out)
-    tokens = m.in_per_request + m.out_per_request
-    assert per_m * tokens / 1e6 * 1000 == pytest.approx(m.bill_per_1k(eff_in, out))
-    # It sits between the two prices it blends, weighted 9.9:1 toward input.
-    assert eff_in < per_m < out
-
-
-def test_direct_price_bills_a_request_of_any_shape():
-    """`Market.bill_per_1k` is the market-sized request; this is the same
-    arithmetic for an arbitrary one, which is what a per-level check needs."""
-    from simulator.price.direct import price_direct
-
-    p = price_direct(gpu_seconds_input=100.0, gpu_seconds_output=50.0,
-                     input_tokens=1e6, output_tokens=1e5, cached_tokens=4e5,
-                     usd_per_gpu_hour=3.00, utilization=0.5)
-    assert p.hit_rate == pytest.approx(0.4)
-    got = p.bill_per_request(20_583, 2_076)
-    want = (p.effective_in_per_m * 20_583 + p.out_per_m * 2_076) / 1e6
-    assert got == pytest.approx(want)
-    assert p.bill_per_request(0, 0) == 0.0

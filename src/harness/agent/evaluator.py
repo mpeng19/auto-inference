@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
+import time
 from dataclasses import dataclass, field
 
 
@@ -141,8 +142,6 @@ class SimulatorEvaluator:
                         utilisation=self.utilisation,
                         profile_level=self.profile_level, profile_steps=self.profile_steps,
                         **self.extra)
-        import time
-
         t0 = time.time()
         try:
             res = asyncio.run(sim.eval())

@@ -1,6 +1,15 @@
 """The manager: one reviewer per run, reading outcomes the agents cannot see.
 
-Two jobs, deliberately small:
+`Manager` is not a contract implementation; the fleet calls `on_outcome` as
+each idea finishes and `tools_index` when it builds an agent's prompt.
+
+    mgr = Manager(root, ask_with(model, cwd=root), skills=bank, session_id=...)
+    fleet.manager = mgr                     # fleet calls mgr.on_outcome(AgentOutcome)
+    mgr.tools_index()                       # what the proposer appends to the brief
+
+Writes `<root>/tools/<name>.py`, `tools/index.jsonl` and `tools/README.md`
+(`ToolStash`), and facts into the skill bank it is given. Two jobs,
+deliberately small:
 
   stashing     after every few outcomes, read what the agents did and decide
                whether a reusable tool -- a script under `<root>/tools/` --

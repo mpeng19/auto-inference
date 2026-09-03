@@ -1,16 +1,18 @@
-"""One agent's working directory, and the API it uses to propose a diff.
+"""One agent's working directory, and how its edits become a stack.
 
 This is the whole interface between an agent and the thing it is trying to
-improve. An agent reads stock SGLang, writes candidate files, and hands the
-result to the simulator:
+improve. `candidate/sglang/` holds a copy of the stock files the agent was
+pointed at; the agent (a Claude Code process with that directory as its cwd)
+edits them in place, and the loop reads the result back:
 
-    ws = Workspace("agents/a01")
-    src = ws.read("srt/managers/schedule_policy.py")
-    ws.replace("srt/managers/schedule_policy.py", old_snippet, new_snippet)
+    ws = Workspace("agents/<session>/a01")
+    ws.materialise("srt/layers/attention/triton_backend.py")   # stock copy to edit
+    ...                                                        # the agent edits
     ok, why = ws.check()                     # parses? actually changed?
-    result = await Simulator(root_dir=ws.run_dir(), stack=ws.stack()).eval()
+    stack = ws.stack()                       # simulator.InferenceStack, priced by the evaluator
 
-Four decisions worth stating.
+`edit` and `replace` write a file programmatically, for scripted proposers
+and tests. Four decisions worth stating.
 
 **Whole files, not patch application.** The agent edits text and we compute the
 diff; we never ask it to produce a unified diff that has to apply cleanly.
@@ -80,9 +82,6 @@ class Workspace:
         return d
 
     # ── reading stock ───────────────────────────────────────────────────
-    def ls(self, prefix: str = "srt") -> tuple[str, ...]:
-        return self.source.ls(prefix)
-
     def read(self, rel: str) -> str:
         """The candidate if one exists, else the stock file. What is 'current'."""
         c = self.candidates / rel
@@ -113,12 +112,10 @@ class Workspace:
                 "Give more surrounding context so the edit is unambiguous.")
         self.edit(rel, cur.replace(old, new))
 
-    def reset(self, rel: str | None = None) -> None:
-        if rel is None:
-            shutil.rmtree(self.candidates, ignore_errors=True)
-            self.candidates.mkdir(parents=True, exist_ok=True)
-        else:
-            (self.candidates / rel).unlink(missing_ok=True)
+    def reset(self) -> None:
+        """Back to stock: the loop calls this before every attempt."""
+        shutil.rmtree(self.candidates, ignore_errors=True)
+        self.candidates.mkdir(parents=True, exist_ok=True)
 
     # ── inspecting the proposal ─────────────────────────────────────────
     RESERVED = ("candidate", "runs", "traces", "sglang")
@@ -175,8 +172,7 @@ class Workspace:
 
         Not "files present": an agent editing in place starts from a stock copy
         of everything it might touch, and most of those stay identical. A stack
-        containing an unmodified file is a no-op wearing a diff's clothes --
-        exactly what the deleted `overlays/` directory turned out to be.
+        containing an unmodified file is a no-op wearing a diff's clothes.
         """
         out = []
         for f in sorted(self.candidates.rglob("*.py")):

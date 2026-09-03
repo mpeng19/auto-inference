@@ -26,8 +26,8 @@ import pytest
 
 from harness import EvalBroker, IterativeAgent, Workspace
 from harness.agent.claude_code import (
-    DEFAULT_BUILD_TARGETS,
-    DEFAULT_BUILD_TIMEOUT_S,
+    DEFAULT_EDIT_TIMEOUT_S,
+    DEFAULT_TARGETS,
     CallStats,
     ClaudeCodeProposer,
 )
@@ -136,9 +136,8 @@ def test_a_failing_call_still_raises(tmp_path):
 # ── the tools are actually allowed ────────────────────────────────────────
 
 def test_the_harness_tools_are_allowed_on_the_command_line(tmp_path):
-    """The night-3 bug: with only `--permission-mode acceptEdits` every shell
-    command was refused, so no agent ran `preflight`, `recall` or `roofline`
-    even once."""
+    """With only `--permission-mode acceptEdits` every shell command was
+    refused, so no agent ran `preflight`, `recall` or `roofline` even once."""
     dump = tmp_path / "argv.txt"
     binary = _fake_claude(
         tmp_path, f"printf '%s\\n' \"$@\" > {dump}\ncat <<'JSON'\n{ENVELOPE}\nJSON\n")
@@ -167,18 +166,18 @@ def test_trace_tools_are_allowed_when_a_profile_is_attached():
     assert "mcp__tracedb" not in ClaudeCodeProposer()._cmd("hi", "sonnet")
 
 
-# ── build mode ────────────────────────────────────────────────────────────
+# ── the edit prompt ───────────────────────────────────────────────────────
 
-def test_build_mode_hands_over_the_design_and_the_workbench(tmp_path, stock_dir):
+def test_the_edit_hands_over_the_design_and_the_workbench(tmp_path, stock_dir):
     dump = tmp_path / "prompt.txt"
     binary = _fake_claude(
         tmp_path, f"printf '%s' \"$2\" > {dump}\ncat <<'JSON'\n{ENVELOPE}\nJSON\n")
     ws = Workspace(tmp_path / "a01", agent_id="a01", source=FakeStock(stock_dir))
-    prop = ClaudeCodeProposer(binary=binary, mode="build")
+    prop = ClaudeCodeProposer(binary=binary)
 
-    assert prop.targets == DEFAULT_BUILD_TARGETS, "build mode starts at the kernels"
-    assert prop._edit_timeout() == DEFAULT_BUILD_TIMEOUT_S
-    assert ClaudeCodeProposer()._edit_timeout() == 900.0
+    assert prop.targets == DEFAULT_TARGETS, "the menu starts at the kernels"
+    assert prop._edit_timeout() == DEFAULT_EDIT_TIMEOUT_S
+    assert ClaudeCodeProposer(edit_timeout_s=60)._edit_timeout() == 60
 
     idea = Idea(title="fused decode attention",
                 hypothesis="fuse the KV gather into the decode kernel",
@@ -201,21 +200,6 @@ def test_build_mode_hands_over_the_design_and_the_workbench(tmp_path, stock_dir)
     assert out == "I fused the two kernels."
 
 
-def test_tuning_mode_is_left_alone(tmp_path, stock_dir):
-    """Build mode is a second prompt, not a replacement: `tune` is still the
-    smallest-edit job and must not start demanding design notes."""
-    dump = tmp_path / "prompt.txt"
-    binary = _fake_claude(
-        tmp_path, f"printf '%s' \"$2\" > {dump}\ncat <<'JSON'\n{ENVELOPE}\nJSON\n")
-    ws = Workspace(tmp_path / "a02", agent_id="a02", source=FakeStock(stock_dir))
-    prop = ClaudeCodeProposer(binary=binary)
-    prop.edit(ws, Idea(title="chunk", hypothesis="raise chunk", targets=(P,)),
-              Brief(text=""), 0, ())
-    prompt = dump.read_text()
-    assert "DESIGN.md" not in prompt
-    assert "smallest edit" in prompt
-
-
 def test_build_targets_exist_in_the_pinned_wheel():
     """A menu of paths that do not exist is worse than no menu: the agent
     spends its first ten minutes discovering that."""
@@ -224,7 +208,7 @@ def test_build_targets_exist_in_the_pinned_wheel():
     root = CACHE_ROOT / SGLANG_VERSION / "sglang"
     if not root.is_dir():
         pytest.skip("stock wheel is not extracted here and fetching needs the network")
-    missing = [t for t in DEFAULT_BUILD_TARGETS if not (root / t).is_file()]
+    missing = [t for t in DEFAULT_TARGETS if not (root / t).is_file()]
     assert not missing, f"build targets missing from SGLang {SGLANG_VERSION}: {missing}"
 
 

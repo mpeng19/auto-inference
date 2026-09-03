@@ -26,18 +26,18 @@ Without it you are optimising a number you cannot see.
 
 | tool | answers |
 |---|---|
-| `trace_summary` | how many steps, kernels, total GPU busy vs idle |
-| `trace_steps` | one row per decode step: duration, kernel count, idle |
-| `trace_ops_grouped pattern` | kernels grouped by canonical name with count, total and mean µs -- **start here** |
-| `trace_slowest pattern k` | the k longest single kernel launches |
-| `trace_ops pattern` | every launch matching a name pattern, in time order |
-| `trace_between a b` | what runs between kernel a and kernel b in each step |
-| `trace_gaps after before min_gap_us` | idle gaps on the GPU between two kernels |
-| `trace_overlap a b` | whether two kernels overlap in time (multi-stream) |
-| `trace_gpu_idle min_gap_us` | every idle gap above a threshold |
-| `trace_launches` | CPU launch overhead: time from launch to kernel start |
-| `trace_step_diff idx` | one step against the previous, kernel by kernel |
-| `trace_render t0 t1 tracks` | an image of a window of the timeline |
+| `trace_summary` | overview: time span, tracks with busy fractions, top ops by total time |
+| `trace_steps` | ProfilerStep boundaries, duration stats, and outlier (slow/fast) steps |
+| `trace_ops_grouped pattern` | duration stats per op with templated kernel names canonicalized and grouped -- **start here** on a real GPU trace |
+| `trace_ops pattern` | duration stats per op name matching a substring/glob pattern |
+| `trace_slowest pattern k` | the top-k individual span instances by duration for ops matching the pattern |
+| `trace_between a b` | for each op matching `a`, the latency until the NEXT op matching `b` (any track), with how many spans intervene: launch latency or cross-stream causality |
+| `trace_gaps after before min_gap_us` | every instance where an op matching `after` is immediately followed on the same track by one matching `before` with idle time between; sorted by gap, with summary stats |
+| `trace_overlap a b` | how much of pattern `a`'s time overlaps pattern `b` on other tracks (e.g. how well comm is hidden under compute) |
+| `trace_gpu_idle min_gap_us` | gaps on GPU streams, each blamed on the CPU activity covering the gap, aggregated per blamed op |
+| `trace_launches` | CPU->GPU kernel launch latency via correlation ids (p50/p99/max and the slowest pairs); high means the GPU waits on the CPU |
+| `trace_step_diff idx` | per-op time in step `idx` against the MEDIAN step: why step N is slow |
+| `trace_render t0 t1 tracks` | the [t0, t1] window (microseconds, from span timestamps other tools return) as a timeline PNG; returns the file path |
 
 Patterns are glob-style on the canonical kernel name (`*attn*`, `*gemm*`,
 `*rope*`, `*norm*`).
@@ -46,9 +46,11 @@ Patterns are glob-style on the canonical kernel name (`*attn*`, `*gemm*`,
 
 1. **Before designing.** Run `trace_ops_grouped *` on stock. Sort by total
    µs. The top three groups are where the step goes; anything under 5% of
-   the step cannot pay for a rewrite. Then `trace_steps` to see whether
-   steps are uniform or a few long ones dominate (retraction, prefill
-   chunks interleaved).
+   the step cannot pay for a rewrite. Then `trace_steps` for the step
+   duration stats and outliers: a few slow steps (retraction, prefill
+   chunks interleaved) are a different problem from a uniformly slow one,
+   and `trace_step_diff` on an outlier says which ops it spent the extra
+   time in.
 2. **Find the KV-read term.** The decode attention kernel (`*decode*attn*`,
    `*paged*`, `*flashinfer*decode*`) is the per-sequence term. Its mean µs
    per step divided by the KV bytes it reads is the bandwidth it achieves;

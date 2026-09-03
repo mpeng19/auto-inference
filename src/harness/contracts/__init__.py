@@ -17,6 +17,11 @@ that gets rewritten repeatedly stays coherent.
 
 `AgentControl` (in `agent.py`) is the other half of that last one: how a
 running agent asks the fleet whether it may keep going.
+
+Nothing here touches disk or a model. Import the Protocols to type a caller,
+the dataclasses to talk to any implementation; each service package
+(`harness.agent`, `.context`, `.memory`, `.ideas`, `.skills`,
+`.orchestration`, `.session`) states which Protocol it implements.
 """
 from .agent import (
     AgentBudget,

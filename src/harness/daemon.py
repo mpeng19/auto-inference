@@ -16,7 +16,7 @@ import pathlib
 import signal
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 
 from .agent import ClaudeCodeProposer, IterativeAgent, SimulatorEvaluator, Workspace
 from .context import JsonlContext
@@ -42,7 +42,6 @@ class FleetConfig:
     patience: int = 3
     screen_first: bool = True
     model: str = "sonnet"           # `claude --model`; prefer opus/sonnet here
-    seed_model: str = ""
     # simulator settings for a real evaluation
     gpu: str = "H100"
     n_gpu: int = 1
@@ -53,13 +52,11 @@ class FleetConfig:
     screen_seconds: float = 60.0
     baseline: dict = field(default_factory=dict)
     seeds: tuple[str, ...] = ()     # free-text hypotheses to start from
-    # Where ideas come from once the seeds run out. Empty: the agents seed
-    # themselves, which produced one-line knob tweaks. A path: records are
-    # claimed from the bank, one per agent, least similar first.
+    # Where ideas come from once the seeds run out: records are claimed from
+    # the bank, one per agent, least similar first. Required unless the
+    # agents are fake -- a real agent left to seed itself produced one-line
+    # knob tweaks, which is what the bank exists to replace.
     bank: str = ""
-    # "tune" asks for the smallest edit; "build" hands over a mechanism and
-    # expects a kernel-scale change with a design note and workbench checks.
-    mode: str = "tune"
     # A reviewer that turns what agents keep re-deriving into shared tools
     # under <root>/tools/. A few model calls a night.
     manager: bool = False
@@ -76,6 +73,9 @@ class FleetConfig:
     @classmethod
     def load(cls, path) -> FleetConfig:
         d = json.loads(pathlib.Path(path).read_text())
+        # A config written by an older harness may carry fields since removed.
+        known = {f.name for f in fields(cls)}
+        d = {k: v for k, v in d.items() if k in known}
         d["levels"] = tuple(d.get("levels") or (4, 8, 12, 16, 24))
         d["screen_levels"] = tuple(d.get("screen_levels") or (8, 12))
         d["seeds"] = tuple(d.get("seeds") or ())
@@ -86,7 +86,8 @@ class FleetConfig:
 
 
 class _ScriptedProposer:
-    """Stands in for Claude Code so the fleet can be exercised for free."""
+    """Stands in for Claude Code so the fleet can be exercised for free. It
+    seeds itself, so a fake fleet needs no bank."""
 
     def __init__(self, agent_id: str):
         self.agent_id = agent_id
@@ -186,7 +187,7 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
             prop = _ScriptedProposer(agent_id)
         else:
             prop = ClaudeCodeProposer(
-                model=cfg.model, seed_model=cfg.seed_model, mode=cfg.mode,
+                model=cfg.model,
                 session_tools=(fl.manager.tools_index if fl.manager is not None else None),
                 session_skills=(fl.skills.render if getattr(fl, "skills", None) else None))
             # Token use is attributed the moment it is spent, which is what
@@ -203,19 +204,18 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
 
 def check(cfg: FleetConfig) -> None:
     """Refuse configurations that run but cannot work."""
+    if not cfg.bank and not cfg.fake_agents:
+        raise SystemExit("--bank is required: agents implement a recorded mechanism "
+                         "and cannot seed themselves (only --fake-agents can)")
     if cfg.dry_run:
         return
     base = cfg.baseline or {}
     if not isinstance(base.get("bill_per_1k"), (int, float)):
         raise SystemExit("--baseline needs bill_per_1k from a stock sweep on the "
-                         "same grid (docs/NEXT.md step 1)")
+                         "same grid (see the README)")
     if not (base.get("quality") or {}):
         raise SystemExit('--baseline needs "quality": {suite: accuracy}; without '
                          "it the quality gate never fires")
-    if cfg.mode == "build" and not cfg.bank:
-        raise SystemExit("--mode build needs --bank: build-mode agents implement a "
-                         "recorded mechanism; without the bank they self-seed and "
-                         "produce the one-line tweaks build mode exists to replace")
     if cfg.screen_first and not isinstance(base.get("screen"), dict):
         raise SystemExit('--baseline needs "screen": {"bill_per_1k": ...} from a '
                          "stock sweep at screen tier, or screens are compared "

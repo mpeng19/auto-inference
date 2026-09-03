@@ -1,13 +1,14 @@
-"""Magic-trace-style timeline rendering of a window to PNG."""
+"""Magic-trace-style timeline rendering of a window to PNG.
+
+matplotlib is imported inside `timeline`, not here: it is a dev-group
+dependency, and `cli` and `mcp_server` import this module at load, so a
+module-level import would make every `tracedb` command fail in an install
+without the dev extras, even ones that never render.
+"""
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 from .store import TraceStore
 
@@ -19,6 +20,11 @@ def _color(name: str):
 
 def timeline(store: TraceStore, t0: float, t1: float, out_png: str | Path,
              track_like: str = "%", max_labels: int = 40, marks: list[float] | None = None) -> dict:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     tracks = [t for t in store.conn.execute(
         "SELECT * FROM tracks WHERE (name LIKE ? OR ? = '%') ORDER BY kind DESC, id", (track_like, track_like))]
     plotted_tracks = []

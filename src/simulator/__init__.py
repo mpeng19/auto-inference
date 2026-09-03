@@ -28,6 +28,18 @@ The method, in four steps:
      on the whole bill, which is what a buyer pays. They disagree.
 
 Cache hit rate is an outcome, never a control.
+
+Entry points: `Simulator` (`eval`, `submit`/`collect`, `analyse`, `workbench`,
+`equivalence`), `InferenceStack` (`stock`, `from_dir`, `load`), `SLO`/`Bound`/
+`MARKET_SLO`, and `Market`/`Economics` for the demand side. `EvalResult` and
+`Point` are what `eval`/`analyse` return. The `simulate` command in `cli`
+wraps the same calls.
+
+On disk: reads the market snapshot shipped in `data/`; writes every artifact of
+an evaluation into the `root_dir` it is given -- `call_id`, `sweep.json`,
+`result.json`, `config.json`, `stack.json`, `report.txt`, the PNGs, and
+`workbench-<n>/` per workbench run. The GPU side lives on Modal volumes
+(`runner`).
 """
 from .api import EvalResult, Point, Simulator
 from .price.market import Economics, Market

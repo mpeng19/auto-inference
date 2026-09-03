@@ -1,7 +1,7 @@
-"""Scalable load generation.
+"""The closed-loop load generator: N users, each in one conversation at a time.
 
-Measured limits of the single-event-loop client (mock server, 500-token
-prompts, 4s responses, 120 tokens each):
+One asyncio event loop, one process. Measured limits of that client (mock
+server, 500-token prompts, 4s responses, 120 tokens each):
 
     concurrent streams   ITL error, json parse   ITL error, byte scan
                    800                    1.7%                   1.2%
@@ -11,31 +11,21 @@ prompts, 4s responses, 120 tokens each):
 **One event loop is trustworthy to roughly 1600 concurrent streams** and falls
 apart by 2400. The failure is quiet and dangerous: the client's own scheduling
 delay is attributed to the server, so inter-token latency reads high and a
-*worse* config can look better purely by loading the client differently.
+*worse* config can look better purely by loading the client differently. The
+sweep tops out at 24 users, two orders of magnitude inside that wall, so
+there is no multiprocessing path: sharding load across workers buys nothing
+below the wall and costs a second clock to reconcile.
 
-Where that leaves us:
+Three things keep the client cheap and honest:
 
-  * 1xH100 today runs near 146 concurrent — 10x headroom.
-  * 8xH100 at ~90 rps with ~10s end-to-end is ~900 — still inside the limit.
-
-So **single-process is the default and there is no multiprocessing path.**
-That is a deliberate choice, not an oversight: sharding load across worker
-processes buys nothing below the wall and costs a second clock to reconcile,
-so the sharded generator was removed rather than carried unused.
-
-What is worth doing now:
-
-1. **Byte-scan SSE parsing.** Only two things matter per chunk — the first
-   content delta and the final usage frame. `json.loads` on every chunk costs
-   ~13k parses/second at 56 rps for information we discard. This did not move
-   the wall (the limit is event-loop scheduling, not parsing) but it lowers CPU
-   and cut distortion at the wall from 66% to 45%.
-
-2. **uvloop** where available: a 2-4x faster loop for free.
-
-3. **`client_health()` on every run.** The real protection is not a bigger
-   client, it is knowing when the client is the bottleneck. A run whose
-   dispatch lag or ITL is suspect must be discarded, not interpreted.
+1. **Byte-scan SSE parsing.** First-token time and the token count come from
+   a byte scan for the content delta and the usage frame; JSON is parsed
+   only to collect the reply text, and a chunk that will not parse costs one
+   token of text rather than the latency sample.
+2. **uvloop** where available.
+3. **`client_health()` on every level.** The real protection is not a bigger
+   client, it is knowing when the client is the bottleneck. A level whose
+   dispatch lag is suspect must be discarded, not interpreted.
 """
 from __future__ import annotations
 
@@ -139,10 +129,9 @@ async def run_concurrent_users(make_session, base_url: str, model: str,
 
     This is the marketplace question -- "how many users can we serve at once" --
     and it is genuinely closed-loop: a user cannot send their next message
-    before reading the last reply. That differs from the open-loop rate sweeps
-    used for scheduler comparison, and deliberately so. Under overload a
-    closed-loop population self-limits (users wait longer, so send less), which
-    is what real users do and what makes the concurrency axis meaningful.
+    before reading the last reply. Under overload a closed-loop population
+    self-limits (users wait longer, so send less), which is what real users
+    do and what makes the concurrency axis meaningful.
 
     **The level ends at the deadline, not when the last reply finishes.** A
     market reply is ~2,000 tokens, 35-60 s at these speeds; letting every

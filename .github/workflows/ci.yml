@@ -24,12 +24,10 @@ jobs:
       - name: lint
         run: uv run ruff check .
 
-      # The suite must never touch the network or a GPU. conftest enforces it
-      # at the socket layer; this is the belt to that braces.
+      # The suite must never touch the network or a GPU. Each package's
+      # conftest enforces it at the socket layer, so nothing here has to.
       - name: test
         run: uv run pytest -q
-        env:
-          SIMULATOR_OFFLINE: "1"
 
       - name: package builds and imports
         run: |

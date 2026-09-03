@@ -24,11 +24,13 @@ inside a fresh Modal container, so today it does not.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
+import pathlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from ..contracts.agent import AgentOutcome, AgentService, Idea
 from ..contracts.orchestration import AgentState, FleetSpec, FleetState
@@ -67,6 +69,10 @@ class _Slot:
         # Spend the agent has already reported for its current idea, so the
         # outcome's total is not counted twice when the idea ends.
         self.reported_usd = 0.0
+        # What the agent was doing when it was paused, so `resume` puts the
+        # row back to "evaluating" rather than a generic "thinking" while the
+        # sweep it never stopped is still running.
+        self.before_pause = "thinking"
 
     @property
     def paused(self) -> bool:
@@ -107,6 +113,14 @@ class Fleet:
         self._slept_s = 0.0
         self._sleep_note = ""
         self._completed: list[AgentOutcome] = []
+        # Operator commands are applied wherever the fleet happens to be
+        # awake -- every `report`, every checkpoint, and the control tick --
+        # under one non-reentrant lock so two threads never take the same
+        # row. `_last_poll` throttles the agent-thread path: a build edit
+        # streams a token report per message and the store is a file.
+        self._cmd_lock = threading.Lock()
+        self._last_poll = 0.0
+        self._summary_at = 0.0
 
     @property
     def evals(self):
@@ -160,17 +174,29 @@ class Fleet:
             self._ctl.join(timeout=5)
         with self._lock:
             self._state = replace(self._state, running=False)
+        final = replace(self._snapshot(), phase="stopped", note=reason)
         if self.store is not None:
-            self.store.publish(replace(self._snapshot(), phase="stopped",
-                                       note=reason))
+            self.store.publish(final)
+        self.write_summary(final)
         return self.state()
 
     # ── control surface ──────────────────────────────────────────────────
+    # Each of these changes the published row *in the same lock* as the
+    # flag, so the snapshot a watcher reads after the acknowledgement
+    # already shows the new state: "paused" the moment pause lands,
+    # "thinking"/"evaluating" the moment resume does, "stopping" on kill.
+    # An agent that has finished (done, failed) is refused rather than
+    # relabelled -- a pause that flips a finished row to "paused" is how a
+    # dashboard ends up showing a paused agent that no thread is running.
+    FINISHED = ("done", "failed")
+
     def pause_agent(self, agent_id: str) -> bool:
         with self._lock:
             s = self._slots.get(agent_id)
-            if s is None or s.stop.is_set():
+            if s is None or s.stop.is_set() or s.view.status in self.FINISHED:
                 return False
+            if not s.paused:
+                s.before_pause = s.view.status
             s.resume.clear()
             s.view = replace(s.view, status="paused")
             return True
@@ -180,15 +206,19 @@ class Fleet:
             s = self._slots.get(agent_id)
             if s is None:
                 return False
+            was = s.paused
             s.resume.set()
-            s.view = replace(s.view, status="thinking")
+            if was and s.view.status == "paused":
+                back = s.before_pause
+                s.view = replace(s.view, status=back if back in (
+                    "thinking", "queued", "evaluating") else "thinking")
             return True
 
     def kill_agent(self, agent_id: str) -> bool:
         """Wind the agent up. Cooperative: a paid evaluation still finishes."""
         with self._lock:
             s = self._slots.get(agent_id)
-            if s is None:
+            if s is None or s.view.status in self.FINISHED:
                 return False
             s.stop.set()
             s.resume.set()
@@ -224,10 +254,12 @@ class Fleet:
 
     # ── the AgentControl seam ────────────────────────────────────────────
     def should_stop(self, agent_id: str) -> bool:
+        self._poll_commands()
         s = self._slots.get(agent_id)
         return self._stop.is_set() or (s is not None and s.stop.is_set())
 
     def wait_if_paused(self, agent_id: str, timeout_s: float = 3600) -> bool:
+        self._poll_commands()
         s = self._slots.get(agent_id)
         if s is None:
             return False
@@ -237,6 +269,9 @@ class Fleet:
 
     def report(self, agent_id: str, **fields) -> None:
         """Publish what an agent is doing. Never blocks, never raises."""
+        # A checkpoint too: the agent is awake and about to publish, so a
+        # pause or kill issued a moment ago lands before its row does.
+        self._poll_commands()
         with self._lock:
             s = self._slots.get(agent_id)
             if s is None:
@@ -387,10 +422,12 @@ class Fleet:
             if self.store is not None:
                 # A watcher's database must never be able to kill a fleet
                 # that is mid-experiment and holding rented GPUs.
+                self._poll_commands(min_gap_s=0.0)
                 with contextlib.suppress(Exception):
-                    for cmd in self.store.take_commands(self.session_id):
-                        self.store.acknowledge(cmd.id, self._apply(cmd))
                     self.store.publish(self._snapshot())
+            if self.root and now - self._summary_at > self.SUMMARY_EVERY_S:
+                self._summary_at = now
+                self.write_summary()
             if not self._within_budget() and self._state.running:
                 # Out of budget: the agents' own loops end at their next
                 # checkpoint; flag the fleet as not running so the daemon
@@ -398,6 +435,70 @@ class Fleet:
                 with self._lock:
                     self._state = replace(self._state, running=False)
             time.sleep(self.tick_s)
+
+    # How often the on-disk summary is refreshed while running. It exists so
+    # a daemon that dies leaves a near-current picture in the run directory.
+    SUMMARY_EVERY_S = 10.0
+
+    def _poll_commands(self, min_gap_s: float = 0.25) -> None:
+        """Take every unapplied command, apply it, publish, then acknowledge.
+
+        That order is the whole contract with a watcher: a command shows as
+        pending until `applied_at` is set, and by then the snapshot already
+        says "paused", so a dashboard never sees an acknowledged pause on a
+        row that still reads "evaluating". Safe from any thread; a caller
+        that finds another poll in progress skips rather than waits, because
+        this runs inside `report` and must never block an agent.
+        """
+        if self.store is None:
+            return
+        now = time.time()
+        if now - self._last_poll < min_gap_s:
+            return
+        if not self._cmd_lock.acquire(blocking=False):
+            return
+        try:
+            self._last_poll = now
+            applied = [(cmd, self._apply(cmd))
+                       for cmd in self.store.take_commands(self.session_id)]
+            if applied:
+                self.store.publish(self._snapshot())
+                for cmd, result in applied:
+                    self.store.acknowledge(cmd.id, result)
+        except Exception:
+            pass
+        finally:
+            self._cmd_lock.release()
+
+    def write_summary(self, view: SessionView | None = None) -> pathlib.Path | None:
+        """`<root>/summary.json`: the snapshot plus the baseline and every
+        idea's outcome. The run directory is what survives the daemon and the
+        session store, and without this it held the experiments but not what
+        each agent cost, how it spent its hours, or how the fleet ended --
+        which is what `harness ask` is asked about the next morning."""
+        if not self.root:
+            return None
+        view = view or self._snapshot()
+        with self._lock:
+            outcomes = [{"agent_id": o.agent_id, "idea_id": o.idea.id,
+                         "title": o.idea.title, "hypothesis": o.idea.hypothesis,
+                         "stop": o.stop, "attempts": len(o.attempts),
+                         "cost_usd": round(o.cost_usd, 4), "note": o.note,
+                         "best_experiment": o.best.experiment_id if o.best else "",
+                         "best_delta": dict(o.best.delta) if o.best else {}}
+                        for o in self._completed]
+            spec = self._spec
+        doc = {"snapshot": asdict(view), "written_at": time.time(),
+               "baseline": dict(spec.baseline_metrics) if spec else {},
+               "outcomes": outcomes}
+        p = pathlib.Path(self.root) / "summary.json"
+        tmp = p.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(doc, indent=1, default=str))
+            os.replace(tmp, p)          # never a half-written file
+        except OSError:
+            return None
+        return p
 
     def note_host_sleep(self, seconds: float) -> None:
         """Record that the host stopped running us for `seconds`."""
@@ -409,13 +510,25 @@ class Fleet:
               flush=True)
 
     def _apply(self, cmd: Command) -> str:
+        """One command, applied; the text is what the operator is told.
+        A refusal names why, because "no such agent" on an agent the
+        dashboard is showing means it has finished, and the operator should
+        read that rather than retry."""
         k, a = cmd.kind, cmd.agent_id
+        with self._lock:
+            slot = self._slots.get(a)
+            status = slot.view.status if slot is not None else ""
+        why = (f"no such agent {a}" if slot is None
+               else f"{a} is already {status}")
         if k == "pause":
-            return "paused" if self.pause_agent(a) else f"no such agent {a}"
+            return "paused" if self.pause_agent(a) else why
         if k == "resume":
-            return "resumed" if self.resume_agent(a) else f"no such agent {a}"
+            if slot is not None and not slot.paused:
+                self.resume_agent(a)
+                return f"{a} was not paused"
+            return "resumed" if self.resume_agent(a) else why
         if k == "kill":
-            return "stopping" if self.kill_agent(a) else f"no such agent {a}"
+            return "stopping" if self.kill_agent(a) else why
         if k == "scale":
             try:
                 return f"target {self.scale(int(cmd.value))}"

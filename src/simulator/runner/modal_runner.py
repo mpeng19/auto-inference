@@ -1,9 +1,10 @@
-"""Run one concurrency sweep on a GPU, and nothing else.
+"""The Modal app: one concurrency sweep on a GPU, plus a workbench beside it.
 
-The old app had fifteen entrypoints because it was a research harness. This
-has one, because the product has one measurement: sweep offered load on real
-traffic until the SLOs stop holding, and read phase-split GPU time at the last
-level that held.
+The product has one measurement -- sweep concurrency on real traffic until
+the SLOs stop holding, and read phase-split GPU time at the last level that
+held -- and `sweep` is it. `workbench` runs a single script against the same
+applied stack for kernel work that does not need a price; the rest are small
+readers of the results volume.
 
 **Server and client share a container**, talking over loopback. A laptop-side
 client would put 20-80 ms of WAN latency in front of every TTFT measurement --
@@ -39,7 +40,7 @@ APP_NAME = os.environ.get("SIMULATOR_APP_NAME", "auto-inference")
 HF_CACHE_VOLUME = os.environ.get("SIMULATOR_HF_VOLUME", "auto-inference-hf-cache")
 RESULTS_VOLUME = os.environ.get("SIMULATOR_RESULTS_VOLUME", "auto-inference-results")
 # Opt-in by name. Unset means no secret is attached, which is the right
-# default: both Qwen3 checkpoints are Apache-2.0 and ungated, so a fresh clone
+# default: the target checkpoint is Apache-2.0 and ungated, so a fresh clone
 # needs no token, and requiring one would make a new user's first `make deploy`
 # fail on a secret they have no reason to have.
 HF_SECRET = os.environ.get("SIMULATOR_HF_SECRET", "")
@@ -427,19 +428,6 @@ def fetch_profile(rel_dir: str) -> dict:
                     out.append({"name": name, "size": os.path.getsize(p),
                                 "b64": base64.b64encode(f.read()).decode()})
     return {"dir": d, "files": out}
-
-
-@app.function(image=image, volumes={"/results": results_vol}, timeout=600)
-def fetch(name: str) -> dict:
-    """Read one stored sweep back by filename, for a run whose call id is lost.
-
-    `Simulator.collect` does not use this -- it holds the Modal call and gets
-    the record from `FunctionCall.get`. This is the escape hatch for the case
-    that leaves nothing to collect: `ls` names the file, this returns it, and
-    `simulate rescore` prices it without a GPU.
-    """
-    with open(f"/results/runs/{name}") as f:
-        return json.load(f)
 
 
 @app.function(image=image, volumes={"/results": results_vol}, timeout=600)

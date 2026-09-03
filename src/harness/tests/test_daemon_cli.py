@@ -24,6 +24,8 @@ def test_config_round_trips(tmp_path):
                       levels=(1, 2, 4, 8), seeds=("try a thing",), dry_run=True)
     p = tmp_path / "fleet.json"
     cfg.save(p)
+    # A field an older harness wrote must not stop a restart.
+    p.write_text(p.read_text().replace('"agents": 7', '"agents": 7, "mode": "build"'))
     back = FleetConfig.load(p)
     assert back.agents == 7 and back.levels == (1, 2, 4, 8)
     assert back.seeds == ("try a thing",) and back.dry_run
@@ -66,34 +68,36 @@ def test_a_real_fleet_refuses_a_baseline_it_cannot_score_against():
     """Each missing piece is a way the fleet runs all night and learns nothing."""
     from harness.daemon import check
 
-    check(FleetConfig(session_id="s", dry_run=True))            # fakes need nothing
+    check(FleetConfig(session_id="s", dry_run=True, fake_agents=True))   # fakes need nothing
+    with pytest.raises(SystemExit, match="bank"):
+        check(FleetConfig(session_id="s", dry_run=True))     # real agents cannot self-seed
     full = {"bill_per_1k": 14.96, "quality": {"gsm8k": 0.66},
             "screen": {"bill_per_1k": 17.3}}
-    check(FleetConfig(session_id="s", baseline=full))
+    check(FleetConfig(session_id="s", bank="ideas.db", baseline=full))
     for missing in ("bill_per_1k", "quality", "screen"):
         with pytest.raises(SystemExit):
-            check(FleetConfig(session_id="s",
+            check(FleetConfig(session_id="s", bank="ideas.db",
                               baseline={k: v for k, v in full.items() if k != missing}))
-    check(FleetConfig(session_id="s", screen_first=False,
+    check(FleetConfig(session_id="s", bank="ideas.db", screen_first=False,
                       baseline={k: v for k, v in full.items() if k != "screen"}))
 
 
-def test_build_mode_reaches_the_proposer_with_the_tool_index(tmp_path):
-    """`--mode build --bank --manager`: the proposer is built in build mode
-    and reads the manager's tool index; nothing shells out at construction."""
+def test_the_bank_and_the_manager_reach_the_proposer(tmp_path):
+    """`--bank --manager`: the proposer reads the manager's tool index;
+    nothing shells out at construction."""
     from harness.ideas import SqliteIdeaBank
 
     bank = tmp_path / "ideas.db"
     SqliteIdeaBank(bank)
     cfg = FleetConfig(session_id="s1", root=str(tmp_path / "agents"), agents=1,
-                      dry_run=True, mode="build", bank=str(bank), manager=True,
+                      dry_run=True, bank=str(bank), manager=True,
                       baseline={"bill_per_1k": 12.23, "quality": {"gsm8k": 0.69},
                                 "screen": {"bill_per_1k": 17.3}})
     fleet, broker = build(cfg, store=SqliteSessionStore(tmp_path / "s.db"))
     try:
         assert fleet.bank is not None and fleet.manager is not None
         agent = fleet.make_agent("a00", fleet)
-        assert agent.proposer.mode == "build"
+        assert not hasattr(agent.proposer, "seed"), "real agents claim, never invent"
         assert agent.proposer.session_tools is not None
         fleet.manager.stash.add("bench", "bench a kernel", "python tools/bench.py", "print(1)", 2)
         from harness.contracts import Brief
@@ -104,7 +108,7 @@ def test_build_mode_reaches_the_proposer_with_the_tool_index(tmp_path):
 
     from harness.daemon import check
     with _pt.raises(SystemExit):
-        check(FleetConfig(session_id="s2", mode="build",
+        check(FleetConfig(session_id="s2",
                           baseline={"bill_per_1k": 1, "quality": {"gsm8k": 0.6},
                                     "screen": {"bill_per_1k": 1}}))
 

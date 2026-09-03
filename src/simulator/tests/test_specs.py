@@ -1,8 +1,8 @@
 """Model and hardware specs. Getting one wrong killed a launch 128 s in.
 
 The spec is load-bearing twice over: it gates the parallelism config before
-a container spawns, and `bytes_per_seq` is the per-sequence term that sets
-the decode slope, which is what a TPOT SLO converts into money.
+a container spawns, and `bytes_per_seq` is what `harness.tools.roofline`
+compares a measured decode step against.
 """
 import pytest
 
@@ -10,25 +10,22 @@ from simulator.specs import MODELS
 
 
 def test_target_model_is_dense_with_hybrid_attention():
-    """Getting this wrong cost a launch that died 128 s in.
-
-    The config says has_moe: false and intermediate_size: 17408 -- a dense FFN
-    with hybrid *attention*: full attention every 4th layer, so only 16 of 64
-    layers hold growing KV.
-    """
+    """The config says has_moe: false and intermediate_size: 17408 -- a dense
+    FFN with hybrid *attention*: full attention every 4th layer, so only 16
+    of 64 layers hold growing KV."""
     m = MODELS["Qwen/Qwen3.8-27B-FP8"]
-    assert m.dense and m.n_experts == 1
+    assert m.intermediate_size == 17408
     assert m.n_kv_layers == 16 and m.n_layers == 64
 
 
 def test_kv_per_token_is_64_kib_not_256():
     m = MODELS["Qwen/Qwen3.8-27B-FP8"]
     per_tok = m.n_kv_layers * 2 * m.n_kv_heads * m.head_dim * 2.0
-    assert per_tok == 65536
+    assert per_tok == 65536 == m.kv_bytes_per_token(2.0)
 
 
 def test_per_sequence_state_at_market_context():
-    """1.504 GB per 20.6k conversation is what sets the decode slope."""
+    """1.504 GB per 20.6k conversation, KV plus the linear-attention state."""
     m = MODELS["Qwen/Qwen3.8-27B-FP8"]
     assert m.bytes_per_seq(20583, 2.0) / 1e9 == pytest.approx(1.504, abs=0.005)
 

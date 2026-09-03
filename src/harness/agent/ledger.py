@@ -54,17 +54,3 @@ def drain(agent_root: str | pathlib.Path) -> float:
             continue
     seen.write_text(str(len(data)))
     return round(usd, 4)
-
-
-def total(agent_root: str | pathlib.Path) -> float:
-    """Everything in the ledger, drained or not. For reports."""
-    p = pathlib.Path(agent_root) / LEDGER
-    if not p.is_file():
-        return 0.0
-    usd = 0.0
-    for raw in p.read_text().splitlines():
-        try:
-            usd += float(json.loads(raw).get("cost_usd") or 0.0)
-        except (ValueError, AttributeError):
-            continue
-    return round(usd, 4)
