@@ -207,6 +207,19 @@ class IterativeAgent:
             try:
                 rationale = self.proposer.edit(
                     self.workspace, idea, brief, n, tuple(attempts))
+            except TimeoutError as e:
+                # A build edit that runs out its clock has usually left a
+                # diff behind. build-4's a00 wrote for two hours, was killed,
+                # and the idea closed as an error with the diff never priced;
+                # the work is worth one check and a screen. Only an untouched
+                # workspace makes the timeout an error.
+                if not self.workspace.touched():
+                    self._append(trace, Turn(kind="error", name="propose",
+                                             content=str(e)),
+                                 since=t_phase, phase="propose", call=True)
+                    stop = "error"
+                    break
+                rationale = f"(edit timed out with a diff in place: {e})"
             except Exception as e:
                 self._append(trace, Turn(kind="error", name="propose",
                                          content=str(e)),

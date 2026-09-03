@@ -227,3 +227,25 @@ def test_cli_ingests_then_answers_from_the_same_database(tmp_path, capsys):
 
     main(["--db", db, "gaps", "attn_out", "mlp_in", "--min-gap", "100"])
     assert json.loads(capsys.readouterr().out)[0]["summary"]["instances"] >= 4
+
+
+def test_gzipped_kineto_trace_ingests_like_the_plain_one(tmp_path):
+    """The server writes `*.trace.json.gz`; build-4 ingested none of them
+    because the reader opened the bytes as text."""
+    import gzip
+    import json
+
+    from tracedb.ingest import ingest
+
+    events = {"traceEvents": [
+        {"ph": "M", "name": "thread_name", "pid": 1, "tid": 7, "args": {"name": "stream 7"}},
+        {"ph": "X", "name": "ProfilerStep#3", "cat": "user_annotation", "pid": 1, "tid": 1,
+         "ts": 0.0, "dur": 100.0, "args": {}},
+        {"ph": "X", "name": "flash_fwd_kernel", "cat": "kernel", "pid": 1, "tid": 7,
+         "ts": 10.0, "dur": 40.0, "args": {"correlation": 5}},
+    ]}
+    gz = tmp_path / "x-TP-0-DECODE.trace.json.gz"
+    with gzip.open(gz, "wt") as f:
+        json.dump(events, f)
+    out = ingest(gz, tmp_path / "t.sqlite")
+    assert out["events"] == 2 and out["steps"] == 1

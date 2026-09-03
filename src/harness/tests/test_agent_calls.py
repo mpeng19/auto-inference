@@ -420,3 +420,50 @@ def test_a_cancelled_stream_still_keeps_text_and_tokens(tmp_path, stock_dir):
     threading.Timer(0.5, cancel.set).start()
     _text, use = prop._run("hi", cwd=str(tmp_path), phase="study", cancel=cancel)
     assert prop.last_call.cancelled and use.output == 20
+
+
+@dataclass
+class TimedOutProposer(StudyProposer):
+    """An edit that is killed at its limit, with or without a diff in place."""
+    leaves_diff: bool = True
+
+    def edit(self, ws, idea, brief, attempt, history):
+        if self.leaves_diff:
+            ws.edit(P, "CHUNK = 16384\n\n\nclass SchedulePolicy:\n    pass\n")
+        raise TimeoutError("claude (edit) killed after 7200s wall against a 7200s limit")
+
+    def study(self, ws, idea, brief, history, cancel=None):
+        return self.note
+
+
+def test_an_edit_killed_at_its_limit_still_prices_the_diff_it_left(
+        tmp_path, stock_dir, memory, context):
+    """build-4's a00 wrote for two hours, was killed, and the idea closed as an
+    error with the diff never seen by a GPU. The clock bounds the writing,
+    not whether the writing counts."""
+    broker = EvalBroker(_runner(), capacity=1)
+    agent = _agent(tmp_path, stock_dir, memory, context, broker, TimedOutProposer())
+    try:
+        out = agent.run(Idea(title="chunk", hypothesis="tune chunk", targets=(P,)),
+                        AgentBudget(max_attempts=1, patience=1, screen_first=False,
+                                    replicate_wins=False))
+    finally:
+        broker.shutdown()
+    assert out.stop != "error"
+    assert out.attempts and out.attempts[0].metrics.get("bill_per_1k") == 12.23
+    propose = [t for t in _turns(context, out.attempts[0].trace_ref) if t.name == "propose"]
+    assert propose[0].kind == "thought" and "timed out" in propose[0].content
+
+
+def test_an_edit_killed_with_nothing_written_is_still_an_error(
+        tmp_path, stock_dir, memory, context):
+    broker = EvalBroker(_runner(), capacity=1)
+    agent = _agent(tmp_path, stock_dir, memory, context, broker,
+                   TimedOutProposer(leaves_diff=False))
+    try:
+        out = agent.run(Idea(title="chunk", hypothesis="tune chunk", targets=(P,)),
+                        AgentBudget(max_attempts=1, patience=1, screen_first=False,
+                                    replicate_wins=False))
+    finally:
+        broker.shutdown()
+    assert out.stop == "error"

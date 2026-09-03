@@ -1,6 +1,7 @@
 """Ingest chrome-trace JSON (kineto/torch.profiler/tensorboard) or JSONL-of-events into TraceStore."""
 from __future__ import annotations
 
+import gzip
 import json
 import re
 from pathlib import Path
@@ -14,8 +15,13 @@ _STEP_RE = re.compile(r"ProfilerStep#?\s*(\d+)")
 
 
 def _iter_events(path: Path):
-    if path.suffix == ".jsonl":
-        with open(path) as f:
+    # torch.profiler writes `<name>.trace.json.gz` on the server; SGLang's
+    # own profiler CLI does too. Reading that as text was the whole reason no
+    # profile reached an agent on build-4.
+    opener = gzip.open if path.suffix == ".gz" else open
+    inner = path.with_suffix("") if path.suffix == ".gz" else path
+    if inner.suffix == ".jsonl":
+        with opener(path, "rt") as f:
             for line in f:
                 line = line.strip().rstrip(",")
                 if line and line not in ("[", "]"):
@@ -24,7 +30,8 @@ def _iter_events(path: Path):
                     except json.JSONDecodeError:
                         continue
     else:
-        data = json.loads(path.read_text())
+        with opener(path, "rt") as f:
+            data = json.load(f)
         events = data.get("traceEvents", data) if isinstance(data, dict) else data
         yield from events
 
