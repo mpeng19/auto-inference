@@ -418,5 +418,5 @@ def test_a_cancelled_stream_still_keeps_text_and_tokens(tmp_path, stock_dir):
     cancel = threading.Event()
     prop = ClaudeCodeProposer(binary=binary)
     threading.Timer(0.5, cancel.set).start()
-    text, use = prop._run("hi", cwd=str(tmp_path), phase="study", cancel=cancel)
+    _text, use = prop._run("hi", cwd=str(tmp_path), phase="study", cancel=cancel)
     assert prop.last_call.cancelled and use.output == 20

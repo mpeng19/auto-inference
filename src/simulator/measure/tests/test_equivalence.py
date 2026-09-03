@@ -141,7 +141,7 @@ def test_the_script_pins_the_same_dataset_the_quality_gate_uses():
     src = E.build_script("m", mode="reference", out_path="/o.json")
     for pinned in (quality.LONGBENCH_REPO, quality.LONGBENCH_FILE, quality.LONGBENCH_REV):
         assert pinned in src
-    assert "step by step" in src, "the prompt template must travel too"
+    assert "given passages" in src, "the prompt template must travel too"
 
 
 def test_a_candidate_script_will_not_be_built_without_a_reference():

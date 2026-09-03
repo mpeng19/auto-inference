@@ -134,7 +134,7 @@ def test_longbench_slice_is_pinned_and_long(tmp_path, monkeypatch):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         for name in quality.LONGBENCH_SETS:
-            rows = [{"input": f"q{i}", "context": "word " * 40000, "answers": "['a%d']" % i}
+            rows = [{"input": f"q{i}", "context": "word " * 40000, "answers": f"['a{i}']"}
                     for i in range(5)]
             z.writestr(f"data/{name}.jsonl", "\n".join(json.dumps(r) for r in rows))
     p = tmp_path / "data.zip"

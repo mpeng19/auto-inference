@@ -22,7 +22,7 @@ def test_a_contradicting_fact_supersedes_the_old_one_and_keeps_it(tmp_path):
     new = Fact(claim="a 2 point GSM8K tolerance rejects stock; use 10 points on 100 items",
                topic="gsm8k-gate", source="night-1")
     # the judge decides what contradicts; here a model stand-in names the loser
-    fid, losers = b.add(new, judge=lambda n, existing: tuple(x.id for x in existing))
+    _fid, losers = b.add(new, judge=lambda n, existing: tuple(x.id for x in existing))
     assert losers == (old.id,)
     assert b.get(old.id).status == "superseded" and b.get(old.id).superseded_by == new.id
     assert b.list(topic="gsm8k-gate") == (new,)            # active only

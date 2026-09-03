@@ -13,7 +13,7 @@ do, or (b) improvements layered on top of a stock feature, stated as such in the
 ## Skipped as already default in stock SGLang 0.5.18
 
 Verified by reading the installed package at
-`/Users/michaelpeng/.cache/auto-inference/sglang/0.5.18/sglang/`.
+`~/.cache/auto-inference/sglang/0.5.18/sglang/` (the harness's wheel cache).
 
 - **Radix prefix caching** (§5.3.1) — `srt/mem_cache/radix_cache.py`, on by default.
 - **Chunked prefill** (§5.3.4) — default scheduling path.
