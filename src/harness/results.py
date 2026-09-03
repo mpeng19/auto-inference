@@ -48,11 +48,16 @@ def leaderboard(root: str | pathlib.Path) -> list[Result]:
         return []
     c = sqlite3.connect(db)
     c.row_factory = sqlite3.Row
+    tiers = _tiers_from_traces(root)
     out = []
     for r in c.execute("SELECT * FROM experiments ORDER BY ts"):
         m = json.loads(r["metrics"] or "{}")
         base = json.loads(r["baseline_metrics"] or "{}")
         bill = m.get("bill_per_1k")
+        # Records written before the tier travelled with the metrics: the
+        # trace's eval_result for the same stack says which tier it was.
+        if not m.get("tier") and r["stack_digest"] in tiers:
+            m["tier"] = tiers[r["stack_digest"]]
         # A screen is compared with stock at screen tier (see loop._delta).
         screen = base.get("screen") if m.get("tier") == "screen" else None
         b0 = (screen or {}).get("bill_per_1k") if isinstance(screen, dict) else base.get("bill_per_1k")
@@ -81,6 +86,22 @@ def leaderboard(root: str | pathlib.Path) -> list[Result]:
     return priced + rest
 
 
+def _tiers_from_traces(root: str | pathlib.Path) -> dict[str, str]:
+    """stack digest -> the tier of the *last* eval_result for it in the
+    traces. A screen that was promoted has a later full result, which is the
+    one memory recorded."""
+    out: dict[str, str] = {}
+    for tf in tr.find(root):
+        try:
+            for t in tr.read(tf.path, kinds=("eval_result",)):
+                tier = (t.get("data") or {}).get("tier")
+                if tier and t.get("name"):
+                    out[t["name"]] = tier
+        except Exception:
+            continue
+    return out
+
+
 def diff_for(root: str | pathlib.Path, res: Result, limit: int = 12000) -> str:
     """The unified diff behind a result, from its trace's eval_submit turn."""
     if not res.stack_digest:
@@ -105,6 +126,6 @@ def summary_text(root: str | pathlib.Path, k: int = 8) -> str:
     for r in rows[:k]:
         d = "-" if r.delta_pct is None else f"{r.delta_pct:+.1f}%"
         bill = "-" if r.bill_per_1k is None else f"${r.bill_per_1k:.2f}/1k"
-        lines.append(f"  {r.verdict:8s} {d:>7} {bill:>10} {r.rank or '-':>6}  "
+        lines.append(f"  {r.verdict:8s} {r.tier:6s} {d:>7} {bill:>10} {r.rank or '-':>6}  "
                      f"{r.agent_id}  {r.title}")
     return "\n".join(lines)

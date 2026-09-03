@@ -130,8 +130,8 @@ class FleetApp(App):
                        ("cost", 9), ("tokens", 8)):
             t.add_column(col, width=w)
         r = self.query_one("#results", DataTable)
-        for col, w in (("verdict", 8), ("Δ%", 7), ("$/1k", 7), ("rank", 6), ("share", 7),
-                       ("N*", 4), ("agent", 6), ("hypothesis", 44)):
+        for col, w in (("verdict", 8), ("tier", 6), ("Δ%", 7), ("$/1k", 7), ("rank", 6),
+                       ("share", 7), ("N*", 4), ("agent", 6), ("hypothesis", 40)):
             r.add_column(col, width=w)
         self.set_interval(REFRESH_S, self.refresh_view)
         self.refresh_view()
@@ -261,8 +261,10 @@ class FleetApp(App):
             bill = "-" if r.bill_per_1k is None else f"{r.bill_per_1k:.2f}"
             share = "-" if r.share_pct is None else f"{r.share_pct:.2f}%"
             style = {"win": "bold green", "loss": "red", "neutral": "", "invalid": "dim"}.get(r.verdict, "")
-            t.add_row(Text(r.verdict, style=style),
-                      Text(d, style="green" if d.startswith("-") else ""),
+            # Colour follows the verdict, not the sign: a -2% inside the
+            # noise floor is neutral and must not look like a win.
+            t.add_row(Text(r.verdict, style=style), r.tier,
+                      Text(d, style=style),
                       bill, r.rank or "-", share, str(r.n_star or "-"),
                       r.agent_id, r.title, key=r.experiment_id)
         if cur is not None and t.row_count:
