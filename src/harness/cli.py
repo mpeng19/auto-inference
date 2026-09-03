@@ -621,12 +621,15 @@ def cmd_paper(a) -> int:
         out = compile_tex(tex)
         print(out or f"compile failed; see {tex.parent / 'paper.log'}")
         return 0 if out else 1
-    papers = find_papers(root)
+    # Listing compiles: a .tex left by a daemon without tectonic, or one
+    # written after the PDF, becomes a PDF here rather than a surprise later.
+    papers = find_papers(root, compile=True)
     if not papers:
         print("no papers yet (written at the end of an idea that reached a full sweep)")
         return 0
     for idea_id, p in sorted(papers.items()):
-        print(f"  {idea_id:<20} {p}")
+        note = "" if p.suffix == ".pdf" else f"   (not compiled; see {p.parent / 'paper.log'})"
+        print(f"  {idea_id:<20} {p}{note}")
     return 0
 
 

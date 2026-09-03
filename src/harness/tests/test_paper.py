@@ -73,3 +73,35 @@ def test_loop_writes_the_paper_after_a_full_sweep(tmp_path, stock_dir, memory, c
     assert Prop.papers[0][2] == 12.23
     turns = list(context.read(agent.last_trace)) if hasattr(agent, "last_trace") else []
     assert turns == [] or any(t.name == "paper" for t in turns)
+
+
+def test_ensure_pdf_compiles_when_missing_or_stale(tmp_path, monkeypatch):
+    """A .tex written by a daemon without tectonic, or after its PDF, gets
+    compiled on the way to the reader."""
+    import os
+    import shutil
+    import stat
+    import time
+
+    from harness import paper as pp
+
+    d = tmp_path / "a02" / "paper" / "idea_x"
+    d.mkdir(parents=True)
+    tex = d / "PAPER.tex"
+    tex.write_text("\\documentclass{article}\\begin{document}x\\end{document}")
+    fake = tmp_path / "tectonic"
+    fake.write_text("#!/bin/sh\n[ -d \"$3\" ] || exit 1\nprintf '%%PDF-1.4 fake' > \"$(dirname \"$4\")/PAPER.pdf\"\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr(shutil, "which", lambda name: str(fake) if name == "tectonic" else None)
+    assert pp.find_papers(tmp_path)["idea_x"].suffix == ".tex"
+    pdf = pp.ensure_pdf(tex)
+    assert pdf == d / "paper.pdf" and pdf.is_file()
+    assert pp.find_papers(tmp_path)["idea_x"] == pdf
+    # a newer .tex is compiled again; a current PDF is left alone
+    first = pdf.stat().st_mtime
+    assert pp.ensure_pdf(tex) == pdf and pdf.stat().st_mtime == first
+    time.sleep(0.02)
+    tex.write_text(tex.read_text() + "%")
+    os.utime(tex, None)
+    assert pp.ensure_pdf(tex) == pdf and pdf.stat().st_mtime >= first
+    assert pp.find_papers(tmp_path, compile=True)["idea_x"] == pdf

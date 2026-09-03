@@ -199,12 +199,27 @@ def compile_tex(tex: str | pathlib.Path, timeout_s: float = 240.0) -> pathlib.Pa
     return out
 
 
-def find_papers(root: str | pathlib.Path) -> dict[str, pathlib.Path]:
-    """idea id -> paper.pdf (or PAPER.tex when uncompiled) under a fleet root."""
+def ensure_pdf(tex: str | pathlib.Path) -> pathlib.Path | None:
+    """`paper.pdf` for a `PAPER.tex`, compiled now if missing or older than
+    the .tex. None when tectonic is absent or the compile fails; the .tex
+    is still there and `paper.log` says why."""
+    tex = pathlib.Path(tex)
+    pdf = tex.parent / "paper.pdf"
+    if pdf.is_file() and pdf.stat().st_mtime >= tex.stat().st_mtime:
+        return pdf
+    return compile_tex(tex)
+
+
+def find_papers(root: str | pathlib.Path, compile: bool = False) -> dict[str, pathlib.Path]:
+    """idea id -> paper.pdf (or PAPER.tex when uncompiled) under a fleet root.
+    With `compile`, every .tex without a current PDF is compiled first, so
+    the caller gets PDFs wherever tectonic can make one."""
     out: dict[str, pathlib.Path] = {}
     for d in pathlib.Path(root).glob("a*/paper/*"):
         pdf = d / "paper.pdf"
         tex = d / "PAPER.tex"
+        if compile and tex.is_file():
+            ensure_pdf(tex)                 # leaves paper.pdf beside the .tex
         if pdf.is_file():
             out[d.name] = pdf
         elif tex.is_file():

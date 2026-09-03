@@ -796,9 +796,28 @@ class FleetApp(App):
         arts = self.result_artifacts
         target = next((p for k, p in arts if k == "paper"), None) or \
             next((p for k, p in arts if k == "report"), None)
-        if target:
-            self._open(target, kind="browser")
-            self.notify(f"opened {target} in the browser", timeout=2)
+        if not target:
+            return
+        if target.endswith(".tex"):
+            # The write-up as a PDF in the browser, not LaTeX source in a
+            # text tab: compile it here (tectonic, ~10 s) off the UI thread.
+            self.notify("compiling the paper...", timeout=3)
+            self._compile_and_open(target)
+            return
+        self._open(target, kind="browser")
+        self.notify(f"opened {target} in the browser", timeout=2)
+
+    @work(thread=True, group="paper")
+    def _compile_and_open(self, tex: str) -> None:
+        from ..paper import ensure_pdf
+
+        pdf = ensure_pdf(tex)
+        if pdf is None:
+            self.call_from_thread(self.notify, f"compile failed; see {pathlib.Path(tex).parent / 'paper.log'}",
+                                  severity="error", timeout=5)
+            return
+        self.call_from_thread(self._open, str(pdf), "browser")
+        self.call_from_thread(self.notify, f"opened {pdf} in the browser", timeout=2)
 
     def on_data_table_row_selected(self, event) -> None:
         """Enter on a result row does what `b` does."""
