@@ -225,6 +225,13 @@ class FleetApp(App):
             t.append("time\n", style="bold")
             t.append("  ".join(f"{k} {_dur(v)}" for k, v in sorted(
                 a.phase_s.items(), key=lambda kv: -kv[1])) + "\n")
+        calls = self._recent_calls(a.agent_id)
+        if calls:
+            t.append("\nrecent calls\n", style="bold")
+            for c in calls:
+                t.append(f"  {c['phase']:<6} {c['min']:>5.1f}m {c['msgs']:>3} msgs "
+                         f"out {_tokens(c['out']):>5} cache {_tokens(c['cache']):>6}"
+                         f"{'  ' + c['tools'] if c['tools'] else ''}\n", style="dim")
         if a.queued_s:
             t.append(f"last wait for a GPU: {a.queued_s:.0f}s\n", style="dim")
         if a.idle_s:
@@ -339,6 +346,38 @@ class FleetApp(App):
     def _set_answer(self, text: str, style: str = "") -> None:
         self.answer_text = text
         self.query_one("#answer", Static).update(Text(text, style=style))
+
+    def _recent_calls(self, agent_id: str, k: int = 5) -> list[dict]:
+        """The agent's last k model calls from its call log, summarised.
+        Read from disk, throttled by the caller's refresh; a running call
+        shows its messages so far."""
+        import json
+        import pathlib
+
+        root = self._root()
+        if not root:
+            return []
+        d = pathlib.Path(root) / agent_id / "calls"
+        if not d.is_dir():
+            return []
+        out = []
+        for f in sorted(d.glob("*.jsonl"))[-k:]:
+            try:
+                rows = [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
+            except (OSError, ValueError):
+                continue
+            msgs = [r for r in rows if r.get("type") == "assistant"]
+            tools: dict[str, int] = {}
+            for r in msgs:
+                for name in r.get("tools") or ():
+                    tools[name] = tools.get(name, 0) + 1
+            span = (rows[-1]["ts"] - rows[0]["ts"]) / 60 if len(rows) > 1 else 0.0
+            out.append({"phase": f.stem.split("-")[0], "min": span, "msgs": len(msgs),
+                        "out": sum(r.get("output", 0) for r in msgs),
+                        "cache": sum(r.get("cache_read", 0) for r in msgs),
+                        "tools": " ".join(f"{n}x{c}" for n, c in
+                                          sorted(tools.items(), key=lambda kv: -kv[1])[:3])})
+        return out
 
     def _selected(self):
         if not self.view or not self.view.agents:

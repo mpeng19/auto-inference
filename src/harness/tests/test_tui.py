@@ -3,6 +3,8 @@
 Driven headlessly through textual's pilot, so this is a real mount-and-press,
 not a check that the module imports.
 """
+import json
+
 import pytest
 
 from harness.contracts.session import AgentView, SessionView, TokenUse
@@ -131,11 +133,19 @@ async def test_results_tab_lists_experiments_and_answers_questions(tmp_path, mon
     import harness.ask
     monkeypatch.setattr(harness.ask, "Asker", FakeAsker)
     app = app_mod.FleetApp(s, "demo")
+    calls = root / "a00" / "calls"
+    calls.mkdir(parents=True)
+    (calls / "edit-1700000000.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"ts": 1700000000.0, "type": "assistant", "output": 20, "cache_read": 18000, "tools": ["Bash"]},
+        {"ts": 1700000090.0, "type": "assistant", "output": 400, "cache_read": 30000, "tools": []},
+        {"ts": 1700000100.0, "type": "result"}]))
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause()
         await pilot.pause()
         table = app.query_one("#table")
         assert table.row_count == 1
+        assert "recent calls" in app.detail_text and "edit" in app.detail_text
+        assert "2 msgs" in app.detail_text and "Bashx1" in app.detail_text
         await pilot.press("tab")
         await pilot.pause()
         results = app.query_one("#results")
