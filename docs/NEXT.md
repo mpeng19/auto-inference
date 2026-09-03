@@ -207,13 +207,18 @@ display. The status line and TUI print `host slept ~N min` when it happens.
   define acceptance (a "task-equivalent" board), then make the chosen check a
   pipeline gate. Today the board says the second thing without having decided it.
 
-- **No profile has ever been captured.** `--profile-level` now defaults to 12
-  and the ingest and MCP wiring are tested offline, but both build runs were
-  launched from daemons started before that landed, and no sweep record
-  carries a `profiles` key. Until one does, agents reason about where decode
-  time goes instead of looking (`src/tracedb/`). First check next run:
-  `ls agents/<session>/profiles/`, and grep the daemon log for
-  `profile ingest skipped`.
+- **Profiles are captured; none reached an agent on build-4.** Every full
+  sweep at `--profile-level 12` wrote a `*.trace.json.gz` and every ingest
+  failed on the gzip byte (`profile ingest skipped: UnicodeDecodeError`),
+  so the `tracedb` MCP was wired to an empty database. Fixed in
+  `tracedb.ingest`; a01's replicate trace ingests to 255k spans. A daemon
+  started before 2026-09-03 needs a restart to pick that up. Stock has no
+  profile yet, so `tracedb_stock` is still absent: capture one with a
+  `simulate run --profile-level 12` on stock before the next fleet.
+- **A build edit that hits its two-hour limit closed the idea as an error**
+  with the diff never priced (build-4's a00, 174 minutes of writing). The
+  loop now checks and screens whatever the workspace holds when the edit is
+  killed; only an untouched workspace is an error. Same restart caveat.
 - **`bench_serving` cross-check has never run.** One invocation at N* would
   tell us whether our load generator agrees with SGLang's own.
 - **Seeding costs a full `claude -p` call** (~30–60 s). `--seed-model` exists
