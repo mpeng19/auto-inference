@@ -139,7 +139,7 @@ def test_the_script_pins_the_same_dataset_the_quality_gate_uses():
     """The script re-derives the slice instead of importing `quality`, so this
     is what stops the two drifting into scoring different questions."""
     src = E.build_script("m", mode="reference", out_path="/o.json")
-    for pinned in (quality.GSM8K_REPO, quality.GSM8K_FILE, quality.GSM8K_REV):
+    for pinned in (quality.LONGBENCH_REPO, quality.LONGBENCH_FILE, quality.LONGBENCH_REV):
         assert pinned in src
     assert "step by step" in src, "the prompt template must travel too"
 
@@ -327,3 +327,16 @@ def test_scoring_script_guards_main_for_spawned_workers():
     assert 'if __name__ == "__main__":' in src
     assert src.rstrip().endswith("raise SystemExit(main())")
     compile(src, "script.py", "exec")
+
+
+def test_equivalence_prompts_are_long_context_and_the_reference_name_moved():
+    from simulator.measure import equivalence as eq
+    from simulator.measure import quality
+
+    src = eq.build_script("Qwen/Qwen3.8-27B-FP8", mode="reference", out_path="/results/x.json")
+    assert 'SETS = ["hotpotqa", "2wikimqa"]' in src and "MAX_CHARS" in src
+    assert "zipfile" in src and "r[\"context\"][:MAX_CHARS]" in src
+    compile(src, "script.py", "exec")
+    name = eq.reference_name("Qwen/Qwen3.8-27B-FP8")
+    assert "a50ba120b271" not in name                 # the GSM8K-era reference is retired
+    assert quality.LONGBENCH_REV in src

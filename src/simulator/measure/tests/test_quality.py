@@ -108,3 +108,42 @@ def test_crosscheck_says_so_when_there_is_nothing_to_compare():
 
     got = crosscheck.compare({}, {})
     assert not got["agrees"] and "no overlapping fields" in got["note"]
+
+
+def test_longbench_is_scored_by_token_f1_against_any_gold():
+    from simulator.measure.quality import qa_f1, score
+
+    assert qa_f1("Miller v. California", ["Miller v. California"]) == 1.0
+    assert qa_f1("The Miller v California case.", ["Miller v. California"]) > 0.8
+    assert 0 < qa_f1("Miller", ["Miller v. California"]) < 1
+    assert qa_f1("no idea", ["Miller v. California"]) == 0.0
+    assert qa_f1("1990", ["1989", "1990"]) == 1.0
+    assert score("longbench", "Paris\nsome trailing words", "Paris\x1fparis, france") == 1.0
+    assert score("gsm8k", "#### 42", "42") == 1.0 and score("mmlu", "B", "B") == 1.0
+
+
+def test_longbench_slice_is_pinned_and_long(tmp_path, monkeypatch):
+    """A gate must exercise the path it guards: the first build-mode 'win'
+    only engaged above 4,096 tokens and GSM8K never got there."""
+    import io
+    import json
+    import zipfile
+
+    from simulator.measure import quality
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name in quality.LONGBENCH_SETS:
+            rows = [{"input": f"q{i}", "context": "word " * 40000, "answers": "['a%d']" % i}
+                    for i in range(5)]
+            z.writestr(f"data/{name}.jsonl", "\n".join(json.dumps(r) for r in rows))
+    p = tmp_path / "data.zip"
+    p.write_bytes(buf.getvalue())
+    monkeypatch.setattr(quality, "hf_hub_download", lambda *a, **k: str(p), raising=False)
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *a, **k: str(p))
+    items = quality.load("longbench", n=4)
+    assert len(items) == 4 and items[0].max_tokens == 32
+    assert len(items[0].prompt) <= quality.LONGBENCH_MAX_CHARS + 600
+    assert "Question:" in items[0].prompt and items[0].answer.startswith("a")
+    assert quality.LONGBENCH_REV and len(quality.LONGBENCH_REV) == 40

@@ -107,10 +107,12 @@ def promptset_digest(n: int = N_PROMPTS, max_new_tokens: int = MAX_NEW_TOKENS,
     it needs no network: the dataset revision is what makes the slice fixed,
     and if any of this moves the old reference must not be reused.
     """
-    return _sha(json.dumps({"repo": quality.GSM8K_REPO,
-                            "file": quality.GSM8K_FILE,
-                            "revision": quality.GSM8K_REV,
-                            "prompt": quality.GSM8K_PROMPT,
+    return _sha(json.dumps({"repo": quality.LONGBENCH_REPO,
+                            "file": quality.LONGBENCH_FILE,
+                            "revision": quality.LONGBENCH_REV,
+                            "sets": list(quality.LONGBENCH_SETS),
+                            "max_chars": quality.LONGBENCH_MAX_CHARS,
+                            "prompt": quality.LONGBENCH_PROMPT,
                             "n": n, "seed": seed,
                             "max_new_tokens": max_new_tokens}, sort_keys=True))
 
@@ -140,14 +142,22 @@ def load_prompts():
     from quality.py so the two cannot drift apart silently.
     """
     import random
+    import zipfile
 
-    import pandas as pd
     from huggingface_hub import hf_hub_download
 
     path = hf_hub_download(REPO, FILE, repo_type="dataset", revision=REV)
-    rows = pd.read_parquet(path).to_dict("records")
+    rows = []
+    with zipfile.ZipFile(path) as z:
+        for name in SETS:
+            rows += [json.loads(line) for line in
+                     z.read(f"data/{name}.jsonl").decode("utf-8").splitlines() if line.strip()]
     random.Random(SEED).shuffle(rows)
-    return [PROMPT.format(q=r["question"]) for r in rows[:N_PROMPTS]]
+    # ~15k-token contexts: the market's shape, and long enough that anything
+    # gated on sequence length (page selection, sparse attention, KV
+    # compression) is actually running while it is scored.
+    return [PROMPT.format(context=r["context"][:MAX_CHARS], input=r["input"])
+            for r in rows[:N_PROMPTS]]
 
 
 def score(engine, prompt_ids, completion_ids):
@@ -279,10 +289,12 @@ def build_script(model: str, *, mode: str, out_path: str,
         "MODEL": model,
         "MODEL_DIGEST": model_digest(model),
         "PROMPTSET_DIGEST": promptset_digest(n_prompts, max_new_tokens, seed),
-        "REPO": quality.GSM8K_REPO,
-        "FILE": quality.GSM8K_FILE,
-        "REV": quality.GSM8K_REV,
-        "PROMPT": quality.GSM8K_PROMPT,
+        "REPO": quality.LONGBENCH_REPO,
+        "FILE": quality.LONGBENCH_FILE,
+        "REV": quality.LONGBENCH_REV,
+        "SETS": list(quality.LONGBENCH_SETS),
+        "MAX_CHARS": quality.LONGBENCH_MAX_CHARS,
+        "PROMPT": quality.LONGBENCH_PROMPT,
         "N_PROMPTS": n_prompts,
         "MAX_NEW_TOKENS": max_new_tokens,
         "SEED": seed,

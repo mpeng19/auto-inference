@@ -169,7 +169,7 @@ def test_quality_is_measured_by_default(root):
     from simulator import Simulator
 
     s = Simulator(root_dir=root)
-    assert s.quality_suites == ("gsm8k",) and s.quality_n > 0
+    assert s.quality_suites == ("gsm8k", "longbench") and s.quality_n > 0
     assert tuple(s.quality_suites) in s._args()
 
 

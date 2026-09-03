@@ -35,6 +35,22 @@ MMLU_REPO, MMLU_FILE = "cais/mmlu", "all/test-00000-of-00001.parquet"
 GSM8K_REV = "e53f048856ff4f594e959d75785d2c2d37b678ee"
 MMLU_REV = "c30699e8356da336a370243923dbaf21066bb9fe"
 
+# Long-context QA. GSM8K prompts are a few hundred tokens, and the first
+# build-mode "win" (page selection that only engages above 4,096 tokens)
+# scored 70% on GSM8K because the path it changed never ran. A gate has to
+# exercise the code it guards: these contexts are ~15k tokens, the market's
+# shape, and the metric is LongBench's own token F1.
+LONGBENCH_REPO = "THUDM/LongBench"
+LONGBENCH_FILE = "data.zip"
+LONGBENCH_REV = "5e628be450b7e67fb7ae6e201bd6d8f7056f7672"
+LONGBENCH_SETS = ("hotpotqa", "2wikimqa")
+LONGBENCH_MAX_CHARS = 72_000            # ~18k tokens; keeps under the context length
+LONGBENCH_PROMPT = (
+    "Answer the question based on the given passages. Only give me the answer "
+    "and do not output any other words.\n\nThe following are given passages.\n"
+    "{context}\n\nAnswer the question based on the given passages. Only give me "
+    "the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:")
+
 GSM8K_PROMPT = (
     "Solve the problem. Think step by step, then give the final numeric answer "
     "on its own last line in the form '#### <number>'.\n\nProblem: {q}\n")
@@ -57,7 +73,7 @@ class Item:
 class QualityResult:
     suite: str
     n: int = 0
-    correct: int = 0
+    correct: float = 0.0            # a sum of per-item scores; a count for exact suites
     errors: int = 0
     items: list[dict] = field(default_factory=list)
     baseline_accuracy: float | None = None
@@ -102,6 +118,15 @@ def load(suite: str = "gsm8k", n: int = 100, seed: int = 0) -> list[Item]:
                             gold, max_tokens=320))
         return out
 
+    if suite == "longbench":
+        rows = load_longbench_rows()
+        random.Random(seed).shuffle(rows)
+        return [Item(f"longbench-{i}",
+                     LONGBENCH_PROMPT.format(context=r["context"][:LONGBENCH_MAX_CHARS],
+                                             input=r["input"]),
+                     "\x1f".join(_answers(r)), max_tokens=32)
+                for i, r in enumerate(rows[:n])]
+
     p = hf_hub_download(MMLU_REPO, MMLU_FILE, repo_type="dataset",
                         revision=MMLU_REV)
     df = pd.read_parquet(p)
@@ -117,12 +142,67 @@ def load(suite: str = "gsm8k", n: int = 100, seed: int = 0) -> list[Item]:
     return out
 
 
+def load_longbench_rows(sets: tuple[str, ...] = LONGBENCH_SETS) -> list[dict]:
+    """The pinned LongBench rows for `sets`, from its data.zip."""
+    import json
+    import zipfile
+
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(LONGBENCH_REPO, LONGBENCH_FILE, repo_type="dataset",
+                           revision=LONGBENCH_REV)
+    rows: list[dict] = []
+    with zipfile.ZipFile(path) as z:
+        for name in sets:
+            rows += [json.loads(line) for line in
+                     z.read(f"data/{name}.jsonl").decode("utf-8").splitlines() if line.strip()]
+    return rows
+
+
+def _answers(r: dict) -> list[str]:
+    a = r.get("answers")
+    if isinstance(a, str):
+        try:
+            import ast
+            a = ast.literal_eval(a)
+        except (ValueError, SyntaxError):
+            a = [a]
+    return [str(x) for x in (a or [])]
+
+
+def _qa_normalise(s: str) -> list[str]:
+    """LongBench's normalisation: lowercase, drop punctuation and articles."""
+    s = s.lower()
+    s = "".join(ch for ch in s if ch not in set('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'))
+    return [w for w in s.split() if w not in ("a", "an", "the")]
+
+
+def qa_f1(prediction: str, golds: list[str]) -> float:
+    """Token F1 against the best of several gold answers, LongBench-style."""
+    from collections import Counter
+
+    pred = _qa_normalise(prediction.strip().split("\n")[0])
+    best = 0.0
+    for g in golds:
+        gold = _qa_normalise(g)
+        common = sum((Counter(pred) & Counter(gold)).values())
+        if not common:
+            continue
+        p, r = common / len(pred), common / len(gold)
+        best = max(best, 2 * p * r / (p + r))
+    return best
+
+
 # ── scoring, exact and dumb on purpose ───────────────────────────────────
 
-def score(suite: str, output: str, gold: str) -> bool:
+def score(suite: str, output: str, gold: str) -> float:
+    """1.0 / 0.0 for exact suites; token F1 in [0, 1] for long-context QA.
+    `correct` sums these, so `accuracy` is mean F1 there."""
+    if suite == "longbench":
+        return qa_f1(output, gold.split("\x1f"))
     if suite == "mmlu":
         m = re.search(r"\b([ABCD])\b", output.strip().upper())
-        return bool(m) and m.group(1) == gold.strip().upper()
+        return float(bool(m) and m.group(1) == gold.strip().upper())
     # GSM8K: prefer the '####' form, else the last number in the output. The
     # fallback matters because a degraded model often still reaches an answer
     # while losing the format, and calling that wrong would blame the wrong
@@ -130,8 +210,8 @@ def score(suite: str, output: str, gold: str) -> bool:
     text = output.split("####")[-1] if "####" in output else output
     nums = _NUM.findall(text.replace(",", ""))
     if not nums:
-        return False
-    return _norm(nums[-1]) == _norm(gold)
+        return 0.0
+    return float(_norm(nums[-1]) == _norm(gold))
 
 
 def _norm(x: str) -> str:
@@ -169,14 +249,14 @@ async def run(base_url: str, model: str, suite: str = "gsm8k", n: int = 100,
             except Exception as e:
                 return {"id": it.id, "error": f"{type(e).__name__}: {e}"}
         return {"id": it.id, "ok": score(suite, out or "", it.answer),
-                "gold": it.answer, "got": (out or "")[-120:]}
+                "gold": it.answer.replace("\x1f", " | "), "got": (out or "")[-120:]}
 
     for r in await asyncio.gather(*(one(i) for i in items)):
         res.n += 1
         if "error" in r:
             res.errors += 1
-        elif r["ok"]:
-            res.correct += 1
+        else:
+            res.correct += float(r["ok"])
         res.items.append(r)
     return res
 
