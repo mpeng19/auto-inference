@@ -186,3 +186,21 @@ async def test_results_tab_lists_experiments_and_answers_questions(tmp_path, mon
         await pilot.press("escape")
         await pilot.pause()
         assert not app._ask_open and not app.check_action("answer_grow", ())
+
+
+async def test_a_dead_daemon_is_not_shown_as_running(tmp_path):
+    """The store is the daemon's last word, not a heartbeat: a fleet that
+    died overnight read 'running' with three 'thinking' agents at 09:00."""
+    s = SqliteSessionStore(tmp_path / "s.db")
+    v = SessionView(session_id="old", phase="running", started_at=1.0, pid=999_999_999,
+                    target_agents=1,
+                    agents=(AgentView("a00", status="thinking", activity="writing a diff"),))
+    s.create(v)
+    s.publish(v)
+    app = FleetApp(s, "old")
+    async with app.run_test(size=(120, 26)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        assert "dead" in app.summary_text and "daemon is gone" in app.summary_text
+        assert app.view.agents[0].status == "lost"
+        assert "daemon exited" in app.detail_text

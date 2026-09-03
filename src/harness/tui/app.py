@@ -46,6 +46,7 @@ STATUS_STYLE = {
     "failed": "bold red",
     "done": "dim",
     "idle": "dim",
+    "lost": "bold red",
 }
 
 
@@ -156,7 +157,33 @@ class FleetApp(App):
     def refresh_view(self) -> None:
         self._load()
 
+    @staticmethod
+    def _daemon_alive(v) -> bool:
+        """Is the process that published this snapshot still running?
+        The store is the last thing a daemon wrote, not a heartbeat: a fleet
+        that died at 04:00 still reads "running" at 09:00 unless someone
+        asks the OS."""
+        import os
+
+        if not v or not v.pid:
+            return False
+        try:
+            os.kill(v.pid, 0)
+            return True
+        except PermissionError:
+            return True                      # exists, owned by someone else
+        except (ProcessLookupError, OSError):
+            return False
+
     def _apply(self, v) -> None:
+        if v is not None and v.phase in ("running", "stopping", "starting", "paused") \
+                and not self._daemon_alive(v):
+            # Dead daemon: say so, and stop showing agents as busy.
+            from dataclasses import replace
+            v = replace(v, phase="dead",
+                        agents=tuple(replace(a, status="lost",
+                                             activity="daemon exited; last: " + (a.activity or "-"))
+                                     for a in v.agents))
         self.view = v
         self._settle_pending()
         self._render_summary()
@@ -177,7 +204,10 @@ class FleetApp(App):
         t = Text()
         t.append(f"{v.session_id}  ", style="bold")
         t.append(f"{v.phase}{stale}\n",
-                 style="bold green" if v.phase == "running" else "yellow")
+                 style="bold green" if v.phase == "running"
+                 else "bold red" if v.phase == "dead" else "yellow")
+        if v.phase == "dead":
+            t.append("the daemon is gone; this is its last snapshot\n", style="red")
         t.append(f"agents {v.live_agents}/{v.target_agents}    "
                  f"spend {_money(v.cost_usd)} / {_money(v.budget_usd)} {bar}    "
                  f"tokens {_tokens(v.tokens.total)}"
