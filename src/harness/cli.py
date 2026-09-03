@@ -328,6 +328,21 @@ def cmd_results(a) -> int:
     return 0
 
 
+def cmd_timeline(a) -> int:
+    from . import timeline as tl
+
+    root = _root_of(a)
+    if a.html:
+        pathlib.Path(a.html).write_text(tl.render_html(root))
+        print(f"wrote {a.html}")
+        return 0
+    if a.md:
+        print(f"wrote {tl.write_markdown(root)}")
+        return 0
+    print(tl.render_text(root, agent_id=a.agent))
+    return 0
+
+
 def cmd_ask(a) -> int:
     """One question about a run, answered from its data by Claude over the
     API. `--model` defaults to Claude Fable 5.1."""
@@ -463,6 +478,13 @@ def main(argv: list[str] | None = None) -> int:
     rz.add_argument("--diff", action="store_true", help="print the best result's diff")
     rz.add_argument("--json", action="store_true")
     rz.set_defaults(fn=cmd_results)
+
+    tl = sub.add_parser("timeline", help="the run as a readable timeline")
+    tl.add_argument("--root", default="", help="fleet root (default: the session's)")
+    tl.add_argument("--agent", default="", help="one agent only")
+    tl.add_argument("--html", default="", help="write a single-file Gantt page here")
+    tl.add_argument("--md", action="store_true", help="rewrite <root>/timeline.md")
+    tl.set_defaults(fn=cmd_timeline)
 
     ask = sub.add_parser("ask", help="ask Claude a question about a run")
     ask.add_argument("question")

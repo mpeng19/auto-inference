@@ -479,6 +479,12 @@ class Fleet:
                 continue
             self._record_outcome(out)
             self._bank_outcome(out)
+            if self.root:
+                # The readable log. Rewritten whole; it is small and this is
+                # rare (once per idea), and a partial write is never seen.
+                with contextlib.suppress(Exception):
+                    from ..timeline import write_markdown
+                    write_markdown(self.root)
             if self.manager is not None:
                 # A model call; runs on this agent's thread, never under the lock.
                 with contextlib.suppress(Exception):
