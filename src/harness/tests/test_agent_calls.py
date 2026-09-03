@@ -467,3 +467,43 @@ def test_an_edit_killed_with_nothing_written_is_still_an_error(
     finally:
         broker.shutdown()
     assert out.stop == "error"
+
+
+def test_a_call_the_api_refused_is_retried_and_the_retry_counts(tmp_path):
+    """529 Overloaded is the API's problem, not the idea's. build-4 closed an
+    idea as an error every four minutes for an hour of it."""
+    overloaded = json.dumps({
+        "type": "result", "subtype": "success", "is_error": True, "num_turns": 1,
+        "api_error_status": 529, "terminal_reason": "api_error",
+        "result": "API Error: 529 Overloaded. This is a server-side issue",
+        "duration_ms": 4000, "duration_api_ms": 1400, "permission_denials": [], "usage": {}})
+    marker = tmp_path / "tried"
+    binary = _fake_claude(tmp_path, (
+        f"if [ ! -f {marker} ]; then touch {marker}; echo '{overloaded}'; exit 1; fi\n"
+        f"echo '{ENVELOPE}'\n"))
+    prop = ClaudeCodeProposer(binary=binary)
+    prop.TRANSIENT_BACKOFF_S = (0.01, 0.01)
+    text, use = prop._run("go", cwd=tmp_path)
+    assert text == "I fused the two kernels." and use.output == 120
+    assert [c.transient for c in prop.calls] == [True, False]
+    assert prop.calls[0].returncode == 1 and prop.calls[-1].returncode == 0
+
+
+def test_a_call_that_keeps_being_refused_is_the_error_it_was(tmp_path):
+    overloaded = json.dumps({"type": "result", "is_error": True, "api_error_status": 529,
+                             "result": "API Error: 529 Overloaded", "permission_denials": []})
+    binary = _fake_claude(tmp_path, f"echo '{overloaded}'\nexit 1\n")
+    prop = ClaudeCodeProposer(binary=binary)
+    prop.TRANSIENT_BACKOFF_S = (0.01,)
+    with pytest.raises(RuntimeError, match="exited 1"):
+        prop._run("go", cwd=tmp_path)
+    assert len(prop.calls) == 2 and all(c.transient for c in prop.calls)
+
+
+def test_a_prompt_failure_is_not_retried(tmp_path):
+    binary = _fake_claude(tmp_path, "echo boom >&2\nexit 3\n")
+    prop = ClaudeCodeProposer(binary=binary)
+    prop.TRANSIENT_BACKOFF_S = (0.01,)
+    with pytest.raises(RuntimeError, match="exited 3"):
+        prop._run("go", cwd=tmp_path)
+    assert len(prop.calls) == 1 and not prop.calls[0].transient

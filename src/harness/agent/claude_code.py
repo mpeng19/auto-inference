@@ -64,6 +64,7 @@ import contextlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import subprocess
@@ -188,6 +189,7 @@ class CallStats:
     returncode: int = 0
     cancelled: bool = False
     timed_out: bool = False
+    transient: bool = False       # failed for the API's reasons (529/429/5xx): worth a retry
     # From the stream: how many model responses the call took and what they
     # cost, in aggregate. The per-message rows are in the calls log.
     n_messages: int = 0
@@ -361,10 +363,41 @@ class ClaudeCodeProposer:
         return self.edit_timeout_s or (
             DEFAULT_BUILD_TIMEOUT_S if self.mode == "build" else self.timeout_s)
 
+    # Waits between retries of a call the API refused for its own reasons.
+    # build-4, 09:30 on 2026-09-03: opus returned 529 Overloaded for an hour,
+    # every edit failed after ~4 min, and each failure closed an idea as an
+    # error and claimed the next -- the bank was being churned at one record
+    # per four minutes for nothing. Three retries over ~11 min ride out the
+    # usual outage; a longer one still ends in the error it always was.
+    TRANSIENT_BACKOFF_S: tuple[float, ...] = (60.0, 180.0, 420.0)
+
     def _run(self, prompt: str, cwd, model: str = "", *,
              cancel: threading.Event | None = None,
              timeout_s: float | None = None,
              phase: str = "") -> tuple[str, TokenUse]:
+        """`_run_once`, retried while the failure is the API's (see
+        `TRANSIENT_BACKOFF_S`). Every attempt is a call in `self.calls`, so
+        the retries are visible in the call stats. Cancellation during a
+        wait re-raises the last error rather than starting another call."""
+        for wait in (*self.TRANSIENT_BACKOFF_S, None):
+            try:
+                return self._run_once(prompt, cwd, model, cancel=cancel,
+                                      timeout_s=timeout_s, phase=phase)
+            except RuntimeError:
+                st = self.last_call
+                if wait is None or st is None or not st.transient:
+                    raise
+                if cancel is not None:
+                    if cancel.wait(wait):
+                        raise
+                else:
+                    time.sleep(wait)
+        raise AssertionError("unreachable")
+
+    def _run_once(self, prompt: str, cwd, model: str = "", *,
+                  cancel: threading.Event | None = None,
+                  timeout_s: float | None = None,
+                  phase: str = "") -> tuple[str, TokenUse]:
         """One `claude -p` call: cancellable, timed, and never orphaning a child.
 
         `Popen` plus a polling wait rather than `subprocess.run(timeout=...)`
@@ -412,6 +445,8 @@ class ClaudeCodeProposer:
             denials=int(meta.get("denials", 0)),
             returncode=proc.returncode if proc.returncode is not None else -1,
             cancelled=cancelled, timed_out=timed_out,
+            transient=bool(proc.returncode) and not cancelled and not timed_out
+            and _transient(meta, (out or "") + (err or "")),
             n_messages=acct.n_messages, input_tokens=use.input, output_tokens=use.output,
             cache_read=use.cache_read, cache_write=use.cache_write,
             log_path=acct.log_path)
@@ -612,6 +647,20 @@ class ClaudeCodeProposer:
 
 # ── plumbing ─────────────────────────────────────────────────────────────
 
+_TRANSIENT_STATUS = {429, 500, 502, 503, 529}
+_TRANSIENT_RE = re.compile(r"Overloaded|overloaded_error|rate.?limit|API Error: 5\d\d", re.I)
+
+
+def _transient(meta: dict, text: str) -> bool:
+    """Did the call fail for the API's reasons rather than the prompt's?"""
+    status = meta.get("api_error_status")
+    if status in _TRANSIENT_STATUS:
+        return True
+    if meta.get("terminal_reason") == "api_error":
+        return True
+    return bool(_TRANSIENT_RE.search(text[-4000:]))
+
+
 def _parse(stdout: str) -> tuple[str, TokenUse, dict]:
     """Pull the result text, token usage and timings out of the JSON envelope.
 
@@ -629,7 +678,7 @@ def _parse(stdout: str) -> tuple[str, TokenUse, dict]:
         return text, TokenUse(), {}
     u = d.get("usage") or {}
     meta = {k: d[k] for k in ("duration_ms", "duration_api_ms", "num_turns",
-                              "is_error") if k in d}
+                              "is_error", "api_error_status", "terminal_reason") if k in d}
     meta["denials"] = len(d.get("permission_denials") or ())
     return str(d.get("result", "")), TokenUse(
         input=int(u.get("input_tokens", 0)),

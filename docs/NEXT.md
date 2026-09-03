@@ -247,6 +247,14 @@ timeouts).
   with the diff never priced (build-4's a00, 174 minutes of writing). The
   loop now checks and screens whatever the workspace holds when the edit is
   killed; only an untouched workspace is an error. Same restart caveat.
+- **An API outage churned the bank.** From 09:30 on 2026-09-03 opus
+  returned 529 Overloaded for over an hour; every edit call failed after ~4
+  min, each failure closed the idea as an error, released the record and
+  claimed the next, one per four minutes across five agents. Costs nothing
+  in dollars and loses nothing from the bank, but the timeline fills with
+  errors and no work happens. Calls now retry a failure the API owns
+  (529/429/5xx) three times over ~11 min before it is an error, and every
+  attempt shows in `calls`. Same restart caveat as above.
 - **`bench_serving` cross-check has never run.** One invocation at N* would
   tell us whether our load generator agrees with SGLang's own.
 - **Seeding costs a full `claude -p` call** (~30–60 s). `--seed-model` exists
