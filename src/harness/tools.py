@@ -33,6 +33,7 @@ minutes and cost real money -- `cost_usd` comes back with the answer.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
 import subprocess
@@ -265,6 +266,96 @@ def gpu_run(script_path: str | pathlib.Path,
     return rec
 
 
+NCU_METRICS = (
+    "gpu__time_duration.sum",
+    "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+    "sm__warps_active.avg.pct_of_peak_sustained_active",
+    "lts__t_sector_hit_rate.pct",
+)
+
+NCU_SCRIPT = r"""
+import csv, io, json, os, subprocess, sys
+metrics = os.environ.get("NCU_METRICS", "")
+kernel = os.environ.get("NCU_KERNEL", "")
+count = os.environ.get("NCU_LAUNCH_COUNT", "20")
+cmd = ["ncu", "--clock-control", "none", "--csv", "--launch-count", count,
+       "--metrics", metrics]
+if kernel:
+    cmd += ["--kernel-name", "regex:" + kernel]
+cmd += [sys.executable, "target.py"]
+r = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
+sys.stderr.write(r.stderr[-4000:])
+lines = [ln for ln in r.stdout.splitlines() if ln.startswith('"')]
+rows = list(csv.DictReader(io.StringIO("\n".join(lines)))) if lines else []
+out = {}
+for row in rows:
+    k = row.get("Kernel Name", "?")
+    m = row.get("Metric Name", "")
+    v = row.get("Metric Value", "").replace(",", "")
+    try:
+        v = float(v)
+    except ValueError:
+        pass
+    out.setdefault(k, {"launches": 0})[m] = v
+    if m == "gpu__time_duration.sum":
+        out[k]["launches"] += 1
+print("NCU_JSON " + json.dumps({"rc": r.returncode, "kernels": out}))
+"""
+
+
+def ncu(script_path: str | pathlib.Path, workspace: str | pathlib.Path | None = None,
+        kernel: str = "", metrics: tuple[str, ...] = NCU_METRICS, launch_count: int = 20,
+        timeout_s: int = 1800, source=None) -> dict:
+    """Hardware counters per kernel, from Nsight Compute, on an H100.
+
+    tracedb says which kernel takes the step and for how long; this says
+    *why*: achieved DRAM and SM throughput as a percent of peak, warp
+    occupancy, L2 hit rate. It is the instrument that turns "the KV read
+    runs at 22-28% of bandwidth" from an inference into a measurement.
+
+    The script is run under `ncu --clock-control none`: the container may
+    not lock GPU clocks, and the first attempt with locking failed on
+    exactly that. Each profiled kernel replays ~9 passes, so profile a
+    decode step or a micro-benchmark, not a sweep, and narrow `kernel` to a
+    regex when you can. Returns per-kernel metrics as data; stdout/stderr
+    from the workbench are kept for the cases the parser cannot read.
+    """
+    import asyncio
+
+    p = pathlib.Path(script_path)
+    if not p.is_file():
+        return {"ok": False, "error": f"no script at {p}. ncu profiles a python file; "
+                                      "write the file first, then give this its path."}
+    try:
+        stack, root, note = _workspace_stack(workspace, source)
+    except ValueError as e:
+        return {"ok": False, "error": f"workspace is not runnable: {e}"}
+
+    from simulator import Simulator
+
+    driver = ("import os\n"
+              f"os.environ['NCU_METRICS'] = {','.join(metrics)!r}\n"
+              f"os.environ['NCU_KERNEL'] = {kernel!r}\n"
+              f"os.environ['NCU_LAUNCH_COUNT'] = {str(launch_count)!r}\n"
+              + NCU_SCRIPT)
+    sim = Simulator(root_dir=root, stack=stack)
+    rec = asyncio.run(sim.workbench(driver, files={"target.py": p.read_text()},
+                                    timeout_s=timeout_s))
+    rec["script"] = str(p)
+    rec["stack_digest"] = stack.digest
+    if note:
+        rec["note"] = note
+    for line in (rec.get("stdout") or "").splitlines():
+        if line.startswith("NCU_JSON "):
+            with contextlib.suppress(json.JSONDecodeError):
+                rec["ncu"] = json.loads(line[len("NCU_JSON "):])
+    if "ncu" not in rec:
+        rec["ok"] = False
+        rec["error"] = "ncu produced no parseable output; see stderr"
+    return rec
+
+
 def equivalence(workspace: str | pathlib.Path | None = None,
                 timeout_s: int = 1800, min_agreement: float | None = None,
                 max_mean_dlogprob: float | None = None, source=None) -> dict:
@@ -383,6 +474,29 @@ def main(action: str, args) -> int:
             print(rep["stderr"].rstrip(), file=sys.stderr)
         print(f"artifacts: {rep.get('dir')}")
         return 0 if rep.get("ok") else 1
+
+    if action == "ncu":
+        rep = ncu(args.intent, workspace=args.workspace or None,
+                  kernel=getattr(args, "kernel", "") or "",
+                  timeout_s=args.timeout or 1800)
+        if args.json or "ncu" not in rep:
+            print(json.dumps(rep if args.json else {k: rep.get(k) for k in ("ok", "error", "stderr")},
+                             indent=1, default=str))
+            return 0 if rep.get("ok") else 1
+        print(f"ncu on {rep.get('gpu', 'GPU')}  stack {rep['stack_digest']}  ${rep.get('cost_usd', 0):.2f}")
+        print(f"{'kernel':<48}{'launches':>9}{'us':>10}{'dram%':>8}{'sm%':>7}{'occ%':>7}{'l2hit%':>8}")
+        def g(m, name):
+            v = m.get(name)
+            return f"{v:.1f}" if isinstance(v, float) else "-"
+
+        for k, m in sorted(rep["ncu"]["kernels"].items(),
+                           key=lambda kv: -float(kv[1].get("gpu__time_duration.sum", 0) or 0)):
+            print(f"{k[:47]:<48}{m.get('launches', 0):>9}{g(m, 'gpu__time_duration.sum'):>10}"
+                  f"{g(m, 'dram__throughput.avg.pct_of_peak_sustained_elapsed'):>8}"
+                  f"{g(m, 'sm__throughput.avg.pct_of_peak_sustained_elapsed'):>7}"
+                  f"{g(m, 'sm__warps_active.avg.pct_of_peak_sustained_active'):>7}"
+                  f"{g(m, 'lts__t_sector_hit_rate.pct'):>8}")
+        return 0
 
     if action == "equivalence":
         rep = equivalence(workspace=args.workspace or None,

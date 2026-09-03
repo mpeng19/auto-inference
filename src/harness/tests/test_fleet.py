@@ -452,7 +452,7 @@ def _control_fleet(tmp_path, stock_dir, memory, context, store=None, agents=3):
         agent_budget=AgentBudget(max_attempts=3, max_usd=5, patience=3,
                                  screen_first=False),
         fleet_budget=FleetBudget(max_agents=agents, max_concurrent_evals=2,
-                                 max_usd_total=50, max_wall_s=30)))
+                                 max_usd_total=10_000, max_wall_s=30)))
     return fleet, broker, run
 
 
@@ -851,5 +851,54 @@ def test_an_unmeasured_error_returns_the_idea_to_the_bank():
                                          attempts=(Attempt(idea_id=idea.id, ok=True,
                                                            experiment_id="e1"),)))
         assert bank.get(rec.id).status == "tried"
+    finally:
+        broker.shutdown()
+
+
+def test_the_fleet_keeps_publishing_while_it_winds_down():
+    """`stop` is cooperative and an agent finishes its idea first; the
+    dashboard must see "stopping" with live statuses, then "stopped"."""
+    import time
+
+    from harness.contracts import AgentOutcome
+    from harness.session import SqliteSessionStore
+
+    gate = threading.Event()
+
+    class Slow:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        def propose(self, seed=None, live_ideas=()):
+            return Idea(title="t", hypothesis="h")
+
+        def run(self, idea, budget):
+            gate.wait(5)
+            return AgentOutcome(agent_id=self.agent_id, idea=idea, stop="no_progress")
+
+    import pathlib
+    import tempfile
+    store = SqliteSessionStore(pathlib.Path(tempfile.mkdtemp()) / "s.db")
+    broker = EvalBroker(lambda r: (True, {}, ""), capacity=1)
+    fleet = Fleet(lambda a, f: Slow(a), broker, store=store, session_id="wind", tick_s=0.05)
+    fleet.start(FleetSpec(fleet_budget=FleetBudget(max_agents=1, max_usd_total=100)))
+    try:
+        for _ in range(100):
+            v = store.read("wind")
+            if v and v.agents:
+                break
+            time.sleep(0.02)
+        stopper = threading.Thread(target=fleet.stop, daemon=True)
+        stopper.start()
+        seen = set()
+        for _ in range(40):
+            time.sleep(0.05)
+            v = store.read("wind")
+            if v:
+                seen.add(v.phase)
+        assert "stopping" in seen, seen                # published during the drain
+        gate.set()
+        stopper.join(10)
+        assert store.read("wind").phase == "stopped"
     finally:
         broker.shutdown()

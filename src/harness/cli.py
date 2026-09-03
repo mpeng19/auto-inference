@@ -138,6 +138,32 @@ def cmd_start(a) -> int:
 
 # ── read ─────────────────────────────────────────────────────────────────
 
+def daemon_alive(pid: int) -> bool:
+    """The snapshot is the daemon's last word, not a heartbeat."""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (ProcessLookupError, OSError):
+        return False
+
+
+def _mark_dead(v):
+    """A snapshot from a daemon that no longer exists must not read as
+    running. Same rule as the TUI."""
+    from dataclasses import replace
+
+    if v.phase in ("running", "stopping", "starting", "paused") and not daemon_alive(v.pid):
+        return replace(v, phase="dead",
+                       agents=tuple(replace(a, status="lost",
+                                            activity="daemon exited; last: " + (a.activity or "-"))
+                                    for a in v.agents))
+    return v
+
+
 def cmd_status(a) -> int:
     v = _resolve(_store(a), a.session)
     if v is None:
@@ -147,6 +173,7 @@ def cmd_status(a) -> int:
         print(json.dumps(asdict(v), indent=1, default=str))
         return 0
     age = time.time() - v.updated_at
+    v = _mark_dead(v)
     print(f"{v.session_id}   {v.phase}   {v.live_agents}/{v.target_agents} agents"
           f"   ${v.cost_usd:.2f} of ${v.budget_usd:.0f}"
           f"   {v.tokens.total:,} tokens   updated {age:.0f}s ago")
@@ -573,10 +600,11 @@ def main(argv: list[str] | None = None) -> int:
 
     tl = sub.add_parser("tool", help="tools for agents (and for reading runs)")
     tl.add_argument("action", choices=["recall", "preflight", "roofline",
-                                       "gpu-run", "equivalence"])
+                                       "gpu-run", "equivalence", "ncu"])
     tl.add_argument("intent", nargs="?", default="", metavar="ARG",
                     help="recall: what you are about to do; "
                          "gpu-run: the script to run")
+    tl.add_argument("--kernel", default="", help="ncu: regex on kernel names to profile")
     tl.add_argument("--workspace", default=".",
                     help="the agent directory (preflight, gpu-run, equivalence)")
     tl.add_argument("--timeout", type=int, default=0,

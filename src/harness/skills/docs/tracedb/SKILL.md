@@ -63,6 +63,18 @@ Patterns are glob-style on the canonical kernel name (`*attn*`, `*gemm*`,
    the bottleneck is launch overhead or the scheduler, and a kernel rewrite
    will not move the step.
 
+## When the trace is not enough: `harness tool ncu`
+
+A trace gives time. Nsight Compute gives the counters behind it: DRAM
+throughput as a percent of peak, SM throughput, warp occupancy, L2 hit rate,
+per kernel. `harness tool ncu bench.py --kernel "decode|attn"` runs your
+script under `ncu` in the workbench and prints one row per kernel. Read
+DRAM% first: a decode attention kernel that is supposed to be
+bandwidth-bound and shows 25% of peak is the whole opportunity; one at 85%
+is done, and a rewrite will not move it. Profile a micro-benchmark or a
+handful of decode steps -- every profiled launch replays several times --
+and narrow the kernel regex.
+
 ## What it cannot tell you
 
 It is one process, one TP rank, ~20 steps at one concurrency. It says

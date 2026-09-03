@@ -133,6 +133,7 @@ DEFAULT_ALLOWED_TOOLS = (
     # rules survive someone narrowing that prefix.
     "Bash(harness tool gpu-run:*)",
     "Bash(harness tool equivalence:*)",
+    "Bash(harness tool ncu:*)",
     "Bash(python -c:*)",
     "Bash(python3 -c:*)",
     "Bash(ruff:*)",
@@ -890,6 +891,10 @@ Your workbench, in order. Run all three before you finish:
       parses everything and checks for undefined names. Free. A NameError
       costs six GPU-minutes to discover on a GPU.
   harness tool gpu-run <script.py>
+  harness tool ncu <script.py> --kernel <regex>
+      hardware counters per kernel from Nsight Compute: DRAM and SM
+      throughput as % of peak, occupancy, L2 hit rate. tracedb says which
+      kernel and how long; this says why. Profile a decode step, not a sweep.
       runs your script on an H100 inside this exact stack. ~$1, 3-8 minutes.
       Write a script that does BOTH: a micro-benchmark of the kernel you
       changed (old path vs new, same shapes, timed properly with warmup), and

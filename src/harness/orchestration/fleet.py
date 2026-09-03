@@ -95,6 +95,11 @@ class Fleet:
         self._live_ideas: list[Idea] = []
         self._pool: ThreadPoolExecutor | None = None
         self._ctl: threading.Thread | None = None
+        # The control loop keeps publishing through the wind-down: `stop`
+        # is cooperative and an agent finishes its idea first, which can be
+        # hours, and a dashboard that went silent at "stopping" read as
+        # "running" the whole night. This is set only once the pool is down.
+        self._ctl_stop = threading.Event()
         self._stop = threading.Event()
         self._next_index = 0
         self._target = 0
@@ -150,6 +155,7 @@ class Fleet:
                 s.resume.set()                  # unblock anyone paused
         if self._pool is not None:
             self._pool.shutdown(wait=True)
+        self._ctl_stop.set()
         if self._ctl is not None:
             self._ctl.join(timeout=5)
         with self._lock:
@@ -372,7 +378,7 @@ class Fleet:
     def _control_loop(self) -> None:
         """Apply operator commands, publish the snapshot. Once per tick."""
         last = time.time()
-        while not self._stop.is_set():
+        while not self._ctl_stop.is_set():
             now = time.time()
             gap = now - last - self.tick_s
             if gap > self.SLEEP_GAP_S:
@@ -385,8 +391,12 @@ class Fleet:
                     for cmd in self.store.take_commands(self.session_id):
                         self.store.acknowledge(cmd.id, self._apply(cmd))
                     self.store.publish(self._snapshot())
-            if not self._within_budget():
-                break
+            if not self._within_budget() and self._state.running:
+                # Out of budget: the agents' own loops end at their next
+                # checkpoint; flag the fleet as not running so the daemon
+                # calls `stop`, and keep publishing until it does.
+                with self._lock:
+                    self._state = replace(self._state, running=False)
             time.sleep(self.tick_s)
 
     def note_host_sleep(self, seconds: float) -> None:

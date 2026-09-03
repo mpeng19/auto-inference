@@ -284,3 +284,16 @@ def test_start_refuses_a_second_daemon_on_the_same_root(tmp_path):
     assert running_daemon(tmp_path) == os.getpid()
     (tmp_path / "daemon.pid").write_text("999999999")
     assert running_daemon(tmp_path) == 0
+
+
+def test_status_marks_a_dead_daemon(tmp_path, capsys):
+    from harness.cli import _mark_dead, daemon_alive
+    from harness.contracts.session import AgentView, SessionView
+
+    assert not daemon_alive(999_999_999) and not daemon_alive(0)
+    v = SessionView(session_id="x", phase="running", pid=999_999_999,
+                    agents=(AgentView("a00", status="thinking", activity="editing"),))
+    d = _mark_dead(v)
+    assert d.phase == "dead" and d.agents[0].status == "lost"
+    assert "daemon exited" in d.agents[0].activity
+    assert _mark_dead(SessionView(session_id="y", phase="stopped", pid=0)).phase == "stopped"

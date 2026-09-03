@@ -248,3 +248,42 @@ def test_equivalence_reaches_the_measurement_with_its_thresholds(tmp_path,
     assert seen["min_agreement"] == eq.MIN_AGREEMENT
     assert seen["max_mean_dlogprob"] == eq.MAX_MEAN_DLOGPROB
     assert seen["stack_digest"] == ws.stack().digest
+
+
+def test_ncu_builds_a_driver_and_parses_the_counters(tmp_path, stock_dir, monkeypatch):
+    """The driver runs the agent's script under ncu without clock locking
+    (the container cannot lock clocks) and turns the CSV into per-kernel
+    rows; a run with no parseable output is reported as not ok."""
+    import simulator
+    from harness.agent.workspace import Workspace
+
+    from .test_workspace import FakeStock
+
+    ws = Workspace(tmp_path / "a01", agent_id="a01", source=FakeStock(stock_dir))
+    ws.materialise("srt/managers/schedule_policy.py")
+    script = tmp_path / "bench.py"
+    script.write_text("print('hi')\n")
+    seen = {}
+
+    class Stub:
+        def __init__(self, **kw):
+            seen["stack"] = kw["stack"]
+
+        async def workbench(self, text, files=None, timeout_s=0):
+            seen["driver"] = text
+            seen["files"] = files
+            return {"ok": True, "stdout": 'NCU_JSON {"rc": 0, "kernels": {"k0": {"launches": 2, '
+                                          '"gpu__time_duration.sum": 176.3, '
+                                          '"dram__throughput.avg.pct_of_peak_sustained_elapsed": 21.6}}}',
+                    "stderr": "", "cost_usd": 0.02, "gpu": "H100"}
+
+    real = simulator.Simulator
+    simulator.Simulator = Stub
+    try:
+        rep = tools.ncu(script, workspace=ws.root, kernel="gemm", source=ws.source)
+    finally:
+        simulator.Simulator = real
+    assert rep["ok"] and rep["ncu"]["kernels"]["k0"]["dram__throughput.avg.pct_of_peak_sustained_elapsed"] == 21.6
+    assert "--clock-control" in seen["driver"] and "'gemm'" in seen["driver"]
+    assert seen["files"] == {"target.py": "print('hi')\n"}
+    assert tools.ncu(tmp_path / "missing.py", workspace=ws.root, source=ws.source)["ok"] is False
