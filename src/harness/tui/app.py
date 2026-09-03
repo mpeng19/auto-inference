@@ -150,6 +150,7 @@ class FleetApp(App):
 
     def _apply(self, v) -> None:
         self.view = v
+        self._settle_pending()
         self._render_summary()
         self._render_table()
         self._render_detail()
@@ -346,6 +347,24 @@ class FleetApp(App):
     def _set_answer(self, text: str, style: str = "") -> None:
         self.answer_text = text
         self.query_one("#answer", Static).update(Text(text, style=style))
+
+    def _settle_pending(self) -> None:
+        """Drop a pending mark once the fleet's view reflects the command.
+        Pause is cooperative, so `paused` appears at once but the agent
+        finishes its current call first; the mark says "sent", the status
+        says "applied", and neither should outlive the other by more than
+        one refresh."""
+        if not self.view:
+            return
+        status = {a.agent_id: a.status for a in self.view.agents}
+        done = {"pause": ("paused", "done", "failed"), "resume": ("thinking", "evaluating",
+                                                                   "queued", "idle", "done"),
+                "kill": ("done", "failed", "stopping")}
+        for agent_id, kind in list(self._pending.items()):
+            if status.get(agent_id) in done.get(kind, ()):
+                self._pending.pop(agent_id, None)
+        # scale/stop are fleet-level; they never show per agent
+        self._pending.pop("", None)
 
     def _recent_calls(self, agent_id: str, k: int = 5) -> list[dict]:
         """The agent's last k model calls from its call log, summarised.

@@ -71,6 +71,17 @@ async def test_keys_issue_commands_the_fleet_will_see(store):
         await pilot.pause()
         cmds = store.take_commands("demo")
         assert [(c.kind, c.agent_id) for c in cmds] == [("pause", "a00")]
+        assert "pause pending" in app.detail_text
+        # the fleet applies it and publishes; the mark must go away
+        v = store.read("demo")
+        from dataclasses import replace
+        agents = tuple(replace(a, status="paused") if a.agent_id == "a00" else a for a in v.agents)
+        store.publish(replace(v, agents=agents))
+        for _ in range(6):
+            await pilot.pause()
+            if "pending" not in app.detail_text:
+                break
+        assert "pending" not in app.detail_text and "paused" in app.detail_text
 
 
 async def test_scaling_keys_target_the_session_not_an_agent(store):
