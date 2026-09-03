@@ -26,6 +26,7 @@ otherwise have meant another 25 GPU-minutes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import pathlib
@@ -446,16 +447,23 @@ class Simulator:
         (d / "call_id").write_text(call.object_id)
 
         deadline = time.time() + timeout_s + WORKBENCH_OVERHEAD_S
-        while True:
-            try:
-                rec = await call.get.aio(timeout=0)
-                break
-            except TimeoutError as e:
-                if time.time() > deadline:
-                    raise TimeoutError(
-                        f"workbench {call.object_id} still running after "
-                        f"{timeout_s + WORKBENCH_OVERHEAD_S}s") from e
-                await asyncio.sleep(5.0)
+        try:
+            while True:
+                try:
+                    rec = await call.get.aio(timeout=0)
+                    break
+                except TimeoutError as e:
+                    if time.time() > deadline:
+                        raise TimeoutError(
+                            f"workbench {call.object_id} still running after "
+                            f"{timeout_s + WORKBENCH_OVERHEAD_S}s") from e
+                    await asyncio.sleep(5.0)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # Nobody is waiting for this answer any more; stop paying for it.
+            with contextlib.suppress(Exception):
+                call.cancel()
+            (d / "cancelled").write_text(f"{time.time()}\n")
+            raise
 
         rec = dict(rec)
         (d / "stdout.txt").write_text(rec.get("stdout") or "")

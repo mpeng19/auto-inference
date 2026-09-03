@@ -258,6 +258,15 @@ def run(cfg: FleetConfig) -> None:
     finally:
         fleet.stop("finished")
         broker.shutdown(wait=False)
+        # Sweeps and workbench calls still running are money with no reader.
+        from .inflight import cancel_pending
+
+        try:
+            done = cancel_pending(cfg.root)
+            if done:
+                print(f"cancelled {len(done)} GPU call(s) on exit", flush=True)
+        except Exception as e:
+            print(f"could not cancel in-flight GPU calls: {e}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:

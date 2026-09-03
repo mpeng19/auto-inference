@@ -259,6 +259,7 @@ def gpu_run(script_path: str | pathlib.Path,
     sim = Simulator(root_dir=root, stack=stack)
     rec = asyncio.run(sim.workbench(p.read_text(), files=files,
                                     timeout_s=timeout_s))
+    _ledger(root, "gpu-run", rec)
     rec["script"] = str(p)
     rec["stack_digest"] = stack.digest
     if note:
@@ -342,6 +343,7 @@ def ncu(script_path: str | pathlib.Path, workspace: str | pathlib.Path | None = 
     sim = Simulator(root_dir=root, stack=stack)
     rec = asyncio.run(sim.workbench(driver, files={"target.py": p.read_text()},
                                     timeout_s=timeout_s))
+    _ledger(root, "ncu", rec)
     rec["script"] = str(p)
     rec["stack_digest"] = stack.digest
     if note:
@@ -389,9 +391,21 @@ def equivalence(workspace: str | pathlib.Path | None = None,
         min_agreement=eq.MIN_AGREEMENT if min_agreement is None else min_agreement,
         max_mean_dlogprob=(eq.MAX_MEAN_DLOGPROB if max_mean_dlogprob is None
                            else max_mean_dlogprob)))
+    _ledger(root, "equivalence", rec)
     if note:
         rec["note"] = note
     return rec
+
+
+def _ledger(root, tool: str, rec: dict) -> None:
+    """Record what a tool call cost where the fleet will find it. Never
+    fails the call: the result matters more than the receipt."""
+    from harness.agent import ledger
+
+    with contextlib.suppress(Exception):
+        ledger.append(root, tool, rec.get("cost_usd") or 0.0,
+                      elapsed_s=rec.get("elapsed_s") or 0.0,
+                      gpu=str(rec.get("gpu") or ""), where=str(rec.get("dir") or ""))
 
 
 def recall(intent: str, root: str | pathlib.Path | None = None, k: int = 8,
@@ -433,6 +447,16 @@ def _find_memory(root: str | pathlib.Path | None) -> pathlib.Path | None:
 
 def main(action: str, args) -> int:
     """Dispatch for `harness tool <action>`. Prints JSON when asked."""
+    import signal
+
+    # A tool killed from outside -- the agent's shell timeout, mostly --
+    # must take its GPU call down with it. SIGTERM/SIGHUP become
+    # KeyboardInterrupt, which `Simulator.workbench` turns into a cancel of
+    # the spawned call. Before this a killed gpu-run ran to completion and
+    # billed with nobody waiting for the answer.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(Exception):
+            signal.signal(sig, signal.default_int_handler)
     if action == "roofline":
         r = roofline(context=args.context, batch=args.batch, model=args.model,
                      gpu=args.gpu, n_gpu=args.n_gpu)

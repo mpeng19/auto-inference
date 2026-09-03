@@ -104,6 +104,19 @@ class IterativeAgent:
     priority: int = 0
 
     # ── the control seam ─────────────────────────────────────────────────
+    def _drain_ledger(self) -> float:
+        """Spend the agent's own tools recorded since the last look
+        (`harness.agent.ledger`): into its cost now, its budget next check."""
+        from . import ledger
+
+        try:
+            usd = ledger.drain(self.workspace.root)
+        except Exception:
+            return 0.0
+        if usd:
+            self._report(cost_delta=usd)
+        return usd
+
     def _report(self, **fields) -> None:
         if self.control is not None:
             # Telemetry must never take an experiment down.
@@ -232,6 +245,7 @@ class IterativeAgent:
             self._append(trace, Turn(kind="thought", name="propose",
                                      content=str(rationale)[:4000]),
                          since=t_phase, phase="propose", call=True)
+            spent += self._drain_ledger()
 
             t_phase = time.time()
             ok, why = self.workspace.check()
@@ -253,7 +267,7 @@ class IterativeAgent:
             att, waited = self._measure(stack, idea, trace, rationale, n, tier,
                                         brief, tuple(attempts), budget=budget)
             idle += waited
-            spent += att.cost_usd
+            spent += att.cost_usd + self._drain_ledger()
 
             if (tier == "screen" and att.ok
                     and att.delta.get("bill_per_1k_pct", 0.0) <= budget.screen_promise_pct):

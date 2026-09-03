@@ -515,3 +515,45 @@ def test_agent_shell_commands_get_a_gpu_run_sized_timeout(tmp_path):
     env = ClaudeCodeProposer(binary=_fake_claude(tmp_path, "exit 0\n"))._env()
     assert int(env["BASH_DEFAULT_TIMEOUT_MS"]) >= 20 * 60 * 1000
     assert int(env["BASH_MAX_TIMEOUT_MS"]) >= int(env["BASH_DEFAULT_TIMEOUT_MS"])
+
+
+@dataclass
+class ToolSpendingProposer(StudyProposer):
+    """An edit whose tools spent GPU money the evaluation queue never saw."""
+
+    def edit(self, ws, idea, brief, attempt, history):
+        from harness.agent import ledger
+        ledger.append(ws.root, "gpu-run", 0.75, elapsed_s=420, gpu="H100")
+        ws.edit(P, "CHUNK = 16384\n\n\nclass SchedulePolicy:\n    pass\n")
+        return "measured then edited"
+
+    def study(self, ws, idea, brief, history, cancel=None):
+        return self.note
+
+
+def test_what_an_agent_spends_in_its_own_tools_is_its_cost(
+        tmp_path, stock_dir, memory, context):
+    """build-4: 14 GPU-hours of gpu-run/ncu/equivalence against a fleet
+    total that only counted evaluations."""
+    reported = []
+
+    class Control:
+        def report(self, agent_id, **fields):
+            if "cost_delta" in fields:
+                reported.append(fields["cost_delta"])
+        def wait_if_paused(self, agent_id, timeout_s=3600):
+            return True
+        def should_stop(self, agent_id):
+            return False
+
+    broker = EvalBroker(_runner(), capacity=1)
+    agent = _agent(tmp_path, stock_dir, memory, context, broker, ToolSpendingProposer())
+    agent.control = Control()
+    try:
+        out = agent.run(Idea(title="chunk", hypothesis="tune chunk", targets=(P,)),
+                        AgentBudget(max_attempts=1, patience=1, screen_first=False,
+                                    replicate_wins=False))
+    finally:
+        broker.shutdown()
+    assert 0.75 in reported
+    assert out.cost_usd == 1.0 + 0.75                # the sweep plus the tool

@@ -269,7 +269,22 @@ def cmd_kill(a) -> int:
         print(f"terminated process group {pid}")
     except (ProcessLookupError, PermissionError) as e:
         print(f"daemon {pid} already gone ({e})")
+    root = getattr(v, "root", "") or _root_for(a, v)
+    if root:
+        from .inflight import cancel_pending
+
+        done = cancel_pending(root)
+        print(f"cancelled {len(done)} GPU call(s) still running for {v.session_id}")
     return 0
+
+
+def _root_for(a, v) -> str:
+    """The fleet root for a session: the snapshot's, else the conventional one."""
+    for cand in (getattr(v, "root", None), getattr(a, "root", None),
+                 f"agents/{v.session_id}"):
+        if cand and pathlib.Path(cand).is_dir():
+            return str(cand)
+    return ""
 
 
 def _pid_from_disk(a, v) -> int:
