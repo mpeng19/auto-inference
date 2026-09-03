@@ -185,8 +185,9 @@ def test_a_candidate_file_is_named_after_the_stack_that_produced_it():
     assert a != E.candidate_name("m", "bbb")
     # Same model and same prompt set as the reference it will be compared to,
     # so a mismatched pair is visible in the two file names alone.
+    # Model, prompt set and launch line: three pieces the two names share.
     assert E.reference_name("m").removesuffix(".json").split("-")[1:] == \
-        a.removesuffix(".json").split("-")[1:3]
+        a.removesuffix(".json").split("-")[1:4]
 
 
 # ── the two runs it orchestrates ─────────────────────────────────────────
@@ -254,11 +255,12 @@ def test_a_warm_reference_costs_one_run_not_two(root, monkeypatch):
 
     store, made = {}, []
     _fake_runs(monkeypatch, store, made)
-    store[f"{E.RESULTS_DIR}/{E.reference_name('Qwen/Qwen3.8-27B-FP8')}"] = {
+    sim = Simulator(root_dir=root)
+    store[f"{E.RESULTS_DIR}/{E.reference_name(sim.model, serving_args=E.launch_args(sim.serving))}"] = {
         "kind": "reference", "scores": [{"i": 0, "token_id": [1, 2, 3],
                                          "top1": [7, 8, 9],
                                          "logprob": [-1.0, -1.0, -1.0]}]}
-    rec = asyncio.run(E.measure(Simulator(root_dir=root)))
+    rec = asyncio.run(E.measure(sim))
     assert [m["mode"] for m in made] == ["candidate"]
     assert rec["cost_usd"] == 0.05
 
@@ -367,3 +369,28 @@ def test_decode_path_is_scored_by_generation_not_only_by_prefill():
     src = eq.build_script("m", mode="candidate", out_path="/results/c.json", reference_path="/results/r.json")
     assert "generated_ids" in src and 'input_ids=prompt_ids' in src
     compile(src, "s.py", "exec")
+
+
+def test_the_engine_is_built_from_the_stack_launch_line():
+    """A stack whose whole change is a flag scored 1.0000 because the engine
+    was built from fixed kwargs. stock-with-triton-backend against stock-FA3
+    came back bit-identical, which two attention kernels cannot be."""
+    src = E.build_script("m", mode="reference", out_path="/o.json",
+                         serving_args=["--attention-backend", "triton"])
+    assert 'SERVING_ARGS = ["--attention-backend", "triton"]' in src
+    assert "ServerArgs.from_cli_args" in src
+    # the measurement's own flags come last, so they win over the launch line
+    body = src[src.index("argv = ["):]
+    assert body.index("*SERVING_ARGS") < body.index("--disable-radix-cache")
+
+
+def test_reference_and_candidate_are_keyed_on_the_launch_line():
+    from simulator.config import ServingConfig
+
+    stock = E.launch_args(ServingConfig())
+    triton = E.launch_args(ServingConfig().with_overrides(
+        {"extra_args": ["--attention-backend", "triton"]}))
+    assert "--enable-metrics" not in stock and "--attention-backend" in triton
+    assert E.reference_name("m", serving_args=stock) != E.reference_name("m", serving_args=triton)
+    assert E.reference_name("m", serving_args=stock) == E.reference_name("m", serving_args=list(stock))
+    assert E.candidate_name("m", "abc", serving_args=stock) != E.candidate_name("m", "abc", serving_args=triton)
