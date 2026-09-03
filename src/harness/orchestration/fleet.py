@@ -162,6 +162,10 @@ class Fleet:
                 cost_usd=self._cost, completed=tuple(self._completed))
 
     def stop(self, reason: str = "") -> FleetState:
+        """Wind the fleet up. Every agent's model call is cancelled at once
+        (its `stop_event` is the proposer's `cancel`); a sweep already on a
+        GPU is paid for and finishes, and the agent waiting on it says so.
+        `kill_agent` is the hard version for one agent."""
         self._stop.set()
         with self._lock:
             for s in self._slots.values():
@@ -215,7 +219,11 @@ class Fleet:
             return True
 
     def kill_agent(self, agent_id: str) -> bool:
-        """Wind the agent up. Cooperative: a paid evaluation still finishes."""
+        """Hard stop for one agent: its model call is cancelled now (the
+        slot's stop event is the proposer's `cancel`) and its GPU calls,
+        sweep or workbench, are cancelled on Modal so the loop's wait on
+        them ends within a poll. A paid sweep is lost; that is the point of
+        kill, and `stop` is the version that keeps it."""
         with self._lock:
             s = self._slots.get(agent_id)
             if s is None or s.view.status in self.FINISHED:
@@ -223,7 +231,18 @@ class Fleet:
             s.stop.set()
             s.resume.set()
             s.view = replace(s.view, status="stopping")
-            return True
+        if self.root:
+            with contextlib.suppress(Exception):
+                self._cancel_calls(os.path.join(self.root, agent_id))
+        return True
+
+    @staticmethod
+    def _cancel_calls(agent_root: str) -> list[str]:
+        """Cancel every Modal call under an agent's directory that has no
+        result yet. Separate so a test can watch it without Modal."""
+        from ..inflight import cancel_pending
+
+        return cancel_pending(agent_root)
 
     def scale(self, target: int) -> int:
         """Change how many agents run. Adds immediately, removes gracefully."""
@@ -253,6 +272,10 @@ class Fleet:
         return agent_id
 
     # ── the AgentControl seam ────────────────────────────────────────────
+    def stop_event(self, agent_id: str) -> threading.Event:
+        s = self._slots.get(agent_id)
+        return s.stop if s is not None else self._stop
+
     def should_stop(self, agent_id: str) -> bool:
         self._poll_commands()
         s = self._slots.get(agent_id)
@@ -540,7 +563,7 @@ class Fleet:
                 for s in self._slots.values():
                     s.stop.set()
                     s.resume.set()
-            return "stopping fleet"
+            return "stopping fleet: model calls cancelled, paid sweeps finish"
         return "noted"
 
     # ── the agent thread ─────────────────────────────────────────────────

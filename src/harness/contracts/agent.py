@@ -135,6 +135,14 @@ class AgentControl(Protocol):
     thinking rather than hung.
     """
 
+    def stop_event(self, agent_id: str):
+        """Optional. A `threading.Event` set when the agent should stop
+        (kill, scale-down, fleet stop). The loop hands it to the proposer as
+        `cancel`, so a two-hour model call ends within a poll interval of
+        the operator's keypress instead of at its own end. A paid
+        evaluation is never cancelled by it."""
+        ...
+
     def should_stop(self, agent_id: str) -> bool:
         """True when this agent should wind up after the current attempt."""
         ...

@@ -891,11 +891,13 @@ def test_the_fleet_keeps_publishing_while_it_winds_down():
         stopper = threading.Thread(target=fleet.stop, daemon=True)
         stopper.start()
         seen = set()
-        for _ in range(40):
+        for _ in range(100):                          # up to 5 s: the agent holds for 5
             time.sleep(0.05)
             v = store.read("wind")
             if v:
                 seen.add(v.phase)
+            if "stopping" in seen:
+                break
         assert "stopping" in seen, seen                # published during the drain
         gate.set()
         stopper.join(10)

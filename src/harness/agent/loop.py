@@ -108,6 +108,29 @@ class IterativeAgent:
     priority: int = 0
 
     # ── the control seam ─────────────────────────────────────────────────
+    def _stop_event(self):
+        """The operator's stop flag for this agent, if the control offers one."""
+        get = getattr(self.control, "stop_event", None)
+        try:
+            return get(self.agent_id) if get is not None else None
+        except Exception:
+            return None
+
+    def _call(self, fn, *args, **kw):
+        """Call a proposer method, passing the stop flag as `cancel` when
+        the method takes one, so an operator's stop ends the model call
+        now rather than at its own end."""
+        import inspect
+
+        ev = self._stop_event()
+        if ev is not None:
+            try:
+                if "cancel" in inspect.signature(fn).parameters:
+                    kw["cancel"] = ev
+            except (TypeError, ValueError):
+                pass
+        return fn(*args, **kw)
+
     def _drain_ledger(self) -> float:
         """Spend the agent's own tools recorded since the last look
         (`harness.agent.ledger`): into its cost now, its budget next check."""
@@ -225,8 +248,8 @@ class IterativeAgent:
             self._report(activity=f"attempt {n}: writing a diff (since {time.strftime('%H:%M')})")
             t_phase = time.time()
             try:
-                rationale = self.proposer.edit(
-                    self.workspace, idea, brief, n, tuple(attempts))
+                rationale = self._call(self.proposer.edit, self.workspace, idea,
+                                       brief, n, tuple(attempts))
             except TimeoutError as e:
                 # A build edit that runs out its clock has usually left a
                 # diff behind. build-4's a00 wrote for two hours, was killed,
@@ -253,6 +276,11 @@ class IterativeAgent:
                                      content=str(rationale)[:4000]),
                          since=t_phase, phase="propose", call=True)
             spent += self._drain_ledger()
+            if not self._may_continue():
+                # The call above was cancelled by the operator (kill, scale
+                # down, stop): nothing it left behind is priced.
+                stop = "stopped"
+                break
 
             t_phase = time.time()
             ok, why = self.workspace.check()
@@ -338,7 +366,7 @@ class IterativeAgent:
                     diff = ""
                     with contextlib.suppress(Exception):
                         diff = self.workspace.diff()
-                    path = write(self.workspace, idea, tuple(attempts),
+                    path = self._call(write, self.workspace, idea, tuple(attempts),
                                  self.baseline.get("bill_per_1k"), diff)
                     self._append(trace, Turn(kind="tool_call", name="paper", content=str(path)),
                                  since=since, phase="paper", call=True)
@@ -465,6 +493,11 @@ class IterativeAgent:
             if (th is not None and not cancel.is_set()
                     and time.time() - started > budget.study_timeout_s):
                 cancel.set()
+            if th is not None and not cancel.is_set() and not self._may_continue():
+                # Stopped by the operator: the study ends now; the sweep is
+                # paid for and its result is still worth the wait.
+                cancel.set()
+                self._report(activity="stopping: waiting for the paid sweep to finish")
             self.evals.collect(ticket.id, timeout_s=self.COLLECT_POLL_S)
         arrived = time.time()
 

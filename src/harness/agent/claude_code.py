@@ -512,7 +512,7 @@ class ClaudeCodeProposer:
     # No `seed`: ideas come from the bank (the daemon refuses to run without
     # one), so this proposer never invents its own.
     def edit(self, ws: Workspace, idea: Idea, brief: Brief, attempt: int,
-             history: tuple[Attempt, ...]) -> str:
+             history: tuple[Attempt, ...], cancel: threading.Event | None = None) -> str:
         # Give it real files to open. Without this the first thing it does is
         # discover the directory is empty.
         files = idea.targets or self.targets
@@ -536,7 +536,7 @@ class ClaudeCodeProposer:
             + ("\n  (not in this SGLang version, find the equivalent code: "
                + ", ".join(missing) + ")" if missing else ""))
         text, _ = self._run(prompt, cwd=str(ws.candidates), phase="edit",
-                            timeout_s=self._edit_timeout())
+                            timeout_s=self._edit_timeout(), cancel=cancel)
         return text.strip()[:4000]
 
     def _brief_text(self, brief: Brief, empty: str) -> str:
@@ -552,7 +552,8 @@ class ClaudeCodeProposer:
         return text
 
     def paper(self, ws: Workspace, idea: Idea, attempts: tuple[Attempt, ...],
-              baseline: float | None, diff: str) -> str:
+              baseline: float | None, diff: str,
+              cancel: threading.Event | None = None) -> str:
         """The write-up as a PDF, at the end of an idea that reached a full
         sweep. The template carries the numbers; the model writes the prose."""
         from ..paper import (
@@ -585,7 +586,8 @@ class ClaudeCodeProposer:
                 design = cand.read_text()[:6000]
                 break
         prompt = prompt_for(inp, idea.hypothesis, design, diff)
-        _text, _ = self._run(prompt, cwd=str(d), phase="paper", timeout_s=1200.0)
+        _text, _ = self._run(prompt, cwd=str(d), phase="paper", timeout_s=1200.0,
+                             cancel=cancel)
         pdf = compile_tex(tex)
         return str(pdf or tex)
 

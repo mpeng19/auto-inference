@@ -877,7 +877,8 @@ def main(argv: list[str] | None = None) -> int:
     tr.add_argument("--width", type=int, default=140)
     tr.add_argument("--full", action="store_true", help="include the data blob")
     tr.set_defaults(fn=cmd_traces)
-    sub.add_parser("stop", help="graceful: finish paid work, then wind up").set_defaults(fn=cmd_stop)
+    sub.add_parser("stop", help="stop the fleet: model calls cancelled now, paid sweeps finish "
+                                "(`kill <agent>` also drops the sweep)").set_defaults(fn=cmd_stop)
 
     k = sub.add_parser("kill", help="flat kill: everything, now")
     k.add_argument("--root", default="")

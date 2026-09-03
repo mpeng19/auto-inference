@@ -63,7 +63,10 @@ from textual.widgets import (
 
 from ..contracts.session import Command
 
-REFRESH_S = 0.5
+# One tick a second. Every render below is skipped when its content did
+# not change, so a tick costs nothing visible: rebuilding the tables on
+# every tick is what made hover highlights flash and lag.
+REFRESH_S = 1.0
 # A live fleet acknowledges within a tick or two. A command still unapplied
 # after this long is on a daemon that is not ticking (asleep, hung), which
 # is a different thing from "pending" and is labelled as such.
@@ -184,7 +187,7 @@ class FleetApp(App):
         ("+", "scale_up", "Add agent"),
         ("-", "scale_down", "Remove agent"),
         ("s", "stop_fleet", "Stop fleet"),
-        ("a", "ask", "Ask about the run"),
+        ("a", "ask", "Ask"),
         ("escape", "close_ask", "Close the ask box"),
         ("o", "open_artifact", "Open result's files"),
         ("b", "open_report", "Open report/paper in browser"),
@@ -193,7 +196,7 @@ class FleetApp(App):
         ("ctrl+down", "answer_shrink", "Smaller answer box"),
         # priority: the screen otherwise takes Tab for focus-cycling first
         Binding("tab", "next_tab", "Fleet / results", priority=True, show=False),
-        ("q", "quit", "Quit (fleet keeps running)"),
+        ("q", "quit", "Quit"),
     ]
 
     def __init__(self, store, session_id: str = ""):
@@ -353,7 +356,10 @@ class FleetApp(App):
         self._render_table()
         self._render_detail()
         self._render_results()
-        self.refresh_bindings()
+        key = (v.phase if v else "", self._alive, bool(self._pending), bool(self._pending_fleet))
+        if key != getattr(self, "_bindings_key", None):
+            self._bindings_key = key
+            self.refresh_bindings()
 
     # ── pending marks ───────────────────────────────────────────────────
     def _pending_label(self, c: Command) -> tuple[str, str]:
@@ -445,9 +451,7 @@ class FleetApp(App):
         self.query_one("#baseline", Static).update(Text(self.baseline_text))
 
     def _render_table(self) -> None:
-        t = self.query_one("#table", DataTable)
-        row = t.cursor_row
-        t.clear()
+        rows = []
         for a in (self.view.agents if self.view else ()):
             pend = self._pending.get(a.agent_id)
             mark = ""
@@ -456,13 +460,19 @@ class FleetApp(App):
             d = "-" if a.best_delta_pct is None else f"{a.best_delta_pct:+.1f}"
             bill = "-" if a.last_bill_per_1k is None else f"{a.last_bill_per_1k:.2f}"
             share = "-" if a.last_share_pct is None else f"{a.last_share_pct:.2f}%"
-            t.add_row(a.agent_id,
-                      Text(f"{a.status}{mark}", style=STATUS_STYLE.get(a.status, "")),
-                      a.idea_title[:22] or "-", str(a.attempt),
-                      Text(d, style="green" if d.startswith("-") else ""),
-                      bill, a.last_rank or "-", share,
-                      _money(self._agent_spend(a)), _tokens(a.tokens.total),
-                      key=a.agent_id)
+            rows.append((a.agent_id, f"{a.status}{mark}", a.status, a.idea_title[:22] or "-",
+                         str(a.attempt), d, bill, a.last_rank or "-", share,
+                         _money(self._agent_spend(a)), _tokens(a.tokens.total)))
+        if rows == getattr(self, "_table_rows", None):
+            return                            # nothing changed: leave the widget alone
+        self._table_rows = rows
+        t = self.query_one("#table", DataTable)
+        row = t.cursor_row
+        t.clear()
+        for (aid, status_mark, status, title, att, d, bill, rank, share, money, toks) in rows:
+            t.add_row(aid, Text(status_mark, style=STATUS_STYLE.get(status, "")),
+                      title, att, Text(d, style="green" if d.startswith("-") else ""),
+                      bill, rank, share, money, toks, key=aid)
         if row is not None and t.row_count:
             t.move_cursor(row=min(row, t.row_count - 1))
 
@@ -536,6 +546,11 @@ class FleetApp(App):
         except Exception:
             rows = []
         self._results = rows
+        fingerprint = [(r.experiment_id, r.verdict, r.tier, r.delta_pct, r.bill_per_1k,
+                        r.rank, r.share_pct, r.n_star, r.agent_id, r.title) for r in rows]
+        if fingerprint == getattr(self, "_results_rows", None):
+            return
+        self._results_rows = fingerprint
         t = self.query_one("#results", DataTable)
         cur = t.cursor_row
         t.clear()
@@ -872,6 +887,9 @@ class FleetApp(App):
             self._send("scale", value=str(max(0, self.view.target_agents - 1)))
 
     def action_stop_fleet(self) -> None:
+        """Stop the fleet: every agent's model call is cancelled now; a
+        sweep already on a GPU is paid for and finishes. `kill` on one
+        agent is the hard version."""
         self._send("stop")
 
 
