@@ -191,7 +191,10 @@ class IterativeAgent:
                 tokens_in=brief.est_tokens), since=t_phase, phase="recall")
 
             self.workspace.reset()
-            self._report(activity=f"attempt {n}: writing a diff")
+            # A build-mode edit can run for hours and tokens land only when
+            # it returns; say when it started so a long call is not read as
+            # a stall.
+            self._report(activity=f"attempt {n}: writing a diff (since {time.strftime('%H:%M')})")
             t_phase = time.time()
             try:
                 rationale = self.proposer.edit(

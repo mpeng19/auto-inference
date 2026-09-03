@@ -188,3 +188,11 @@ def test_new_files_have_no_upstream_sha(ws):
     st = ws.stack()
     assert "srt/layers/new_kernel.py" in st.files
     assert "srt/layers/new_kernel.py" not in st.upstream_sha
+
+
+def test_skills_are_installed_where_claude_code_looks(ws):
+    paths = ws.install_skills({"tracedb": "---\nname: tracedb\n---\nquery it", "empty": ""})
+    assert [p.parent.name for p in paths] == ["tracedb"]
+    assert (ws.candidates / ".claude" / "skills" / "tracedb" / "SKILL.md").read_text().endswith("query it")
+    ws.materialise("srt/managers/schedule_policy.py")
+    assert ws.touched() == () and ws.misplaced() == ()      # not part of the diff

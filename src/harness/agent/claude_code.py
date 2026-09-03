@@ -63,6 +63,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pathlib
 import shutil
 import signal
 import subprocess
@@ -211,6 +212,8 @@ class ClaudeCodeProposer:
     # this points the agent at `tracedb`'s tools so it can ask where the time
     # actually went instead of reasoning about it.
     mcp_config: str = ""
+    # What `mcp_config` falls back to when an attempt has no profile yet.
+    mcp_config_default: str = ""
     # Off by default: an inherited API key silently bills the wrong account.
     use_api_key: bool = False
     # Set by the agent loop so token use lands on the right dashboard row.
@@ -219,6 +222,9 @@ class ClaudeCodeProposer:
     # with the brief. A callable, because the index grows while the run is
     # on and the prompt must carry what exists *now*.
     session_tools: object | None = None
+    # The skill bank, rendered: what earlier runs established. A callable
+    # for the same reason as `session_tools`.
+    session_skills: object | None = None
     last_usage: TokenUse = field(default_factory=TokenUse)
     # Every call this proposer has made, newest last. The loop stamps
     # `last_call` onto the turn it appends, so a trace can be read for where
@@ -276,8 +282,49 @@ class ClaudeCodeProposer:
         """
         tools = tuple(self.allowed_tools)
         if self.mcp_config and not any(t.startswith("mcp__") for t in tools):
-            tools += (f"mcp__{MCP_SERVER_NAME}",)
+            tools += (f"mcp__{MCP_SERVER_NAME}", f"mcp__{MCP_SERVER_NAME}_stock")
         return tools
+
+    @staticmethod
+    def skill_docs() -> dict[str, str]:
+        """The skills shipped with the harness (`harness/skills/docs/*/SKILL.md`)."""
+        base = pathlib.Path(__file__).resolve().parent.parent / "skills" / "docs"
+        out = {}
+        if base.is_dir():
+            for d in sorted(base.iterdir()):
+                f = d / "SKILL.md"
+                if f.is_file():
+                    out[d.name] = f.read_text()
+        return out
+
+    def _install_skills(self, ws: Workspace) -> None:
+        skills = dict(self.skill_docs())
+        if self.session_skills is not None:
+            with contextlib.suppress(Exception):
+                text = str(self.session_skills() or "")
+                if text:
+                    skills["serving-facts"] = text
+        with contextlib.suppress(Exception):
+            ws.install_skills(skills)
+
+    def _mcp_for(self, ws: Workspace, history: tuple[Attempt, ...]) -> str:
+        """An MCP config for this attempt: the agent's latest profile, and
+        stock's if the fleet has one. Empty when there is nothing to query,
+        so the agent is not offered tools that answer with an empty table."""
+        from ..profile import write_mcp_config
+
+        dbs: dict[str, str] = {}
+        for a in reversed(history):
+            db = (a.metrics or {}).get("profile_db")
+            if db and pathlib.Path(db).is_file():
+                dbs[MCP_SERVER_NAME] = db
+                break
+        stock = ws.root.parent / "profiles" / "stock.sqlite"
+        if stock.is_file():
+            dbs[f"{MCP_SERVER_NAME}_stock"] = str(stock)
+        if not dbs:
+            return ""
+        return str(write_mcp_config(ws.root, dbs))
 
     def _cmd(self, prompt: str, model: str) -> list[str]:
         """The argv. `--allowedTools` is variadic, so it goes last.
@@ -437,6 +484,8 @@ class ClaudeCodeProposer:
         # Give it real files to open. Without this the first thing it does is
         # discover the directory is empty.
         files = idea.targets or self.targets
+        self._install_skills(ws)
+        self.mcp_config = self._mcp_for(ws, history) or self.mcp_config_default
         present = ws.materialise(*files)
         missing = getattr(ws, "missing_targets", ())
         if not present:

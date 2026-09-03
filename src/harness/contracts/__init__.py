@@ -11,6 +11,7 @@ that gets rewritten repeatedly stays coherent.
     EvalService            the queue in front of the GPUs
     AgentService           one idea, iterated
     IdeaBankService        where ideas of the right size come from, claimed one per agent
+    SkillBankService       what earlier runs established, written by the manager, read by all
     OrchestrationService   N of those, kept diverse and inside a budget
 """
 from .agent import (
@@ -48,9 +49,11 @@ from .session import (
     SessionView,
     TokenUse,
 )
+from .skills import Fact, FactStatus, Judge, SkillBankService
 
 __all__ = [
     "BankStatus", "IdeaBankService", "IdeaRecord", "Scale",
+    "Fact", "FactStatus", "Judge", "SkillBankService",
     # shared
     "Provenance", "digest", "new_id", "now",
     # memory

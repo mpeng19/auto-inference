@@ -273,6 +273,7 @@ class Fleet:
     # ── the idea bank ───────────────────────────────────────────────────
     bank = None          # IdeaBankService, set by the daemon when one is configured
     manager = None       # harness.manager.Manager, likewise
+    skills = None        # SkillBankService, rendered into every agent's prompt
 
     def claim_from_bank(self, agent_id: str) -> Idea | None:
         """A record no one else holds, least like what is live or tried.

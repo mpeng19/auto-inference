@@ -88,6 +88,7 @@ def cmd_start(a) -> int:
         agent_max_attempts=a.max_attempts, agent_max_usd=a.agent_budget,
         dry_run=a.dry_run, fake_agents=a.fake_agents, note=a.note,
         bank=_bank_path(a.bank) if a.bank else "", mode=a.mode, manager=a.manager,
+        profile_level=a.profile_level,
         seeds=tuple(s for s in (a.seed or [])),
         baseline=json.loads(a.baseline) if a.baseline else {})
     cfg_path = root / "fleet.json"
@@ -299,6 +300,47 @@ def cmd_ideas(a) -> int:
     return 2
 
 
+# ── skills ───────────────────────────────────────────────────────────────
+
+def cmd_skills(a) -> int:
+    """The skill bank: facts earlier runs established. Written by the
+    manager during a run; `add` is for a person who learned something."""
+    from .contracts import Fact
+    from .skills import SqliteSkillBank, default_skills_path
+
+    bank = SqliteSkillBank(a.bank or default_skills_path())
+    if a.action == "list":
+        rows = bank.list(topic=a.topic, status=None if a.all else "active")
+        print(f"{bank.path}: {len(rows)} facts")
+        for f in rows:
+            flag = "" if f.status == "active" else f" [{f.status} -> {f.superseded_by}]"
+            print(f"  {f.id}  {f.topic:18s} {f.confidence:.1f}  {f.claim[:80]}{flag}")
+        return 0
+    if a.action == "show":
+        f = bank.get(a.arg)
+        if f is None:
+            print(f"no fact {a.arg}")
+            return 1
+        from dataclasses import asdict
+        print(json.dumps(asdict(f), indent=1))
+        return 0
+    if a.action == "add":
+        fid, losers = bank.add(Fact(claim=a.arg, topic=a.topic or "general",
+                                    evidence=a.evidence, source="human",
+                                    confidence=a.confidence))
+        print(f"added {fid}" + (f"; superseded {', '.join(losers)}" if losers else ""))
+        return 0
+    if a.action == "retract":
+        bank.retract(a.arg)
+        print(f"retracted {a.arg}")
+        return 0
+    if a.action == "render":
+        print(bank.render(query=a.arg) or "(no facts)")
+        return 0
+    print(f"unknown action {a.action}")
+    return 2
+
+
 # ── results and questions ────────────────────────────────────────────────
 
 def _root_of(a) -> str:
@@ -425,6 +467,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="start even if a daemon for this root is alive")
     s.add_argument("--bank", nargs="?", const="__default__", default="",
                    help="claim ideas from the bank (default path when given no value)")
+    s.add_argument("--profile-level", dest="profile_level", type=int, default=12,
+                   help="capture a GPU profile at this level on full sweeps (0 = none)")
     s.add_argument("--manager", action="store_true",
                    help="review outcomes and stash reusable tools under <root>/tools/")
     s.add_argument("--mode", choices=["tune", "build"], default="tune",
@@ -471,6 +515,16 @@ def main(argv: list[str] | None = None) -> int:
     tl.add_argument("-k", type=int, default=8)
     tl.add_argument("--json", action="store_true")
     tl.set_defaults(fn=cmd_tool)
+
+    sk = sub.add_parser("skills", help="the skill bank: facts earlier runs established")
+    sk.add_argument("action", choices=["list", "show", "add", "retract", "render"])
+    sk.add_argument("arg", nargs="?", default="", help="id | claim | query")
+    sk.add_argument("--bank", default="", help="database path (default: shared)")
+    sk.add_argument("--topic", default="")
+    sk.add_argument("--evidence", default="")
+    sk.add_argument("--confidence", type=float, default=0.7)
+    sk.add_argument("--all", action="store_true", help="list: include superseded")
+    sk.set_defaults(fn=cmd_skills)
 
     rz = sub.add_parser("results", help="what the run found, best first")
     rz.add_argument("--root", default="", help="fleet root (default: the session's)")

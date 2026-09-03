@@ -12,6 +12,12 @@ from harness.daemon import FleetConfig, build
 from harness.session import SqliteSessionStore
 
 
+@pytest.fixture(autouse=True)
+def _own_home(tmp_path, monkeypatch):
+    """The daemon opens the shared skill bank; tests must not touch ~/."""
+    monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "home"))
+
+
 def test_config_round_trips(tmp_path):
     """A daemon must be restartable from its config alone."""
     cfg = FleetConfig(session_id="s1", root=str(tmp_path), agents=7,

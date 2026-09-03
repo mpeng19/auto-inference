@@ -56,7 +56,7 @@ testpaths = ["src/simulator", "src/harness", "src/tracedb"]
 
 [tool.ruff]
 src = ["src"]
-include = ["src/**/*.py", "monitor/**/*.py"]
+include = ["src/**/*.py", "src/**/*.md", "monitor/**/*.py"]
 line-length = 90
 target-version = "py312"
 

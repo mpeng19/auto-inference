@@ -197,6 +197,21 @@ class Workspace:
         except (OSError, FileNotFoundError):
             return False
 
+    def install_skills(self, skills: dict[str, str]) -> tuple[pathlib.Path, ...]:
+        """Write `.claude/skills/<name>/SKILL.md` into the candidate directory,
+        which is the agent's cwd, so Claude Code discovers them as project
+        skills. Not Python, so never part of the diff. Rewritten every call:
+        the serving-facts skill changes as the bank does."""
+        out = []
+        for name, text in skills.items():
+            if not text:
+                continue
+            d = self.candidates / ".claude" / "skills" / name
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "SKILL.md").write_text(text)
+            out.append(d / "SKILL.md")
+        return tuple(out)
+
     def misplaced(self) -> tuple[str, ...]:
         """Top-level directories in the candidate that cannot be part of the
         package: a nested `sglang/` (the agent treated this as a repo root),

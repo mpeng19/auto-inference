@@ -46,12 +46,23 @@ def mcp_config(db: str | pathlib.Path) -> dict:
     }}}
 
 
+def mcp_config_many(dbs: dict[str, str | pathlib.Path]) -> dict:
+    """One server per database: `tracedb` for the agent's own latest
+    profile, `tracedb_stock` for the baseline's, so the same tools answer
+    "what does my kernel do" and "what did stock do" side by side."""
+    return {"mcpServers": {name: {
+        "command": sys.executable,
+        "args": ["-m", "tracedb.mcp_server", "--db", str(db)],
+    } for name, db in dbs.items()}}
+
+
 def write_mcp_config(workspace_root: str | pathlib.Path,
-                     db: str | pathlib.Path) -> pathlib.Path:
+                     db: str | pathlib.Path | dict) -> pathlib.Path:
     """Write the config beside the agent's workspace and return its path."""
     p = pathlib.Path(workspace_root) / "mcp.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(mcp_config(db), indent=1))
+    cfg = mcp_config_many(db) if isinstance(db, dict) else mcp_config(db)
+    p.write_text(json.dumps(cfg, indent=1))
     return p
 
 

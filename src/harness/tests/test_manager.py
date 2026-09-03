@@ -63,3 +63,31 @@ def test_a_broken_reply_never_raises(tmp_path):
     m = Manager(tmp_path, lambda p: "not json at all", every=1)
     m.on_outcome(_out("a00", "t"))
     assert m.tools_index() == "" and m.log[-1].startswith("review:")
+
+
+def test_manager_writes_facts_and_uses_the_model_as_judge(tmp_path):
+    from harness.skills import SqliteSkillBank
+
+    bank = SqliteSkillBank(tmp_path / "skills.db")
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        if "CONTRADICT" in prompt:
+            ids = [line.split(":")[0].strip() for line in prompt.split("Existing facts:")[1].splitlines()
+                   if line.strip().startswith("fact_")]
+            return json.dumps(ids[:1])
+        return json.dumps({"tool": None, "notes": "n",
+                           "facts": [{"claim": f"claim number {len(prompts)}",
+                                      "topic": "kv", "evidence": "e", "confidence": 0.8}]})
+
+    m = Manager(tmp_path, ask, every=1, skills=bank, session_id="s1")
+    m.on_outcome(_out("a00", "x"))
+    assert len(bank.list()) == 1                       # first review: one fact, no judge
+    m.on_outcome(_out("a01", "y"))                     # second review, then the judge
+    active = bank.list()
+    assert len(active) == 1 and active[0].claim == "claim number 2"
+    assert active[0].source == "s1"
+    assert len(bank.list(status=None)) == 2
+    assert any("supersedes" in line for line in m.log)
+    assert "Facts already held" in prompts[-2] or "Facts already held" in prompts[-1]

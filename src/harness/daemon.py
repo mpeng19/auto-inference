@@ -25,6 +25,7 @@ from .ideas import SqliteIdeaBank
 from .memory import SqliteMemory
 from .orchestration import EvalBroker, Fleet
 from .session import SqliteSessionStore, default_store_path
+from .skills import SqliteSkillBank, default_skills_path
 
 
 @dataclass
@@ -62,6 +63,9 @@ class FleetConfig:
     # A reviewer that turns what agents keep re-deriving into shared tools
     # under <root>/tools/. A few model calls a night.
     manager: bool = False
+    # Capture a GPU profile at this level on full sweeps (0 = none) and hand
+    # it to the agent as tracedb tools. 12 is the priced level on stock.
+    profile_level: int = 12
     # Two separate fakes, because they cost different things. `dry_run` skips
     # the GPU (dollars); `fake_agents` skips Claude Code (subscription usage).
     # A flag named "dry run" that still spawns ten real agents is a trap.
@@ -139,10 +143,13 @@ def evaluator_for(cfg: FleetConfig, tier: str) -> SimulatorEvaluator:
     """
     screen = tier == "screen"
     quality = dict((cfg.baseline or {}).get("quality") or {})
+    root = pathlib.Path(cfg.root or (pathlib.Path.cwd() / "agents"))
     return SimulatorEvaluator(
         n_gpu=cfg.n_gpu, gpu=cfg.gpu, model=cfg.sim_model,
         levels=cfg.screen_levels if screen else cfg.levels,
         seconds_per_level=cfg.screen_seconds if screen else cfg.seconds_per_level,
+        profile_level=0 if screen else cfg.profile_level,
+        profiles_root=str(root / "profiles"),
         extra={"quality_baseline": quality})
 
 
@@ -165,10 +172,12 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     fleet = Fleet(None, broker, store=store, session_id=cfg.session_id,
                   root=str(root))
     fleet.bank = bank
+    skills = SqliteSkillBank(default_skills_path())
+    fleet.skills = skills
     if cfg.manager and not cfg.fake_agents:
         from .ideas.llm import ask_with
         from .manager import Manager
-        fleet.manager = Manager(root, ask_with(cfg.model, cwd=root))
+        fleet.manager = Manager(root, ask_with(cfg.model, cwd=root), skills=skills)
 
     def make_agent(agent_id: str, fl: Fleet):
         ws = Workspace(root / agent_id, agent_id=agent_id)
@@ -177,7 +186,8 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
         else:
             prop = ClaudeCodeProposer(
                 model=cfg.model, seed_model=cfg.seed_model, mode=cfg.mode,
-                session_tools=(fl.manager.tools_index if fl.manager is not None else None))
+                session_tools=(fl.manager.tools_index if fl.manager is not None else None),
+                session_skills=(fl.skills.render if getattr(fl, "skills", None) else None))
             # Token use is attributed the moment it is spent, which is what
             # makes the dashboard's per-agent cost real rather than
             # apportioned after the fact.

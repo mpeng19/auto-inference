@@ -18,6 +18,7 @@ sweep still rented the GPU, so it still costs.
 from __future__ import annotations
 
 import asyncio
+import pathlib
 from dataclasses import dataclass, field
 
 
@@ -37,6 +38,12 @@ class SimulatorEvaluator:
     # than imported from the runner so the evaluator never imports modal.
     vcpu: float = 16.0
     memory_gib: float = 0.0
+    # Capture a GPU profile at this level (0 = none) and ingest it under
+    # `profiles_root/<stack digest>.sqlite`, which the agent then queries
+    # through the tracedb MCP tools. Full tier only: a screen is too short.
+    profile_level: int = 0
+    profile_steps: int = 20
+    profiles_root: str = ""
 
     def _rate(self, gpu: str, n_gpu: int) -> float:
         from simulator import costs
@@ -65,6 +72,43 @@ class SimulatorEvaluator:
             seconds += float(m.get("wall_s") or 0.0)
         return round(seconds * self._rate(gpu, n_gpu) / 3600.0, 4)
 
+    def _ingest_profile(self, record: dict, digest: str, fetch=None) -> str:
+        """Bring a captured trace local and load it into a tracedb file.
+        Never fails the evaluation: the price stands without the profile."""
+        try:
+            profs = record.get("profiles") or []
+            if not profs or not self.profiles_root:
+                return ""
+            import base64
+
+            if fetch is None:
+                import modal
+
+                from simulator.api import APP_NAME
+                fetch = modal.Function.from_name(APP_NAME, "fetch_profile").remote
+            got = fetch(profs[-1]["dir"])
+            files = got.get("files") or []
+            if not files:
+                return ""
+            root = pathlib.Path(self.profiles_root)
+            raw = root / "raw" / (digest or "profile")
+            raw.mkdir(parents=True, exist_ok=True)
+            trace = None
+            for f in files:
+                p = raw / f["name"]
+                p.write_bytes(base64.b64decode(f["b64"]))
+                if p.suffix in (".json", ".gz") or "trace" in p.name:
+                    trace = trace or p
+            if trace is None:
+                return ""
+            from ..profile import ingest
+
+            out = ingest(trace, root.parent, name=digest or trace.stem)
+            return str(out.get("db") or (root / f"{digest}.sqlite"))
+        except Exception as e:
+            print(f"profile ingest skipped: {type(e).__name__}: {e}", flush=True)
+            return ""
+
     def evaluate(self, stack, run_dir) -> tuple[bool, dict, str]:
         from simulator import Simulator
 
@@ -72,7 +116,9 @@ class SimulatorEvaluator:
                         gpu=self.gpu, n_gpu=self.n_gpu, levels=self.levels,
                         seconds_per_level=self.seconds_per_level,
                         gpu_provider=self.gpu_provider,
-                        utilisation=self.utilisation, **self.extra)
+                        utilisation=self.utilisation,
+                        profile_level=self.profile_level, profile_steps=self.profile_steps,
+                        **self.extra)
         import time
 
         t0 = time.time()
@@ -109,7 +155,10 @@ class SimulatorEvaluator:
 
         b = res.best
         rank = res.rank() or {}
+        profile_db = self._ingest_profile(res.record, getattr(stack, "digest", "")) \
+            if self.profile_level else ""
         return True, {
+            "profile_db": profile_db,
             "bill_per_1k": b.bill_per_1k,
             # Where this price sits on the OpenRouter board, both ways, and
             # the share one node could serve at it: what a watcher wants to
