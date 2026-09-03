@@ -340,3 +340,30 @@ def test_equivalence_prompts_are_long_context_and_the_reference_name_moved():
     name = eq.reference_name("Qwen/Qwen3.8-27B-FP8")
     assert "a50ba120b271" not in name                 # the GSM8K-era reference is retired
     assert quality.LONGBENCH_REV in src
+
+
+def test_decode_path_is_scored_by_generation_not_only_by_prefill():
+    """Teacher-forced scoring never takes a decode step: a sparse-page
+    decode kernel scored 1.0000 / 0.0000 against stock while reading a
+    fraction of the KV. Greedy generation from the same prompts runs the
+    decode path, and stock's own generation is the reference."""
+    from simulator.measure import equivalence as eq
+
+    ref = {"prompt_ids": [[1, 2], [3, 4]], "completion_ids": [[5, 6, 7, 8], [9, 10, 11, 12]],
+           "scores": [{"i": 0, "token_id": [5, 6, 7, 8], "logprob": [-1.0] * 4, "top1": [5, 6, 7, 8]},
+                      {"i": 1, "token_id": [9, 10, 11, 12], "logprob": [-1.0] * 4, "top1": [9, 10, 11, 12]}]}
+    same = {**ref, "generated_ids": [[5, 6, 7, 8], [9, 10, 11, 12]]}
+    r = eq.compare(ref, same)
+    assert r.decode_agreement == 1.0 and r.decode_exact == 1.0
+    assert not eq.regressed(r)[0]
+    diverged = {**ref, "generated_ids": [[5, 6, 0, 0], [9, 0, 0, 0]]}
+    r2 = eq.compare(ref, diverged)
+    assert r2.top1_agreement == 1.0                     # prefill scoring cannot see it
+    assert r2.decode_agreement == 0.375 and r2.decode_exact == 0.0
+    bad, why = eq.regressed(r2)
+    assert bad and "decode" in why
+    old = eq.compare(ref, dict(ref))                    # a record without generated_ids
+    assert old.decode_agreement is None and "decode" not in old.summary()
+    src = eq.build_script("m", mode="candidate", out_path="/results/c.json", reference_path="/results/r.json")
+    assert "generated_ids" in src and 'input_ids=prompt_ids' in src
+    compile(src, "s.py", "exec")

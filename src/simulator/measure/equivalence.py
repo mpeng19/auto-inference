@@ -80,15 +80,25 @@ class EquivalenceResult:
     # from the numbers rather than as a bad-looking one.
     aligned: bool = True
     note: str = ""
+    # The decode path: the candidate generated greedily from each prompt,
+    # compared token by token with stock's generation. `decode_agreement`
+    # is the mean fraction of the continuation that matches before the
+    # first divergence; `decode_exact` the fraction of prompts that matched
+    # in full. None for records made before decode scoring existed.
+    decode_agreement: float | None = None
+    decode_exact: float | None = None
 
     def as_dict(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
 
     def summary(self) -> str:
+        dec = ("" if self.decode_agreement is None else
+               f"   decode agreement {self.decode_agreement:.4f} "
+               f"(exact {self.decode_exact:.0%})")
         return (f"{self.n} positions over {self.n_prompts} prompts   "
                 f"top-1 agreement {self.top1_agreement:.4f}   "
                 f"|dlogprob| mean {self.mean_abs_dlogprob:.4f} "
-                f"max {self.max_abs_dlogprob:.4f}"
+                f"max {self.max_abs_dlogprob:.4f}" + dec
                 + ("" if self.aligned else f"   NOT ALIGNED: {self.note}"))
 
 
@@ -242,11 +252,24 @@ def main():
         completion_ids = [[int(t[1]) for t in
                            (g["meta_info"].get("output_token_logprobs") or [])]
                           for g in gen]
+        generated_ids = completion_ids
     else:
         with open(REFERENCE_PATH) as f:
             ref = json.load(f)
         prompt_ids = ref["prompt_ids"]
         completion_ids = ref["completion_ids"]
+        # Teacher-forced scoring runs the *prefill* path over prompt and
+        # completion and never takes a decode step, so a decode-only kernel
+        # scores as exactly stock there (a sparse-page attention change did,
+        # 1.0000 / 0.0000). Generating greedily from the same prompts runs
+        # the decode path; stock's own generation is the reference.
+        gen = engine.generate(
+            input_ids=prompt_ids,
+            sampling_params={"max_new_tokens": MAX_NEW_TOKENS, "temperature": 0.0},
+            return_logprob=True)
+        generated_ids = [[int(t[1]) for t in
+                          (g["meta_info"].get("output_token_logprobs") or [])]
+                         for g in gen]
 
     scores = score(engine, prompt_ids, completion_ids)
     rec = {"kind": MODE, "model": MODEL, "model_digest": MODEL_DIGEST,
@@ -254,7 +277,8 @@ def main():
                getattr(sglang, "__version__", "unknown"),
            "n_prompts": len(prompts), "max_new_tokens": MAX_NEW_TOKENS,
            "created_at": time.time(), "prompt_ids": prompt_ids,
-           "completion_ids": completion_ids, "scores": scores}
+           "completion_ids": completion_ids, "generated_ids": generated_ids,
+           "scores": scores}
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
     with open(OUT_PATH, "w") as f:
         json.dump(rec, f)
@@ -362,15 +386,37 @@ def compare(reference: dict, candidate: dict) -> EquivalenceResult:
     if n == 0:
         return EquivalenceResult(n_prompts=len(shared), aligned=False,
                                  note="the prompts matched but scored no positions")
+    dec_agree = dec_exact = None
+    gen = candidate.get("generated_ids")
+    ref_gen = reference.get("completion_ids")
+    if gen and ref_gen and len(gen) == len(ref_gen):
+        fracs, exact = [], 0
+        for a, b in zip(gen, ref_gen, strict=True):
+            m = min(len(a), len(b))
+            if m == 0:
+                continue
+            k = 0
+            while k < m and a[k] == b[k]:
+                k += 1
+            fracs.append(k / m)
+            exact += int(k == m and len(a) == len(b))
+        if fracs:
+            dec_agree = round(sum(fracs) / len(fracs), 6)
+            dec_exact = round(exact / len(fracs), 6)
     return EquivalenceResult(
         n=n, n_prompts=len(shared),
         top1_agreement=round(matches / n, 6),
         mean_abs_dlogprob=round(total_d / n, 6),
-        max_abs_dlogprob=round(max_d, 6))
+        max_abs_dlogprob=round(max_d, 6),
+        decode_agreement=dec_agree, decode_exact=dec_exact)
+
+
+MIN_DECODE_AGREEMENT = 0.90
 
 
 def regressed(result: EquivalenceResult, min_agreement: float = MIN_AGREEMENT,
-              max_mean_dlogprob: float = MAX_MEAN_DLOGPROB) -> tuple[bool, str]:
+              max_mean_dlogprob: float = MAX_MEAN_DLOGPROB,
+              min_decode_agreement: float = MIN_DECODE_AGREEMENT) -> tuple[bool, str]:
     """Has this stack changed what the model computes? Returns (yes, why).
 
     Both thresholds are **provisional** and should be set from a measured noise
@@ -396,6 +442,10 @@ def regressed(result: EquivalenceResult, min_agreement: float = MIN_AGREEMENT,
         return True, (f"mean |dlogprob| {result.mean_abs_dlogprob:.4f} exceeds "
                       f"{max_mean_dlogprob:.4f}; the argmax mostly held but the "
                       "logits moved")
+    if result.decode_agreement is not None and result.decode_agreement < min_decode_agreement:
+        return True, (f"decode agreement {result.decode_agreement:.4f} is below "
+                      f"{min_decode_agreement:.2f}: greedy generation diverges from "
+                      "stock's; the decode path computes something different")
     return False, ""
 
 
