@@ -215,8 +215,30 @@ the ablation says otherwise, so read the paper's mechanism section against
 the numbers. Open question: why decode forward time per output token fell
 18% (2.17 -> 1.78 ms) when the launch line, batch and hit rate did not move.
 
-a01 holds every gate and changes what the model says on 38% of long
-prompts; see the equivalence gap below.
+a02's second idea also replicated: a wave-aligned, work-balanced paged
+decode attention kernel in Triton bound over FA3's decode call site, $7.74
+then $7.90 (-5.0%), gates held.
+
+**The decode-agreement floor, measured.** 32 LongBench prompts, 64 greedy
+tokens, against the stock FA3 reference:
+
+| stack | prefill top-1 | \|dlogprob\| mean | decode agreement | prompts exact |
+|---|---|---|---|---|
+| stock vs stock | 1.0000 | 0.0000 | 1.0000 | 100% |
+| stock, `--attention-backend triton` | 0.9915 | 0.0120 | 0.8367 | 75% |
+| a02 wave-aligned decode | 1.0000 | 0.0000 | 0.8787 | 75% |
+| a02 chunk sizer | 1.0000 | 0.0000 | 1.0000 | 100% |
+| a01 sparse KV pages | 1.0000 | 0.0000 | 0.7721 | 62% |
+
+Two correct kernels that sum in a different order land at 0.84, because
+greedy decode is chaotic: one flipped token loses the rest of the 64. So
+the gate line is 0.80 (`MIN_DECODE_AGREEMENT`), under that floor and above
+the lossy approximation. a02's decode kernel is indistinguishable from a
+correct reimplementation; a01 is below the floor and changes what the model
+says on 38% of long prompts; see the equivalence gap below. The Triton
+floor also exposed that the check had been building its engine from fixed
+kwargs, ignoring the stack's launch line (a flag-only stack scored 1.0000);
+it now builds from `serving.json` and keys the reference on the launch line.
 
 Five ideas closed as losses or errors (attention sinks -10.6% at screen but
 LongBench 53 -> 28; P-greedy nested KV pages -6.2% at screen; low-rank

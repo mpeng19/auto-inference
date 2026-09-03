@@ -714,6 +714,8 @@ Recorded because each was stated confidently before being checked.
 | Decode is not batching (effective batch ~3) | It batches at 96.7 | `BatchSampler` |
 | Roofline predicts cost | 27% out-of-sample error, barely beating a 31% null | `validate_loo` |
 | Token equivalence 1.0000 / 0.0000 means the kernel is exact | Teacher-forced scoring takes no decode step; a sparse-KV decode kernel scored perfect and diverged on 38% of prompts when generating | adding greedy-generation agreement to the check |
+| Decode agreement under 0.90 means a wrong kernel | Stock's own Triton backend scores 0.8367 against FA3: a correct kernel with another summation order diverges on a quarter of greedy continuations | measuring the floor before trusting the line |
+| A flag-only stack scoring 1.0000 is equivalent | The scoring engine was built from fixed kwargs and never saw the launch line | stock-with-triton scoring bit-identical to stock |
 
 **Two methodological lessons.** WebFetch's summariser is not a source for
 config data — it returned invented fields (`has_moe: false`) that read as

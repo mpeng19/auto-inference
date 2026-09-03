@@ -447,9 +447,15 @@ def compare(reference: dict, candidate: dict) -> EquivalenceResult:
         decode_agreement=dec_agree, decode_exact=dec_exact)
 
 
-MIN_DECODE_AGREEMENT = 0.90
-
-
+# Calibrated 2026-09-03 on 32 LongBench prompts x 64 greedy tokens:
+#   stock vs its own reference                 1.0000 (100% of prompts exact)
+#   stock --attention-backend triton vs FA3    0.8367 ( 75% exact)  <- two correct kernels
+#   a02 wave-aligned paged decode (build-4)    0.8787 ( 75% exact)
+#   a01 query-aware sparse KV pages (build-4)  0.7721 ( 62% exact)  <- drops 80% of pages
+# Greedy decode is chaotic: one flipped token near the start loses the rest of
+# the 64, so a different-but-correct summation order lands near 0.84. The line
+# sits under that floor and above the lossy approximation.
+MIN_DECODE_AGREEMENT = 0.80
 def regressed(result: EquivalenceResult, min_agreement: float = MIN_AGREEMENT,
               max_mean_dlogprob: float = MAX_MEAN_DLOGPROB,
               min_decode_agreement: float = MIN_DECODE_AGREEMENT) -> tuple[bool, str]:
