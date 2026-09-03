@@ -1,18 +1,18 @@
-"""A deliberately small dashboard: one table, one detail pane, six keys.
+"""The dashboard: a fleet tab, a results tab, and an ask box.
 
 The temptation with a fleet is to show everything -- every trace, every metric,
 a graph per agent. That produces a screen nobody reads while a bill runs. So
-this answers four questions and stops:
-
-    who is running, and what is each one doing right now
-    what has it cost, in dollars and in tokens, per agent and in total
-    are the GPUs busy, or is the fleet stalled behind them
-    which agent do I want to pause or kill
+the fleet tab answers four questions and stops: who is running and what each
+is doing now, what it has cost in dollars and tokens (and minutes by phase),
+whether the GPUs are busy or the fleet is stalled behind them, and which agent
+to pause or kill. The results tab is the morning view: every experiment best
+first, its artifacts, and a box to ask Claude about the run.
 
 It talks only to the session store, so it can be started and stopped at will
 and a crash here cannot touch a running fleet. Commands are written as rows;
-the fleet applies them on its next tick, which is why an action shows
-`pending` briefly before the status changes.
+the fleet applies them on its next tick. A snapshot is the daemon's last word,
+not a heartbeat, so the dashboard also asks the OS whether the daemon is still
+alive before believing "running".
 """
 from __future__ import annotations
 

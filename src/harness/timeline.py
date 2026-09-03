@@ -26,9 +26,10 @@ _PHASE_BY_TURN = {
     ("eval_result", None): "wait", ("error", None): "error",
     ("tool_call", "check"): "check", ("prompt", None): "start",
 }
-PHASES = ("edit", "check", "study", "wait", "recall", "error", "other")
+PHASES = ("edit", "check", "study", "wait", "paper", "recall", "error", "other")
 _COLOUR = {"edit": "#4c78a8", "study": "#72b7b2", "wait": "#f58518", "check": "#54a24b",
-           "recall": "#b279a2", "error": "#e45756", "other": "#bab0ac", "start": "#bab0ac"}
+           "paper": "#eeca3b", "recall": "#b279a2", "error": "#e45756", "other": "#bab0ac",
+           "start": "#bab0ac"}
 
 
 @dataclass(frozen=True)

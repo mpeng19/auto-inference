@@ -177,7 +177,8 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     if cfg.manager and not cfg.fake_agents:
         from .ideas.llm import ask_with
         from .manager import Manager
-        fleet.manager = Manager(root, ask_with(cfg.model, cwd=root), skills=skills)
+        fleet.manager = Manager(root, ask_with(cfg.model, cwd=root), skills=skills,
+                                session_id=cfg.session_id)
 
     def make_agent(agent_id: str, fl: Fleet):
         ws = Workspace(root / agent_id, agent_id=agent_id)
