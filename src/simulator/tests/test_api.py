@@ -201,6 +201,14 @@ def test_clean_quality_does_not_flag(root, sweep):
     assert "quality gsm8k: 72.0%" in res.summary()
 
 
+def test_finish_keeps_the_stack_beside_the_run(root, sweep):
+    from simulator import InferenceStack, Simulator
+
+    st = InferenceStack(files={"srt/x.py": "y\n"})
+    res = Simulator(root_dir=root, stack=st).finish(sweep)
+    assert "stack" in res.artifacts and InferenceStack.load(root) == st
+
+
 def test_submit_records_the_call_id_on_both_paths(root, monkeypatch):
     """`eval()` awaits the sweep from an event loop, so it must use Modal's
     async spawn; `submit()` stays blocking for the CLI. Both leave `call_id`

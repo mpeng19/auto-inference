@@ -341,7 +341,7 @@ class IterativeAgent:
             kind="eval_submit", name=stack.digest, content=rationale,
             data={"tier": tier, "ticket": ticket.id,
                   "queued": self.evals.stats().queued,
-                  "diff": self.workspace.diff()[:20000]}),
+                  "diff": self.workspace.diff()[:400_000]}),
             since=t_phase, phase="submit")
 
         # Useful non-GPU work while the sweep runs.

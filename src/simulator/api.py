@@ -568,6 +568,13 @@ class Simulator:
         out["result"] = str(self.root / "result.json")
         (self.root / "config.json").write_text(json.dumps(self.as_dict(), indent=2, default=str))
         out["config"] = str(self.root / "config.json")
+        # The candidate itself, in full. An agent's workspace is reset when
+        # it moves on, and the first replicated win of the project (build-2,
+        # a01, -27%) survived only as a truncated diff in a trace because
+        # nothing else kept the files. This is what `--stack <run dir>`
+        # loads, and what a re-measurement or a paper starts from.
+        (self.root / "stack.json").write_text(json.dumps(self.stack.as_dict(), indent=1))
+        out["stack"] = str(self.root / "stack.json")
         txt = report.render(self, res)
         (self.root / "report.txt").write_text(txt)
         out["report"] = str(self.root / "report.txt")

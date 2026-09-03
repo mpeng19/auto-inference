@@ -471,6 +471,8 @@ class FleetApp(App):
                 if r.stack_digest and r.stack_digest in rep.read_text():
                     out.append(("run", str(d)))
                     out.append(("report", str(rep)))
+                    if (d / "stack.json").is_file():
+                        out.append(("stack", str(d / "stack.json")))
                     for png in sorted(d.glob("*.png")):
                         out.append(("plot", str(png)))
                     break

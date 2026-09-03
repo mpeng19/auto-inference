@@ -119,3 +119,19 @@ def test_serving_only_stack_applies_as_stock_code(tmp_path):
     (root / "srt" / "a.py").write_text("stock\n")
     prov = InferenceStack(serving={"chunked_prefill_size": 4096}).apply(root=root)
     assert prov["applied"] == [] and (root / "srt" / "a.py").read_text() == "stock\n"
+
+
+def test_a_priced_stack_is_kept_in_full_and_loads_back(tmp_path):
+    """build-2's replicated win was lost with its workspace reset; every run
+    now keeps stack.json, and `--stack` accepts the run directory."""
+    from simulator.stack import InferenceStack
+
+    st = InferenceStack(files={"srt/a.py": "fast\n"}, serving={"chunked_prefill_size": 4096})
+    run = tmp_path / "attempt-003"
+    run.mkdir()
+    (run / "stack.json").write_text(__import__("json").dumps(st.as_dict()))
+    assert InferenceStack.load(run) == st
+    assert InferenceStack.load(run / "stack.json") == st
+    empty = tmp_path / "mirror"
+    empty.mkdir()
+    assert InferenceStack.load(empty).is_stock          # a bare directory: from_dir

@@ -120,6 +120,8 @@ def test_longbench_is_scored_by_token_f1_against_any_gold():
     assert qa_f1("1990", ["1989", "1990"]) == 1.0
     assert score("longbench", "some reasoning first\nParis", "Paris\x1fparis, france") == 1.0
     assert score("gsm8k", "#### 42", "42") == 1.0 and score("mmlu", "B", "B") == 1.0
+    assert score("mmlu", "Option A looks wrong; C fits.\n#### C", "C") == 1.0
+    assert score("mmlu", "Option A looks wrong; C fits.\n#### C", "A") == 0.0
 
 
 def test_longbench_slice_is_pinned_and_long(tmp_path, monkeypatch):

@@ -37,7 +37,7 @@ def _build(a) -> Simulator:
     root = pathlib.Path(a.root)
     if a.mkdir:
         root.mkdir(parents=True, exist_ok=True)
-    stack = InferenceStack.from_dir(a.stack) if a.stack else InferenceStack.stock()
+    stack = InferenceStack.load(a.stack) if a.stack else InferenceStack.stock()
     slo = SLO.parse(a.slo) if a.slo else SLO(bounds=MARKET_SLO)
     kw = {}
     if a.levels:
@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--root", required=need_root,
                        help="artifact directory; must exist unless --mkdir")
         p.add_argument("--mkdir", action="store_true")
-        p.add_argument("--stack", default="", help="directory mirroring sglang/")
+        p.add_argument("--stack", default="", help="a directory mirroring sglang/, a stack.json, or a run directory")
         p.add_argument("--model", default="Qwen/Qwen3.8-27B-FP8")
         p.add_argument("--gpu", default="H100")
         p.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)

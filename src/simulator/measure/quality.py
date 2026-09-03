@@ -72,9 +72,14 @@ LONGBENCH_MAX_TOKENS = 256
 GSM8K_PROMPT = (
     "Solve the problem. Think step by step, then give the final numeric answer "
     "on its own last line in the form '#### <number>'.\n\nProblem: {q}\n")
+# Same lesson as LongBench: the model reasons before it answers whatever
+# the prompt says, and a 4-token budget scored 0% ("We need answer single").
 MMLU_PROMPT = (
-    "Answer with a single letter: A, B, C or D. No explanation.\n\n"
-    "{q}\nA. {a}\nB. {b}\nC. {c}\nD. {d}\nAnswer:")
+    "Answer the multiple-choice question. Think briefly if you must, then give "
+    "the final answer on its own last line in the form '#### <letter>', where "
+    "the letter is A, B, C or D.\n\n"
+    "{q}\nA. {a}\nB. {b}\nC. {c}\nD. {d}\n")
+MMLU_MAX_TOKENS = 160
 
 _NUM = re.compile(r"-?\d[\d,]*\.?\d*")
 
@@ -161,7 +166,7 @@ def load(suite: str = "gsm8k", n: int = 100, seed: int = 0) -> list[Item]:
         out.append(Item(f"mmlu-{i}",
                         MMLU_PROMPT.format(q=r["question"], a=ch[0], b=ch[1],
                                            c=ch[2], d=ch[3]),
-                        "ABCD"[int(r["answer"])], max_tokens=4))
+                        "ABCD"[int(r["answer"])], max_tokens=MMLU_MAX_TOKENS))
     return out
 
 
@@ -225,7 +230,7 @@ def suite_digest(suite: str) -> str:
         body = [LONGBENCH_REV, list(LONGBENCH_SETS), LONGBENCH_MAX_CHARS,
                 LONGBENCH_QA_PROMPT, LONGBENCH_MAX_TOKENS]
     elif suite == "mmlu":
-        body = [MMLU_REV, MMLU_PROMPT, 4]
+        body = [MMLU_REV, MMLU_PROMPT, MMLU_MAX_TOKENS]
     else:
         body = [GSM8K_REV, GSM8K_PROMPT, 320]
     return hashlib.sha256(json.dumps(body).encode()).hexdigest()[:10]
@@ -256,7 +261,8 @@ def score(suite: str, output: str, gold: str) -> float:
         text = output.split("####")[-1] if "####" in output else _last_line(output)
         return qa_f1(text, gold.split("\x1f"))
     if suite == "mmlu":
-        m = re.search(r"\b([ABCD])\b", output.strip().upper())
+        text = output.split("####")[-1] if "####" in output else _last_line(output)
+        m = re.search(r"\b([ABCD])\b", text.strip().upper())
         return float(bool(m) and m.group(1) == gold.strip().upper())
     # GSM8K: prefer the '####' form, else the last number in the output. The
     # fallback matters because a degraded model often still reaches an answer

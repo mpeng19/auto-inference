@@ -103,6 +103,17 @@ class InferenceStack:
                    label=str(d))
 
     @classmethod
+    def load(cls, path: str | pathlib.Path) -> InferenceStack:
+        """A stack from wherever one is kept: a mirrored `sglang/` directory,
+        a `stack.json`, or a run directory holding one."""
+        p = pathlib.Path(path)
+        if p.is_file() and p.suffix == ".json":
+            return cls.from_dict(json.loads(p.read_text()))
+        if p.is_dir() and (p / "stack.json").is_file():
+            return cls.from_dict(json.loads((p / "stack.json").read_text()))
+        return cls.from_dir(p)
+
+    @classmethod
     def from_files(cls, mapping: dict[str, str | pathlib.Path],
                    label: str = "") -> InferenceStack:
         return cls(files={k: pathlib.Path(v).read_text() for k, v in mapping.items()},
