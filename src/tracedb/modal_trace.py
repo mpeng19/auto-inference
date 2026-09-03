@@ -1,6 +1,14 @@
 """Generate a REAL PyTorch kineto trace on a Modal GPU and save it locally.
 
-  uv run modal run tracedb/modal_trace.py        # writes fixtures/real_trace.json.gz -> .json
+  uv run modal run src/tracedb/modal_trace.py   # writes fixtures/real_trace.json
+
+For developing the queries against something the synthetic fixture cannot
+reproduce: real kernel names, real correlation ids, and a real launch-latency
+distribution. `tracedb.synth` is what the tests use -- this needs a GPU and
+costs money, so it is a tool, not a fixture.
+
+It runs on whichever cheap GPU Modal has free: the trace is about *shape*, and
+none of the queries care which card produced it.
 """
 import modal
 
@@ -45,8 +53,10 @@ def make_trace() -> bytes:
         loss = loss_fn(out.view(-1, 32000), y)
         loss.backward()
         opt.step()
-        if True:  # deliberate pathology: a blocking sync + D2H copy every step (the .item() bug)
-            _ = loss.item()
+        # Deliberate pathology: a blocking sync + D2H copy every step (the
+        # `.item()` bug). It is what makes this trace worth looking at --
+        # `tracedb idle` should blame the GPU gap on exactly this line.
+        _ = loss.item()
 
     for _ in range(3):
         step()

@@ -147,3 +147,44 @@ def test_longbench_slice_is_pinned_and_long(tmp_path, monkeypatch):
     assert len(items[0].prompt) <= quality.LONGBENCH_MAX_CHARS + 600
     assert "Question:" in items[0].prompt and items[0].answer.startswith("a")
     assert quality.LONGBENCH_REV and len(quality.LONGBENCH_REV) == 40
+
+
+def test_canary_localises_where_two_runs_part():
+    """`first_divergence` is the point: one token nudged late in a long
+    generation and a response derailed from the start are different bugs."""
+    from simulator.measure import canary
+
+    got = canary.compare({"a": "the answer is 408", "b": "hello"},
+                         {"a": "the answer is 407", "b": "hello"})
+    assert got["n"] == 2 and got["n_identical"] == 1
+    assert got["exact_match_rate"] == 0.5
+    assert got["per_canary"]["b"]["status"] == "identical"
+    d = got["per_canary"]["a"]
+    assert d["status"] == "diverged" and d["first_divergence"] == 16
+    assert d["frac_identical"] > 0.9
+
+
+def test_canary_reports_a_missing_result_rather_than_scoring_it():
+    from simulator.measure import canary
+
+    got = canary.compare({"a": "x"}, {})
+    assert got["per_canary"]["a"]["status"] == "missing"
+    assert got["n_identical"] == 0
+
+
+def test_canary_verdict_refuses_to_judge_without_a_measured_floor():
+    """Greedy decoding is not bitwise deterministic across batch compositions,
+    so divergence with no baseline is not evidence of anything."""
+    from simulator.measure import canary
+
+    assert "no baseline" in canary.verdict({"exact_match_rate": 0.5}, None)
+
+
+def test_canary_verdict_is_judged_against_the_same_config_floor():
+    from simulator.measure import canary
+
+    floor = {"exact_match_rate": 0.6}
+    assert canary.verdict({"exact_match_rate": 0.8}, floor).startswith("OK")
+    assert canary.verdict({"exact_match_rate": 0.6}, floor).startswith("OK")
+    assert canary.verdict({"exact_match_rate": 0.5}, floor).startswith("MARGINAL")
+    assert canary.verdict({"exact_match_rate": 0.1}, floor).startswith("SUSPECT")

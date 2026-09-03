@@ -33,6 +33,8 @@ import modal
 # Everything a fresh clone needs to override. Nothing here is account-specific:
 # the volumes are created on first use in whatever workspace you are logged
 # into, and the HF secret is optional.
+# Kept in step with `api.APP_NAME`, which reads the same variable to look these
+# functions up again from the client side.
 APP_NAME = os.environ.get("SIMULATOR_APP_NAME", "auto-inference")
 HF_CACHE_VOLUME = os.environ.get("SIMULATOR_HF_VOLUME", "auto-inference-hf-cache")
 RESULTS_VOLUME = os.environ.get("SIMULATOR_RESULTS_VOLUME", "auto-inference-results")
@@ -175,6 +177,10 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
         _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         resource.setrlimit(resource.RLIMIT_NOFILE, (min(65536, hard), hard))
     except Exception:
+        # Raising the descriptor limit is an optimisation for the top of the
+        # level grid, not a requirement: swallowed so a container whose policy
+        # forbids it still runs the sweep, and hits the ceiling as a client
+        # error the run record shows rather than as a launch failure.
         pass
 
     sc, sl = ServingConfig(**serving), SLO.from_dict(slo)
@@ -379,7 +385,6 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
 
 
 def _save(rec: dict, sc) -> dict:
-    import os
     rec["finished_at"] = time.time()
     stamp = f"{int(time.time())}-sweep-{sc.digest()}"
     os.makedirs("/results/runs", exist_ok=True)
@@ -400,7 +405,6 @@ def fetch_profile(rel_dir: str) -> dict:
     teaching every caller how to mount a Modal volume.
     """
     import base64
-    import os
 
     d = rel_dir if rel_dir.startswith("/results") else f"/results/profiles/{rel_dir}"
     out = []
@@ -416,13 +420,19 @@ def fetch_profile(rel_dir: str) -> dict:
 
 @app.function(image=image, volumes={"/results": results_vol}, timeout=600)
 def fetch(name: str) -> dict:
-    """Read a stored sweep back. Used by `Simulator.collect`."""
-    return json.load(open(f"/results/runs/{name}"))
+    """Read one stored sweep back by filename, for a run whose call id is lost.
+
+    `Simulator.collect` does not use this -- it holds the Modal call and gets
+    the record from `FunctionCall.get`. This is the escape hatch for the case
+    that leaves nothing to collect: `ls` names the file, this returns it, and
+    `simulate rescore` prices it without a GPU.
+    """
+    with open(f"/results/runs/{name}") as f:
+        return json.load(f)
 
 
 @app.function(image=image, volumes={"/results": results_vol}, timeout=600)
 def ls(limit: int = 40) -> list[str]:
-    import os
     d = "/results/runs"
     if not os.path.isdir(d):
         return []
@@ -465,7 +475,6 @@ def workbench(stack: dict, script: str, timeout_s: int = 600,
     Returns a dict rather than raising, including when the stack is refused or
     the script times out. A caller in a search loop needs the reason as data.
     """
-    import os
     import shutil
 
     from simulator.stack import InferenceStack, sglang_root
@@ -593,9 +602,12 @@ def _write_helpers(scratch: pathlib.Path, files: dict[str, str]) -> list[str]:
 
 
 def _inside(root: str, path: str) -> bool:
-    """Is `path` under `root` once both are resolved? Both sides resolved (v2),
-    because a volume mount is a symlink: comparing the resolved file against
-    the literal "/results" rejected every real file on the first run."""
+    """Is `path` under `root` once **both** are resolved?
+
+    Both sides, because a volume mount is a symlink: comparing the resolved
+    file against the literal "/results" rejected every real file on the first
+    run.
+    """
     r = os.path.realpath(root)
     return os.path.commonpath([r, os.path.realpath(path)]) == r
 
@@ -610,8 +622,6 @@ def read_results(paths: list[str]) -> dict:
     how they come back -- including the equivalence reference, which is
     computed once and then read by every candidate after it.
     """
-    import os
-
     results_vol.reload()          # another container wrote these, not this one
     out: dict = {}
     for p in paths:

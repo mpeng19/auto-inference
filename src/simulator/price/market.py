@@ -8,7 +8,7 @@ OpenRouter publishes alongside each provider's realised hit rate. Ranking
 uses the realised figures at each provider's OWN hit rate: re-blending
 everyone to a common rate would erase the thing being optimised, since
 Novita realises 87.4% and Cloudflare 0.0% on the same model and the same
-traffic (`docs/methodology.md` SS5e).
+traffic (`docs/methodology.md` §5e).
 
 The share economics are the other half. A price quoted without the demand
 it assumes is meaningless: below saturation, utilisation is set by demand
@@ -39,11 +39,12 @@ MARKET_QWEN38_27B = [
 #
 #   1. The effective-price formula. eff = h*cache_read + (1-h)*listed reproduces
 #      their published effective price to within 0.1% on 9 of 11 providers.
-#   2. Achievable cache hit rate. Not 95% -- the range is 0% to 82%, and it is
-#      plainly a *serving-system* property: Novita realises 81.8% and Chutes
-#      69.5% while Venice and Cloudflare realise 0.0% on the same model and the
-#      same marketplace traffic. Failing to implement prompt caching costs them
-#      3x on effective input price.
+#   2. Achievable cache hit rate. Not the 95% we assumed -- across the two
+#      snapshots below it runs 0% to 87.4%, and it is plainly a
+#      *serving-system* property: Novita realises 87.4% and Chutes 65.4% while
+#      Venice and Cloudflare realise 0.0% on the same model and the same
+#      marketplace traffic. Failing to implement prompt caching costs them 3x
+#      on effective input price.
 #
 # Dated snapshots of what providers *realise*, which OpenRouter publishes but
 # does not expose through the public API (`/api/v1/models/.../endpoints` gives
@@ -125,7 +126,7 @@ def rank_vs_market(eff: float, market: list[tuple[str, float, float, float | Non
     }
 
 
-def burst_utilisation(daily_volumes: list[float], sigma: float = 2.0) -> dict:
+def burst_utilisation(daily_volumes: list[float]) -> dict:
     """Utilisation a single-model deployment achieves, sized for peak.
 
     A provider serving one model must provision for its peak or shed traffic
@@ -158,8 +159,7 @@ def burst_utilisation(daily_volumes: list[float], sigma: float = 2.0) -> dict:
     cv = st.pstdev(daily_volumes) / mean
     return {"available": True, "mean": mean, "peak": peak,
             "peak_over_mean": round(peak / mean, 2), "cv": round(cv, 3),
-            "single_model_utilisation": round(mean / peak, 3),
-            "sigma": sigma}
+            "single_model_utilisation": round(mean / peak, 3)}
 
 
 def fleet_utilisation(cv_single: float, n_models: int, sigma: float = 2.0) -> float:
@@ -286,7 +286,7 @@ class Market:
 
 @dataclass(frozen=True)
 class Economics:
-    """The SS6d formula. Price and capacity derive from one measured quantity.
+    """Price and capacity, both derived from one measured quantity.
 
     `gpu_s_per_request` is GPU-seconds of *forward time* for one market-sized
     request, summed across the node. Everything else follows, and the identity

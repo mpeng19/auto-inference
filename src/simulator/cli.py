@@ -27,7 +27,7 @@ import json
 import pathlib
 import sys
 
-from .api import Simulator
+from .api import APP_NAME, Simulator
 from .measure import equivalence
 from .slo import MARKET_SLO, SLO
 from .stack import InferenceStack
@@ -71,7 +71,7 @@ def cmd_profile(a) -> int:
 
     import modal
 
-    fn = modal.Function.from_name("auto-inference", "fetch_profile")
+    fn = modal.Function.from_name(APP_NAME, "fetch_profile")
     got = fn.remote(a.dir)
     if not got["files"]:
         print(f"no trace files under {got['dir']}", file=sys.stderr)
@@ -189,7 +189,6 @@ def main(argv: list[str] | None = None) -> int:
     pr = sub.add_parser("profile", help="download and ingest a captured GPU profile")
     pr.add_argument("--dir", required=True, help="profile dir from the sweep record")
     pr.add_argument("--out", default="profiles", help="local destination")
-    pr.set_defaults(fn=cmd_profile)
 
     sub.add_parser("ls", help="list stored sweeps")
 
@@ -197,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "ls":
         import modal
-        for n in modal.Function.from_name("auto-inference", "ls").remote(40):
+        for n in modal.Function.from_name(APP_NAME, "ls").remote(40):
             print(n)
         return 0
 
@@ -215,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "submit":
         cid = sim.submit()
         print(f"submitted  {cid}")
-        print(f"collect:   simulate collect --root {sim.root} ")
+        print(f"collect:   simulate collect --root {sim.root}")
         return 0
     if a.cmd == "run":
         return _report(sim, asyncio.run(sim.eval()))

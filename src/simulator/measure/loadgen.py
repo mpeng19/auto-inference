@@ -18,9 +18,10 @@ Where that leaves us:
   * 1xH100 today runs near 146 concurrent — 10x headroom.
   * 8xH100 at ~90 rps with ~10s end-to-end is ~900 — still inside the limit.
 
-So **single-process is the default and multiprocessing is not needed yet.**
-That is a deliberate choice, not an oversight: sharding brings real hazards
-(see `run_trace_mp`) and buys nothing below the wall.
+So **single-process is the default and there is no multiprocessing path.**
+That is a deliberate choice, not an oversight: sharding load across worker
+processes buys nothing below the wall and costs a second clock to reconcile,
+so the sharded generator was removed rather than carried unused.
 
 What is worth doing now:
 
@@ -35,9 +36,6 @@ What is worth doing now:
 3. **`client_health()` on every run.** The real protection is not a bigger
    client, it is knowing when the client is the bottleneck. A run whose
    dispatch lag or ITL is suspect must be discarded, not interpreted.
-
-`run_trace_mp` exists for when we do cross the wall, with its constraints
-documented on the function.
 """
 from __future__ import annotations
 
@@ -46,9 +44,6 @@ import json
 import time
 
 from .metrics import RequestResult
-
-# Distortion sets in between 1600 and 2400; keep a healthy margin.
-SAFE_CONCURRENCY_PER_WORKER = 1200
 
 # Client-health thresholds. Above these a run is not evidence.
 LAG_P99_WARN_MS = 25.0
@@ -69,19 +64,7 @@ def install_fast_loop() -> str:
         return "asyncio"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-def client_health(results, plan_info: dict | None = None) -> dict:
+def client_health(results) -> dict:
     """Was the *client* healthy enough for these numbers to mean anything?
 
     Every server metric in a run is conditional on the load generator having
@@ -111,7 +94,7 @@ def client_health(results, plan_info: dict | None = None) -> dict:
     else:
         verdict = "OK"
 
-    out = {
+    return {
         "verdict": verdict,
         "lag_p50_ms": round(q(0.5), 2),
         "lag_p99_ms": round(p99, 2),
@@ -120,17 +103,6 @@ def client_health(results, plan_info: dict | None = None) -> dict:
         "lag_late_mean_ms": round(late, 2),
         "drifting": drifting,
     }
-    if plan_info:
-        out["plan"] = plan_info
-    return out
-
-
-# ── multi-turn ───────────────────────────────────────────────────
-
-
-
-
-
 
 
 # ── closed-loop concurrency (the SLO frontier) ───────────────────
@@ -246,6 +218,12 @@ async def _turn(history: list[dict], k, turn, uid, base_url, model, start_wall,
                         if first is None:
                             first = time.time() - start_wall
                         n += 1
+                        # A chunk we cannot parse costs one token of the reply
+                        # text and nothing else: the token *count* comes from
+                        # the byte scan above and the authoritative counts come
+                        # from the server's usage frame, so raising here would
+                        # discard a whole request's latency sample over a
+                        # cosmetic loss.
                         try:
                             ch = json.loads(raw[5:].strip())
                             piece = (ch["choices"][0].get("delta") or {}).get("content")
@@ -257,6 +235,9 @@ async def _turn(history: list[dict], k, turn, uid, base_url, model, start_wall,
                     if _DONE in raw:
                         break
                     if _USAGE in raw:
+                        # Same trade: a malformed usage frame falls back to the
+                        # client's own token count (`out_tokens` below) rather
+                        # than failing the request.
                         try:
                             ch = json.loads(raw[5:].strip())
                             u = ch.get("usage") or {}

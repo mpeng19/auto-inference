@@ -11,12 +11,12 @@ stops you. Plotting the metric against concurrency instead -- which an earlier
 version did -- hides the thing you actually want, because concurrency is a knob
 and throughput is the payoff.
 
-**Fitted as a power law, not joined by segments.** Concurrency is swept
-multiplicatively (1, 2, 4, 8, 16, 32) and the relationships here saturate;
-straight lines between measured points assert a linearity the data does not
-have. The exponent is reported with the fit, because it *is* the finding --
-`b < 1` on throughput-versus-latency is the shape of a system running out of
-headroom.
+**Fitted as a power law, not joined by segments.** Concurrency is swept over a
+wide multiplicative range (4, 8, 12, 16, 24 by default) and the relationships
+here saturate; straight lines between measured points assert a linearity the
+data does not have. The exponent is reported with the fit, because it *is* the
+finding -- `b < 1` on throughput-versus-latency is the shape of a system
+running out of headroom.
 
 Each figure stands alone at full size rather than sharing a canvas: three
 panels crammed into one image are three plots nobody can read.
@@ -57,8 +57,8 @@ def powerlaw(xs, ys):
     """
     import numpy as np
 
-    x = np.asarray([v for v in xs], dtype=float)
-    y = np.asarray([v for v in ys], dtype=float)
+    x = np.asarray(xs, dtype=float)
+    y = np.asarray(ys, dtype=float)
     ok = (x > 0) & (y > 0)
     x, y = x[ok], y[ok]
     if len(x) < 3 or len(set(x.tolist())) < 3:

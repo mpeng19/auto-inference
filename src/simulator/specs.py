@@ -266,11 +266,3 @@ L4 = HardwareSpec("L4", 1, 121e12, 300e9, 24e9)
 MODELS = {m.name: m for m in (QWEN3_4B, QWEN3_8B, QWEN3_30B_A3B,
                               QWEN3_8_27B, QWEN3_235B_A22B)}
 HARDWARE = {"H100": H100, "L40S": L40S, "A10G": A10G, "L4": L4}
-
-# Modal per-hour rates, for cost-per-token comparisons.
-GPU_HOURLY = {"H100": 3.95, "H200": 4.54, "B200": 6.25, "L40S": 1.95,
-              "A10G": 1.10, "L4": 0.80}
-
-
-
-

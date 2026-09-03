@@ -1,6 +1,6 @@
 """Pull OpenRouter's real traffic and latency data for a model.
 
-    uv run python scripts/market_pull.py qwen/qwen3.8-27b
+    uv run python -m simulator.price.market_pull qwen/qwen3.8-27b
 
 The public API (`/api/v1/models/<slug>/endpoints`) gives listed prices and
 uptime only. Everything that matters -- per-provider latency percentiles and

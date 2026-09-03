@@ -44,3 +44,35 @@ def test_every_row_is_dated_and_explained():
 def test_describe_never_quotes_a_bare_number():
     assert "agreed default" in describe("H100", None, 3.00)
     assert "nebius-committed" in describe("H100", "nebius-committed", 2.50)
+
+
+def test_a_container_costs_more_than_its_gpu():
+    """Charging the GPU rate alone understated a night of sweeps by a third:
+    the sweep container reserves 16 vCPUs, which at retail is more than half a
+    GPU again."""
+    from simulator.costs import MODAL_USD_PER_VCPU_HOUR, container_rate, rate
+
+    gpu = rate("H100", "modal", allow_retail=True)
+    got = container_rate("H100", 1, vcpu=16.0)
+    assert got == pytest.approx(gpu + 16.0 * MODAL_USD_PER_VCPU_HOUR)
+    assert got > gpu * 1.5
+
+
+def test_container_rate_scales_with_gpu_count_and_memory():
+    from simulator.costs import MODAL_USD_PER_GIB_HOUR, container_rate
+
+    a = container_rate("H100", 1)
+    b = container_rate("H100", 4)
+    assert b == pytest.approx(4 * a)
+    assert container_rate("H100", 1, memory_gib=32.0) == pytest.approx(
+        a + 32.0 * MODAL_USD_PER_GIB_HOUR)
+
+
+def test_an_unpriced_gpu_still_bills_rather_than_stopping_the_fleet():
+    """`rate()` refuses to guess; `container_rate` deliberately does not, because
+    it only ever bills our own experiments and a budget check that raised over a
+    missing catalog row would stop a run for no good reason."""
+    from simulator.costs import container_rate, rate
+
+    assert container_rate("GB200", 1) == pytest.approx(
+        rate("H100", "modal", allow_retail=True))

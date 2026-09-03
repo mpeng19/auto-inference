@@ -82,7 +82,7 @@ Every turn the reference loop writes also carries, in `data`:
 
 | key | type | notes |
 |---|---|---|
-| `phase` | enum | the phase this turn closes: `start`, `recall`, `propose`, `check`, `submit`, `study`, `wait`, `done` |
+| `phase` | enum | the phase this turn closes: `start`, `recall`, `propose`, `check`, `paper`, `submit`, `wait`, `study` |
 | `elapsed_s` | float | wall seconds that phase took |
 
 A turn that closes a model call (`thought name=propose`, `thought name=study`)

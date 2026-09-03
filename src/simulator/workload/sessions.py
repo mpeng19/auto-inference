@@ -1,23 +1,20 @@
-"""Request trace generation and the eval suite.
+"""What the load generator replays: a conversation, turn by turn.
 
-Three properties matter more than realism:
+Two plain records and nothing else. They are deliberately dumb containers --
+every number in them comes from `workload.tracelab`, which rescales real
+coding-agent sessions to the marketplace's token shape, and the whole point of
+keeping this module empty of generation logic is that a `Session` says nothing
+about *where* its shape came from.
 
-1. **Open-loop.** Arrival times are drawn *before* the run and the client fires
-   at those times whether or not earlier requests finished. A closed-loop
-   generator silently converts overload into slowdown, which flatters a bad
-   scheduler and hides queueing.
-
-2. **Deterministic.** Same config + seed gives a byte-identical trace, and
-   `Trace.digest` goes into the run record. Comparing two configs against two
-   different traces is the easiest way to fool yourself.
-
-3. **Variance, not just mean.** Arrival *shape* stresses a serving system as
-   much as arrival rate. `bursty` and `sustained` carry the same mean rate on
-   purpose, so any difference between them is attributable to burstiness alone.
+The one thing worth knowing is that a session is **closed-loop**: the runner
+sends turn `k+1` only after the reply to turn `k` has arrived, then waits
+`think_s[k]`. That is what makes the concurrency axis mean "users", and it is
+why a session carries think times rather than arrival times. The open-loop
+arrival generators this module used to hold were removed with the synthetic
+workloads they served.
 """
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 
@@ -41,66 +38,3 @@ class Session:
     @property
     def n_turns(self) -> int:
         return len(self.turns)
-
-
-
-
-
-
-# A token is ~4 characters of English. Filler text is generated to a target
-# token count rather than tokenized for real, so trace building needs no GPU
-# and no tokenizer. True token counts come back from the server.
-_CHARS_PER_TOKEN = 4
-_WORDS = ["system", "latency", "throughput", "scheduler", "batch", "cache", "prefix", "decode", "prefill", "tensor", "expert", "routing", "kernel", "memory", "request", "token", "attention", "parallel"]
-
-
-def _filler(n_tokens: int, rng: random.Random) -> str:
-    target = max(1, n_tokens * _CHARS_PER_TOKEN)
-    out, size = [], 0
-    while size < target:
-        w = rng.choice(_WORDS)
-        out.append(w)
-        size += len(w) + 1
-    return " ".join(out)
-
-
-def _lognormal_int(rng: random.Random, mu: float, sigma: float, cap: int) -> int:
-    return max(1, min(cap, int(rng.lognormvariate(mu, sigma))))
-
-
-# ── arrival processes ────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-# ── the eval suite ───────────────────────────────────────────────
-# Each entry stresses a different part of the serving stack. Run the whole
-# suite against a config; a change that helps one pattern and wrecks another is
-# a trade-off to see explicitly, not to average away.
-
-
-
-# The hardware the suite rates were derived from. Rates are meaningless on
-# anything else, and getting this wrong is the single most expensive mistake
-# available: the first calibration was 10x low and measured an idle server.
-
-
-
-
-
-
-
-
-
-
-
-
-# ── multi-turn ───────────────────────────────────────────────────
-
-
-

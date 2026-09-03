@@ -14,42 +14,31 @@ import json
 from dataclasses import asdict, dataclass
 
 
-# Flag names verified against sglang 0.5.18 by `probe.py::probe_env` on
-# 2026-08-29: all 12 present. Re-run that probe after any SGLang upgrade —
-# SGLang renames flags between minor versions, and a silently-ignored flag
-# produces a run that looks successful while measuring the wrong config.
+# Flag names verified against `sglang 0.5.18 --help` on 2026-08-29 by a probe
+# script run through `simulate workbench`: all 12 present. Re-run that probe
+# after any SGLang upgrade — SGLang renames flags between minor versions, and a
+# silently-ignored flag produces a run that looks successful while measuring the
+# wrong config.
 @dataclass(frozen=True)
 class ServingConfig:
     # ── fixed within a study (recorded, not searched) ────────────
     #
-    # Default is the small dense model on a cheap GPU: $1.10/hr against $3.95,
-    # so harness iteration costs a third as much. Be clear about what that
-    # trades away -- Qwen3-4B on an A10G is **prefill-bound** at our request
-    # shapes, while Qwen3-30B-A3B on an H100 is **decode-bound**. Opposite sides
-    # of the roofline. Use the small setup to develop and debug the harness; use
-    # the 30B (or the 235B on 8xH100) whenever a serving-policy result is meant
-    # to transfer.
+    # The standard experiment environment, agreed 2026-09-01: the target model
+    # on ONE H100. Every serving-physics result is measured here, so the
+    # default is the thing being priced rather than a cheap stand-in -- a
+    # smaller model on a smaller card sits on the other side of the roofline
+    # and its scheduling results do not transfer.
     #
-    # Two constraints picked the GPU, and both rule out the cheapest option:
+    # Two constraints picked the GPU, and both rule out the cheaper options:
     #
-    #   * **FP8 needs SM89+.** A10G is SM86 (Ampere) with no native FP8, so an
-    #     FP8 checkpoint cannot run there at all. L4/L40S (Ada) and H100
-    #     (Hopper) can.
-    #   * **KV cache dominates at long context.** Qwen3-4B costs 144 KiB/token
-    #     of KV, so at a 40k-token agentic context an L4 holds only 3 concurrent
-    #     sequences -- too few to study batching. L40S holds 7, H100 13.
-    #
-    #   Qwen/Qwen3-4B-Instruct-2507-FP8    L40S   $1.95/hr   262k ctx
-    #   Qwen/Qwen3-8B-FP8                  L40S   $1.95/hr    41k ctx
-    #   Qwen/Qwen3-30B-A3B-Instruct-2507-FP8  H100  $3.95/hr  MoE, decode-bound
-    #   Qwen/Qwen3-235B-A22B-Instruct-2507-FP8  8xH100  $31.60/hr
-    # Standard experiment environment, agreed 2026-09-01: ONE H100 at an
-    # assumed $3.00/GPU-hr. Chosen over the cheaper A100 80GB because Ampere
-    # (SM80) has no FP8 tensor cores and this checkpoint is block-quantised
-    # FP8 -- it would dequantise to bf16, measuring a different machine.
-    # Chosen over L40S because decode is bandwidth-bound: L40S is half the
-    # hourly price and ~1.9x the cost per token, and holds only ~12
-    # conversations of KV against the H100's ~30.
+    #   * **FP8 needs SM89+.** A100 80GB and A10G are Ampere (SM80/SM86) with
+    #     no FP8 tensor cores, so this block-quantised FP8 checkpoint would
+    #     dequantise to bf16 there -- measuring a different machine. L40S (Ada)
+    #     and H100 (Hopper) can serve it as shipped.
+    #   * **KV cache dominates at long context.** Decode is bandwidth-bound, so
+    #     the L40S is half the hourly price and ~1.9x the cost per token, and
+    #     holds only ~12 conversations of KV against the H100's ~30 at the
+    #     marketplace's context.
     model: str = "Qwen/Qwen3.8-27B-FP8"
     gpu: str = "H100"
     n_gpu: int = 1
@@ -66,9 +55,9 @@ class ServingConfig:
     # ── batching / scheduling (the interesting knobs) ────────────
     max_running_requests: int = 256
     chunked_prefill_size: int = 8192
-    # Verified against sglang 0.5.18 --help by probe_env. Seven policies,
-    # not the four originally assumed: lof, priority and routing-key are
-    # extra search-space dimensions we would otherwise have missed.
+    # Verified against `sglang 0.5.18 --help` by the same probe: seven
+    # policies, not the four originally assumed. lof, priority and routing-key
+    # are extra search-space dimensions we would otherwise have missed.
     schedule_policy: str = "fcfs"
     # {lpm, random, fcfs, dfs-weight, lof, priority, routing-key}
     schedule_conservativeness: float = 1.0
@@ -133,9 +122,10 @@ class ServingConfig:
             "--schedule-conservativeness", str(self.schedule_conservativeness),
         ]
         # 0 means "not requested". Emitting `--ep-size 0` is not the same as
-        # omitting the flag -- SGLang rejects it -- and launch.py passes 0 as
-        # its default. Expert parallelism is meaningless on a dense model
-        # anyway (Qwen3.8-27B has `has_moe: false`).
+        # omitting the flag -- SGLang rejects it -- and a candidate's
+        # `serving.json` may carry 0 as its default, which `with_overrides`
+        # normalises to None. Expert parallelism is meaningless on a dense
+        # model anyway (Qwen3.8-27B has `has_moe: false`).
         if self.ep_size:
             a += ["--ep-size", str(self.ep_size)]
         if self.max_total_tokens is not None:
@@ -205,10 +195,6 @@ class ServingConfig:
 
     def digest(self) -> str:
         return _digest(asdict(self))
-
-
-
-
 
 
 def _digest(obj) -> str:

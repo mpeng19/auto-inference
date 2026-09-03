@@ -84,7 +84,12 @@ def container_rate(gpu: str, n_gpu: int = 1, vcpu: float = 0.0,
     try:
         gpu_rate = rate(gpu, provider, allow_retail=True)
     except KeyError:
-        gpu_rate = 3.95
+        # Swallowed deliberately, and it is worth saying why. This only ever
+        # bills our own experiments, so a budget check that raised because
+        # Modal added a GPU the catalog has no row for would stop a fleet over
+        # a missing table entry. Falls back to the H100 retail rate, which is
+        # the GPU everything here actually runs on.
+        gpu_rate = BY_KEY["modal:H100"].usd_per_hour
     return (gpu_rate * max(1, n_gpu) + vcpu * MODAL_USD_PER_VCPU_HOUR
             + memory_gib * MODAL_USD_PER_GIB_HOUR)
 

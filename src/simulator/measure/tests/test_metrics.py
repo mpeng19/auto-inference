@@ -81,3 +81,90 @@ def test_a_level_ends_at_the_deadline_not_at_the_last_reply():
     cancelled, first, second_cancelled = asyncio.run(go())
     assert cancelled == 2 and first == "done" and second_cancelled
     assert asyncio.run(run_until([], 1.0)) == 0
+
+
+def test_littles_law_recovers_a_think_time_it_was_not_told():
+    """L = lambda*W ties concurrency, throughput and residence time by an
+    identity, so it costs nothing and catches what nothing else here does."""
+    from simulator.measure.metrics import littles_law
+
+    # 10 users, 2 rps, 4 in the server: 2 s in the server, 5 s per cycle.
+    got = littles_law(n_users=10, throughput_rps=2.0, batch=4.0)
+    assert got["available"]
+    assert got["time_in_server_s"] == 2.0
+    assert got["cycle_s"] == 5.0
+    assert got["implied_think_s"] == 3.0
+
+
+def test_littles_law_says_so_when_nothing_finished():
+    from simulator.measure.metrics import littles_law
+
+    assert littles_law(8, 0.0, 3.0) == {"available": False, "reason": "no throughput"}
+
+
+def test_think_time_drifting_across_a_sweep_is_a_client_bug_not_a_finding():
+    """Think time is a property of the workload. If it climbs with load the
+    generator is not holding `n_users` in flight -- the failure that once moved
+    N* from 128 to 32."""
+    from simulator.measure.metrics import littles_law_drift
+
+    flat = [{"n_users": n, "throughput_rps": n / 5.0, "batch": 2.0 * n / 5.0}
+            for n in (10, 20, 40)]
+    assert littles_law_drift(flat)["consistent"]
+
+    # Same levels, but throughput stops scaling: the client fell behind.
+    starved = [{"n_users": 10, "throughput_rps": 2.0, "batch": 4.0},
+               {"n_users": 40, "throughput_rps": 2.2, "batch": 4.4}]
+    got = littles_law_drift(starved)
+    assert got["available"] and not got["consistent"]
+    assert got["drift"] > 1.5
+
+
+def test_drift_needs_more_than_one_usable_level():
+    from simulator.measure.metrics import littles_law_drift
+
+    assert littles_law_drift([]) == {"available": False}
+
+
+def test_client_minus_server_ttft_is_the_client_overhead():
+    """The module's whole claim: the *difference* between the two TTFTs is
+    client-plus-network, so a run can prove its own client was clean."""
+    from simulator.measure.server import compare_client_server
+
+    got = compare_client_server(
+        {"p50": 120.0}, {"sglang:time_to_first_token_seconds": {"p50": 0.100}})
+    assert got["available"]
+    assert got["server_p50_ms"] == 100.0 and got["client_p50_ms"] == 120.0
+    assert got["overhead_ms"] == 20.0 and got["overhead_pct"] == 16.7
+
+
+def test_no_verdict_when_either_side_is_missing():
+    """Silence, not a fabricated zero: the check exists to catch a polluted
+    measurement, and inventing one would defeat it."""
+    from simulator.measure.server import compare_client_server
+
+    assert compare_client_server({"p50": 120.0}, {}) == {"available": False}
+    assert compare_client_server(
+        {}, {"sglang:time_to_first_token_seconds": {"p50": 0.1}}) == {"available": False}
+
+
+def test_powerlaw_reports_the_exponent_it_fitted():
+    """`b` is the finding, not decoration: below 1 on throughput-versus-latency
+    is the shape of a system running out of headroom."""
+    from simulator.artifacts.plots import powerlaw
+
+    xs = [1.0, 2.0, 4.0, 8.0]
+    a, b, r2 = powerlaw(xs, [3.0 * x ** 0.5 for x in xs])
+    assert abs(a - 3.0) < 1e-9 and abs(b - 0.5) < 1e-9
+    assert abs(r2 - 1.0) < 1e-9
+
+
+def test_powerlaw_refuses_data_that_cannot_support_a_fit():
+    """None, not a line through two points: a fitted exponent that is really an
+    interpolation would be read as a measurement."""
+    from simulator.artifacts.plots import powerlaw
+
+    assert powerlaw([1.0, 2.0], [1.0, 2.0]) is None          # too few points
+    assert powerlaw([2.0, 2.0, 2.0], [1.0, 2.0, 3.0]) is None  # no x spread
+    # Non-positive values cannot be logged, and dropping them can leave too few.
+    assert powerlaw([1.0, 2.0, 4.0, 8.0], [1.0, 0.0, -1.0, 2.0]) is None

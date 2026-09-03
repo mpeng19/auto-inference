@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pathlib
 import time
 from dataclasses import dataclass, field, replace
@@ -40,7 +41,12 @@ from .slo import MARKET_SLO, SLO
 from .stack import InferenceStack
 from .workload.tracelab import MARKET_IN_PER_REQ, MARKET_OUT_PER_REQ
 
-APP_NAME = "auto-inference"
+# The deployed Modal app to look functions up in. Read from the environment
+# because `runner.modal_runner` reads the *same* variable when it names the app
+# at deploy time: a fresh account that deploys under another name would
+# otherwise deploy fine and then have every client lookup here ask for
+# "auto-inference" and fail. One variable, both sides.
+APP_NAME = os.environ.get("SIMULATOR_APP_NAME", "auto-inference")
 
 # How much longer than the script's own timeout the Modal call is allowed to
 # take: pulling the image, starting the container, applying the stack. The
@@ -222,6 +228,7 @@ def interpolate_frontier(pts: list) -> dict | None:
             "gpu_s_per_request": round(gsr, 3), "binding": label,
             "between": [lo.n_users, hi.n_users]}
 
+
 @dataclass
 class Simulator:
     """An inference stack, an environment, and the price it can serve at."""
@@ -253,7 +260,7 @@ class Simulator:
     canaries: bool = True
     # Capture a GPU profile at this concurrency level (0 = none). Profiling
     # perturbs what it measures, so it runs at one level and the price is still
-    # taken from N*. `docs/methodology.md` 8.3 is the question it answers:
+    # taken from N*. `docs/methodology.md` §8.3 is the question it answers:
     # the device timer says the KV read is at ~28% of bandwidth but not which
     # kernel spends it.
     profile_level: int = 0

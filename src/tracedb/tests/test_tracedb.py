@@ -123,3 +123,107 @@ def test_jsonl_events_ingest_too(tmp_path):
     assert got["events"] == 2
     st = TraceStore(tmp_path / "t.sqlite")
     assert {r["name"] for r in Q.ops(st, "*")} == {"k1", "k2"}
+
+
+def test_step_diff_blames_the_slow_step_on_the_planted_stall(store):
+    """The MCP tool an agent reaches for after `steps` names an outlier: it has
+    to say *which op* was slow, not just that the step was."""
+    got = Q.step_diff(store, 4)          # every 5th step carries the 3 ms stall
+    assert got["step_dur_us"] > 1.5 * got["median_step_dur_us"]
+    worst = got["top_regressions"][0]
+    assert worst["op"] == "dataloader_next"
+    assert worst["delta_us"] > 2000      # the planted 3 ms, minus jitter
+    # And a step without the stall is unremarkable against the median.
+    assert Q.step_diff(store, 3)["top_regressions"][0]["delta_us"] < 500
+
+
+def test_step_diff_refuses_a_step_that_is_not_there(store):
+    assert Q.step_diff(store, 999) == {"error": "no step 999"}
+
+
+def test_gpu_idle_blames_the_gap_on_what_the_cpu_was_doing(store):
+    """'Why is the GPU idle here' is the question; the answer has to name a CPU
+    op, or it is just a list of holes."""
+    got = Q.gpu_idle(store, min_gap_us=200)
+    assert got["gaps"] > 0 and got["idle_total_us"] > 0
+    assert got["blame_by_op"][0]["op"] == "dataloader_next"
+    biggest = got["largest"][0]
+    assert biggest["gap_us"] > 1000
+    assert biggest["cpu_during_gap"][0]["op"] == "dataloader_next"
+    # Sorted largest first, and the profiler's own markers never take the blame.
+    gaps = [r["gap_us"] for r in got["largest"]]
+    assert gaps == sorted(gaps, reverse=True)
+    assert not any(r["op"].startswith("ProfilerStep")
+                   for r in got["blame_by_op"])
+
+
+def test_a_threshold_above_every_gap_finds_none(store):
+    assert Q.gpu_idle(store, min_gap_us=10_000_000)["gaps"] == 0
+
+
+def test_launches_says_so_when_the_trace_carries_no_correlation_ids(store):
+    """The synthetic trace has none. Reporting zero pairs beats reporting a
+    launch latency computed from nothing."""
+    got = Q.launches(store)
+    assert got["pairs"] == 0 and "correlation" in got["note"]
+
+
+def test_launches_pairs_a_runtime_span_with_its_kernel(tmp_path):
+    """CPU->GPU delay is recovered through kineto's correlation id, across
+    tracks: the launch is on a CPU thread and the kernel on a stream.
+
+    The `cpu_op` span is not decoration -- it is what marks the launching
+    thread as a CPU track, and `launches` only pairs a non-GPU track with a GPU
+    one. A real torch trace opens its CPU thread the same way.
+    """
+    import json
+
+    rows = [{"ph": "X", "pid": 1, "tid": "cpu", "name": "aten::mm",
+             "cat": "cpu_op", "ts": 0, "dur": 1}]
+    for i, (launch_ts, kernel_ts) in enumerate([(10, 40), (110, 410)], start=1):
+        rows.append({"ph": "X", "pid": 1, "tid": "cpu", "name": "cudaLaunchKernel",
+                     "cat": "cuda_runtime", "ts": launch_ts, "dur": 5,
+                     "args": {"correlation": i}})
+        rows.append({"ph": "X", "pid": 1, "tid": "stream 7", "name": "gemm_kernel",
+                     "cat": "kernel", "ts": kernel_ts, "dur": 20,
+                     "args": {"correlation": i}})
+    p = tmp_path / "t.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows))
+    ingest(p, tmp_path / "t.sqlite")
+
+    got = Q.launches(TraceStore(tmp_path / "t.sqlite"))
+    assert got["pairs"] == 2
+    assert got["lat_max_us"] == 295.0          # 410 - 110 - 5
+    assert got["slowest"][0]["kernel"] == "gemm_kernel"
+    assert got["slowest"][0]["launch"] == "cudaLaunchKernel"
+
+
+def test_a_pattern_with_a_wildcard_anchors_and_one_without_does_not(store):
+    """Worth pinning, because the two behave oppositely. `*` becomes SQL's `%`
+    and is used as written, so `attn*` is a *prefix* match. A pattern carrying
+    no wildcard is wrapped in them instead, so `attn_out` is a substring match
+    and finds `kernel_attn_out` as well."""
+    assert set(Q.name_ids(store, "attn*").values()) == {
+        "attn_qkv", "attn_core", "attn_out", "attn_bwd"}
+    assert set(Q.name_ids(store, "attn_out").values()) == {
+        "attn_out", "kernel_attn_out"}
+    assert Q.name_ids(store, "no_such_op") == {}
+
+
+def test_cli_ingests_then_answers_from_the_same_database(tmp_path, capsys):
+    """One ingest, many cheap queries -- and `--db` has to reach both halves."""
+    import json
+
+    from tracedb.cli import main
+
+    generate(tmp_path / "t.json", steps=4)
+    db = str(tmp_path / "t.sqlite")
+    main(["--db", db, "ingest", str(tmp_path / "t.json")])
+    assert json.loads(capsys.readouterr().out)["steps"] == 4
+
+    main(["--db", db, "summary"])
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["meta"]["steps"] == 4 and summary["tracks"]
+
+    main(["--db", db, "gaps", "attn_out", "mlp_in", "--min-gap", "100"])
+    assert json.loads(capsys.readouterr().out)[0]["summary"]["instances"] >= 4

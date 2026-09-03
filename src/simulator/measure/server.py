@@ -42,13 +42,13 @@ INTERESTING = (
     "sglang:num_queue_reqs",
     "sglang:num_running_reqs",
     "sglang:gen_throughput",
-    # Actual GPU compute time, as opposed to wall clock. Cost attribution must
-    # use this: a level held for 90s with an idle GPU consumes 90 wall-seconds
-    # but very little compute, and charging the idle time to the few tokens
-    # processed makes them look enormously expensive.
-    # Real GPU time per forward pass, labelled by phase. Requires
-    # SGLANG_ENABLE_METRICS_DEVICE_TIMER=1 in the server env (see
-    # modal_app._server_env); without it the counter is never incremented.
+    # Real GPU time per forward pass, labelled by phase -- as opposed to wall
+    # clock. Cost attribution must use this: a level held for 90s with an idle
+    # GPU consumes 90 wall-seconds but very little compute, and charging the
+    # idle time to the few tokens processed makes them look enormously
+    # expensive. Requires SGLANG_ENABLE_METRICS_DEVICE_TIMER=1 in the server
+    # env (see `runner.modal_runner._server_env`); without it the counter is
+    # declared and never incremented.
     "sglang:forward_execution_seconds_total",
     "sglang:dp_cooperation_forward_execution_seconds_total",
     "sglang:estimated_flops_per_gpu_total",
@@ -171,14 +171,21 @@ def diff(before: Snapshot, after: Snapshot) -> dict:
 
 
 async def scrape(base_url: str, timeout_s: float = 10.0) -> Snapshot | None:
-    import aiohttp
+    """One scrape of `/metrics`, or None.
+
+    None rather than an exception, deliberately: this is called from the
+    in-window batch sampler as well as around a level, and a single missed
+    scrape must not take down a level that is already costing GPU-minutes. A
+    caller that needs the counters (`diff`) already treats a missing snapshot
+    as "no counters", which the price gate then refuses.
+    """
     try:
         async with aiohttp.ClientSession() as s, s.get(
                 base_url.rstrip("/") + "/metrics",
                 timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
-                if r.status != 200:
-                    return None
-                return Snapshot.parse(await r.text())
+            if r.status != 200:
+                return None
+            return Snapshot.parse(await r.text())
     except Exception:
         return None
 
@@ -234,7 +241,6 @@ class BatchSampler:
         self._stop = None
 
     async def _loop(self) -> None:
-        import asyncio
         while not self._stop.is_set():
             snap = await scrape(self.base_url, timeout_s=3.0)
             if snap:
@@ -354,6 +360,9 @@ async def wait_until_ready(base_url: str, timeout_s: float = 1800.0,
                     if r.status == 200:
                         return time.perf_counter() - start
             except Exception:
+                # Expected for most of a model load: nothing is listening yet.
+                # The three real failure modes are handled above and by
+                # `timeout_s`, so anything here is just "not ready".
                 pass
 
             elapsed = time.perf_counter() - start
@@ -391,8 +400,7 @@ async def warmup(base_url: str, model: str, n: int = 20) -> float:
     allocator growth; including them makes the first workload of a suite look
     systematically worse than the rest.
     """
-    import time as _t
-    t0 = _t.perf_counter()
+    t0 = time.perf_counter()
     async with aiohttp.ClientSession() as s_:
         for _ in range(n):
             try:
@@ -406,8 +414,11 @@ async def warmup(base_url: str, model: str, n: int = 20) -> float:
                 ) as r:
                     await r.read()
             except Exception:
+                # A throwaway request that failed has still warmed whatever it
+                # reached, and the measured workload right after it is the
+                # thing that gets to fail loudly.
                 pass
-    return _t.perf_counter() - t0
+    return time.perf_counter() - t0
 
 
 # ── GPU profiling: torch/kineto capture around a measured window ─────────
@@ -417,7 +428,7 @@ async def start_profile(base_url: str, output_dir: str, num_steps: int = 20,
     """Ask SGLang to capture `num_steps` of forward passes into `output_dir`.
 
     The device timer says decode costs 3.36 ms per output token and that the KV
-    read runs at ~28% of memory bandwidth (`docs/methodology.md` 8.3). It
+    read runs at ~28% of memory bandwidth (`docs/methodology.md` §8.3). It
     cannot say *which kernel*. This can.
 
     `num_steps` rather than a stop call: SGLang stops on its own after that

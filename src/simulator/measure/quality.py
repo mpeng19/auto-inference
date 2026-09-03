@@ -9,18 +9,25 @@ An agent maximising goodput has an obvious cheat available: serve worse
 answers faster. Nothing in the price model can see it. So a diff is measured
 on accuracy as well, and **a speed win that costs accuracy is not a win**.
 
-Two suites, both exactly scorable so no judge is needed and no second model is
+Three suites, all exactly scorable so no judge is needed and no second model is
 in the loop:
 
-    gsm8k   grade-school word problems. Answer is a number after '####'.
-            Multi-step, so a small numerical error compounds into a wrong
-            answer -- which is exactly the sensitivity we want.
-    mmlu    four-way multiple choice. One token of output, so it is cheap,
-            but a single token is a weak signal per item; it earns its place
-            by covering knowledge rather than arithmetic.
+    gsm8k      grade-school word problems. Answer is a number after '####'.
+               Multi-step, so a small numerical error compounds into a wrong
+               answer -- which is exactly the sensitivity we want.
+    longbench  long-context QA scored by LongBench's own token F1. The only
+               one of the three whose prompts are the market's shape, so it
+               is the only one that exercises code gated on sequence length.
+    mmlu       four-way multiple choice. One token of output, so it is cheap,
+               but a single token is a weak signal per item; it earns its place
+               by covering knowledge rather than arithmetic.
 
-Both are pinned by dataset revision. A benchmark that moves underneath you
-cannot detect a regression -- it *is* one.
+The shipped gate is `gsm8k` **and** `longbench` (`Simulator.quality_suites`):
+GSM8K alone passed a change that only engages above 4,096 tokens, because the
+path it altered never ran. `mmlu` is available but not in the default gate.
+
+All three are pinned by dataset revision. A benchmark that moves underneath
+you cannot detect a regression -- it *is* one.
 """
 from __future__ import annotations
 

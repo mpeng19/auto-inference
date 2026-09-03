@@ -245,3 +245,23 @@ def test_interpolated_frontier_sits_inside_the_grid_step(root, sweep):
     from simulator.slo import SLO
     loose = sim(root, slo=SLO.parse("tpot:mean:9999")).analyse(sweep)
     assert loose.interpolated is None
+
+
+def test_the_app_name_override_reaches_the_client_side_too(monkeypatch):
+    """`make deploy` names the app from SIMULATOR_APP_NAME, so every lookup has
+    to read the same variable. It did not: the runner honoured the override and
+    the client asked for "auto-inference" regardless, which on a fresh account
+    deploying under another name is a deploy that works and a run that cannot
+    find it."""
+    import importlib
+
+    import simulator.api as api
+    import simulator.runner.modal_runner as runner
+
+    monkeypatch.setenv("SIMULATOR_APP_NAME", "someone-elses-app")
+    assert importlib.reload(api).APP_NAME == "someone-elses-app"
+    assert importlib.reload(runner).APP_NAME == "someone-elses-app"
+
+    monkeypatch.delenv("SIMULATOR_APP_NAME")
+    assert importlib.reload(api).APP_NAME == "auto-inference"
+    assert importlib.reload(runner).APP_NAME == "auto-inference"

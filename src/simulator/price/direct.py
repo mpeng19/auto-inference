@@ -36,42 +36,9 @@ DEFAULT_UTILISATION = 0.50
 DEFAULT_MARGIN = 0.0                 # report break-even; margin is stated separately
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-MIN_R2 = 0.90
-
-
-
-
-
-
-
-
-
-
 def effective_in(price_in: float, price_cached: float, hit_rate: float) -> float:
     """Blended input price at a given cache hit rate -- the marketplace metric."""
     return hit_rate * price_cached + (1.0 - hit_rate) * price_in
-
-
-
-
-# ── utilisation from burstiness, instead of an assumed constant ──────────
-
-
-
 
 
 # ── pricing without decomposition: hit rate as an outcome, not a control ──
@@ -149,8 +116,6 @@ def price_direct(gpu_seconds_input: float, gpu_seconds_output: float,
         utilization=utilization, margin=margin)
 
 
-# ── the gate: refuse to price a run that cannot be priced ────────────────
-
 def gpu_seconds_per_request(gpu_seconds_input: float, gpu_seconds_output: float,
                             input_tokens: float, output_tokens: float,
                             in_per_request: float, out_per_request: float) -> float:
@@ -166,13 +131,15 @@ def gpu_seconds_per_request(gpu_seconds_input: float, gpu_seconds_output: float,
             + gpu_seconds_output / output_tokens * out_per_request)
 
 
+# ── the gate: refuse to price a run that cannot be priced ────────────────
+
 def usable(level: dict, n_gpu: int = 1) -> tuple[bool, str]:
     """Can this level be priced at all? Returns (ok, reason-if-not).
 
     Five earlier attempts at per-token cost all produced *plausible-looking*
-    numbers from unusable data (`docs/methodology.md` SS7), which is worse than producing
-    none. An automated caller cannot sanity-check a price, so refusing has to
-    be the default rather than a warning.
+    numbers from unusable data (`docs/methodology.md` §7), which is worse
+    than producing none. An automated caller cannot sanity-check a price, so
+    refusing has to be the default rather than a warning.
 
     The direct method's failure modes are different from the regression's, so
     the checks are too:

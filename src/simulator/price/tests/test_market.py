@@ -130,9 +130,11 @@ def test_burst_utilisation_is_derived_not_assumed():
 def test_pricing_defaults_are_the_agreed_basis():
     """A hardcoded copy of the basis kept reporting the superseded numbers.
 
-    `launch.py` and `modal_app.price` both restated $2.50/60%/25% inline, so
-    changing `DEFAULT_BASIS` to the agreed $3.00/50%/break-even silently did
-    nothing to what runs printed. Call sites must inherit, not restate.
+    Two now-deleted modules (a `launch.py` entrypoint and a `modal_app.price`
+    helper) both restated $2.50/60%/25% inline, so changing the default to the
+    agreed $3.00/50%/break-even silently did nothing to what runs printed. The
+    scan below is what keeps that from coming back: call sites must inherit the
+    basis, not restate it.
     """
     import pathlib
 
@@ -143,9 +145,8 @@ def test_pricing_defaults_are_the_agreed_basis():
     assert DEFAULT_UTILISATION == 0.50
     assert DEFAULT_MARGIN == 0.0          # break-even; margin stated separately
 
-    # No module outside `price.direct` may restate the basis. The original bug
-    # was `launch.py` and `modal_app.price` hardcoding $2.50/60%/25%, so moving
-    # DEFAULT_BASIS to the agreed $3.00/50%/break-even changed nothing that ran.
+    # No module outside `price.direct` may restate the basis, which is what the
+    # two deleted modules above did.
     import simulator
 
     root = pathlib.Path(simulator.__file__).parent
@@ -293,3 +294,56 @@ def test_default_environment_is_one_h100_on_the_target_model():
     m = MODELS[sc.model]
     kv = HARDWARE["H100"].hbm_bytes * 0.85 - m.active_params
     assert kv / m.bytes_per_seq(20_583) > 20, "too few conversations fit"
+
+
+def test_rank_vs_market_scores_everyone_at_one_hit_rate():
+    """The matched comparison, kept as a diagnostic (§5e). Every provider is
+    re-blended to OUR hit rate, which is exactly what makes it a diagnostic and
+    not the headline: it isolates cost per token from cache achievement."""
+    from simulator.price.market import rank_vs_market
+
+    board = [("cheap", 0.40, 3.0, 0.04), ("dear", 0.50, 3.0, 0.10),
+             ("nocache", 0.45, 3.0, None)]
+    got = rank_vs_market(0.10, board, hit_rate=0.8)
+    # 0.8*0.04 + 0.2*0.40 = 0.112; 0.8*0.10 + 0.2*0.50 = 0.180; nocache stays 0.45.
+    assert got["best_competitor"] == "cheap"
+    assert got["best_competitor_price"] == 0.112
+    assert got["rank"] == 1 and got["of"] == 4
+    assert [r["provider"] for r in got["table"]] == ["cheap", "dear", "nocache"]
+
+
+def test_rank_counts_only_providers_strictly_cheaper():
+    from simulator.price.market import rank_vs_market
+
+    board = [("a", 0.40, 3.0, None), ("b", 0.50, 3.0, None)]
+    assert rank_vs_market(0.45, board, hit_rate=0.0)["rank"] == 2
+    assert rank_vs_market(0.60, board, hit_rate=0.0)["rank"] == 3
+
+
+def test_blended_per_m_is_the_bill_expressed_per_token():
+    """Same money, different denominator -- so it must agree with `bill_per_1k`
+    exactly, or one of the two is quoting a different request."""
+    from simulator.price.market import Market
+
+    m = Market.load()
+    eff_in, out = 0.0126, 6.45
+    per_m = m.blended_per_m(eff_in, out)
+    tokens = m.in_per_request + m.out_per_request
+    assert per_m * tokens / 1e6 * 1000 == pytest.approx(m.bill_per_1k(eff_in, out))
+    # It sits between the two prices it blends, weighted 9.9:1 toward input.
+    assert eff_in < per_m < out
+
+
+def test_direct_price_bills_a_request_of_any_shape():
+    """`Market.bill_per_1k` is the market-sized request; this is the same
+    arithmetic for an arbitrary one, which is what a per-level check needs."""
+    from simulator.price.direct import price_direct
+
+    p = price_direct(gpu_seconds_input=100.0, gpu_seconds_output=50.0,
+                     input_tokens=1e6, output_tokens=1e5, cached_tokens=4e5,
+                     usd_per_gpu_hour=3.00, utilization=0.5)
+    assert p.hit_rate == pytest.approx(0.4)
+    got = p.bill_per_request(20_583, 2_076)
+    want = (p.effective_in_per_m * 20_583 + p.out_per_m * 2_076) / 1e6
+    assert got == pytest.approx(want)
+    assert p.bill_per_request(0, 0) == 0.0

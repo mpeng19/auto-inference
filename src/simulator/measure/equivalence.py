@@ -10,8 +10,11 @@ anything smaller than a catastrophe hides inside it.
 
 So measure the logits directly, teacher forced:
 
-  1. **A fixed prompt set** -- the same pinned GSM8K slice `quality.py` uses,
-     first 32 questions.
+  1. **A fixed prompt set** -- the same pinned LongBench slice `quality.py`
+     scores, first 32 rows at the same seed and the same middle truncation.
+     Long context deliberately: a kernel gated on sequence length has to be
+     *running* while it is compared, and GSM8K's few-hundred-token prompts
+     never reach one.
   2. **A reference**, computed once on *stock*: greedy-generate 64 tokens per
      prompt, then score the whole prompt+completion sequence and keep, at every
      completion position, the argmax token and the logprob of the token that

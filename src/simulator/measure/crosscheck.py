@@ -6,11 +6,12 @@ concurrency. If they agree, that is real evidence our client is sound. If they
 disagree, one of us has a bug and it is worth knowing which before pricing
 anything on it.
 
-Not a dependency: it runs as a subprocess, its result is recorded beside ours,
-and nothing downstream reads it. That matters because SGLang moved
-`sglang.bench_serving` to `sglang.benchmark.serving` *in the version we pin*,
-leaving a deprecation shim -- an actively reorganised surface is a bad thing to
-put in the path of a price.
+Not a dependency, and deliberately not wired into the sweep: it runs as a
+subprocess, on demand, and no price depends on it. That matters because SGLang
+moved `sglang.bench_serving` to `sglang.benchmark.serving` *in the version we
+pin*, leaving a deprecation shim -- an actively reorganised surface is a bad
+thing to put in the path of a price. Run it from the workbench when a client
+number looks wrong, and compare with `compare()`.
 
 Their `agentic-trace` dataset is the closest match to what we replay: multi-turn
 conversations fed round by round with the server's real reply appended, which

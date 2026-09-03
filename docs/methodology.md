@@ -22,7 +22,7 @@ price varies 10x ($0.035–$0.25). Cache-read price reorders the leaderboard.
 
 **This formula is verified, not assumed.** OpenRouter publishes both the inputs
 and the realised effective prices, and it reproduces theirs to <0.1% on 9 of 11
-providers (`tests/test_market.py`).
+providers (`src/simulator/price/tests/test_market.py`).
 
 ### The chain, and what is trustworthy in it
 
@@ -105,10 +105,12 @@ Measured decode efficiency instead falls by half:
     TP=4  f_decode 0.510
     TP=8  f_decode 0.288
 
-Retained in `simulator.py` as a **pinned negative result**, because the gap
-between roofline and measurement is the optimisation headroom (§8.1). It must
-not be used to predict cost; `test_roofline_still_fails_the_held_out_test`
-asserts it keeps failing.
+Retained as a **pinned negative result**, because the gap between roofline and
+measurement is the optimisation headroom (§8.1). It must not be used to predict
+cost. The roofline arithmetic itself survives in `harness.tools.roofline`,
+which reports the *ratio* of measured step time to the bandwidth floor and
+nothing else; the leave-one-out apparatus that produced this table is no longer
+in the tree, and the numbers here are its record.
 
 ### 3.3 Attempt 2: constant step time (accepted, 5% error)
 
@@ -226,14 +228,18 @@ batch sweep was launched on the 4B dev model to save money; its predicted cost
 variation was **1.21x over a 2.2x batch range — inside the 8% fit noise**, so
 it was unresolvable by construction and was cancelled before completing. The
 dev model is for harness validation only (noise floor, determinism, load
-generator). Enforced by `simulator.TARGET_MODEL` / `assert_target_model`.
+generator). Now enforced structurally rather than by an assertion: `model`,
+`gpu` and `n_gpu` are in `ServingConfig.LOCKED`, so no candidate stack can move
+the machine being priced.
 
 **Rule 2 — check the effect exceeds the noise before spending.**
-`simulator.effect_size()` computes predicted variation for a planned sweep and
-refuses anything under 4x the fit noise. A 2x threshold was tried first and let
+An `effect_size()` helper computed predicted variation for a planned sweep and
+refused anything under 4x the fit noise. A 2x threshold was tried first and let
 the bad dev-model experiment through: 21% effect against +-8% per endpoint is a
 signal-to-noise of 1.8, enough to notice a difference but not to *fit an
-exponent*, which is what we are doing.
+exponent*, which is what we are doing. The helper went with the regression it
+served; the rule is now carried by judgement plus the 3% noise floor every
+verdict is recorded against.
 
 **Rule 3 — check the independent variable can actually move.** A sweep raising
 offered load 8x to vary batch produced 21.8 -> 42.7 (and only 1.05x among
@@ -287,8 +293,9 @@ physics is solved.
 **TP=8 is flagged, not fitted.** It requires g=0.36 where the TP 1/2/4 trend
 gives 0.55 — a 35% shortfall *on top of* its batch under-fill (§8.2). So TP=8
 has two distinct problems, and smoothing them into a scaling law would hide
-both. `test_tp8_is_flagged_not_fitted` fails if the gap ever closes, which is
-the intended win.
+both. Anything that closes the gap is the intended win — though since the
+1xH100 standard environment there is no TP=8 configuration under measurement to
+close it on.
 
 **The 2.1x gap on the fixed term is now the whole optimisation target.** It is
 the weight read plus per-step overhead, it dominates at the batch sizes we
@@ -324,10 +331,10 @@ Direction of the miss is informative: predicting *too cheap* at a new
 `n**-0.29` at short context, where the fixed per-step term dominates and
 per-step synchronisation is a larger share of the total. Untested.
 
-### 3.4 How the inputs to the fit are measured
+### 3.4 How the inputs to the fit were measured — SUPERSEDED by §5e
 
-The per-token costs come from **rate-form NNLS regression** over saturated
-workload mixes. Four earlier approaches all failed, all producing
+The per-token costs used to come from **rate-form NNLS regression** over
+saturated workload mixes. Four earlier approaches had all failed, all producing
 plausible-looking numbers (§7 below). The root cause was one thing:
 fixed-duration experiments hold GPU-seconds nearly constant while token counts
 vary, so nothing is identifiable. Dividing through by GPU-seconds cancels
@@ -335,14 +342,23 @@ duration:
 
     1 = a*(U/gpu_s) + b*(C/gpu_s) + c*(O/gpu_s)
 
-Guards that must stay:
-- `usable()` refuses to print a price from a bad fit.
-- `identifiability()` requires each token class to vary >=3x across mixes.
+Guards that went with it:
+- `usable()` refused to print a price from a bad fit.
+- `identifiability()` required each token class to vary >=3x across mixes.
   Overall condition number is not enough: an 8xH100 run reported cached tokens
   costing *more* than uncached, at fit 0.95 and condition 5.4, because the
   output column spanned only 1.5x.
-- `BatchSampler` records the running batch during each window, since the whole
-  cost model turns on batch.
+
+**None of that is in the tree any more.** §5e retired the decomposition
+entirely: pricing at our own hit rate needs no mixes, no NNLS and no
+identifiability gate, only the device timer's phase split. Two things survived
+into what the code runs today:
+
+- `price.direct.usable()` still refuses to print a price, but on different
+  evidence — the phase-split counter missing, forward time exceeding wall time
+  x n_gpu, a GPU idle for the window, or no tokens at all.
+- `measure.server.BatchSampler` still records the running batch during each
+  window, since the whole cost model turns on batch.
 
 ---
 
@@ -370,7 +386,10 @@ not of the serving stack alone.
 
 ### 4.2 Deployment economics
 
-$2.50/GPU-hr, 25% margin, market traffic, against the best provider:
+**On the superseded basis** — $2.50/GPU-hr and a 25% margin, both since
+replaced by $3.00 and break-even (§5c, §6.3) — market traffic, against the best
+provider. Kept because the *ranking* between node sizes is what it is evidence
+for, and that survives a change of basis:
 
 | GPUs | $/hr | capacity | break-even util | market share needed |
 |---|---|---|---|---|
@@ -394,10 +413,10 @@ $2.50/GPU-hr, 25% margin, market traffic, against the best provider:
 
 ## 5. Market ground truth
 
-Pulled by `scripts/market_pull.py`. The public API gives listed prices and
-uptime only; per-provider share, cache hit rate, latency percentiles and the
-daily series are streamed as a Next.js RSC payload, retrieved by requesting the
-page with an `RSC: 1` header.
+Pulled by `simulator.price.market_pull` (`make market`). The public API gives
+listed prices and uptime only; per-provider share, cache hit rate, latency
+percentiles and the daily series are streamed as a Next.js RSC payload,
+retrieved by requesting the page with an `RSC: 1` header.
 
 ### 5.1 Real traffic (17 days, `model_chart`)
 
@@ -593,9 +612,9 @@ At our own hit rate,
 
     effective input price = input GPU-seconds / input tokens x rate / utilisation
 
-is directly measurable (`pricing.price_direct`). Splitting input cost into
-cached and uncached is needed **only** to re-blend at someone else's rate. Drop
-the matching and these all go with it:
+is directly measurable (`simulator.price.direct.price_direct`). Splitting input
+cost into cached and uncached is needed **only** to re-blend at someone else's
+rate. Drop the matching and these all go with it:
 
 - the four-mix phase B and its NNLS solve
 - `identifiability()` and the `usable()` gate over three token classes
@@ -619,7 +638,8 @@ defend rather than the one we sidestepped.
 Alongside `f_weights`. Levers, none of which need a kernel: `--schedule-policy
 lpm` (longest-prefix-match queue ordering), cache-aware routing across
 replicas, a larger KV pool via `--mem-fraction-static`, and eviction policy in
-`radix_cache.py` — which we already carry as an overlay.
+`radix_cache.py` — a file a candidate stack can replace outright, since
+SGLang's serving layer is pure Python.
 
 ## 6. Assumptions
 
@@ -637,18 +657,21 @@ replicas, a larger KV pool via `--mem-fraction-static`, and eviction policy in
 | Assumption | Status |
 |---|---|
 | `cost/out token = step * n_gpu / batch` | 5% mean LOO error over TP 1/2/4/8 |
-| step time = 21.4ms | sd 1.0ms across the sweep |
-| per-token costs from rate-form NNLS | fit 0.92–0.94, all columns identified |
+| step time = 21.4ms at 6k context | sd 1.0ms across the sweep; **does not hold at market context** — §8.3 measures 9.45 + 2.03·B |
+| per-token costs from rate-form NNLS | *retired* (§3.4, §5e). Prices now come straight off the device timer's phase split, with no fit to be good or bad |
 
 ### 6.3 Assumed, and NOT verifiable from inside the harness
 
-These are where the price numbers are soft. Each is a choice, not a finding.
+These are where the price numbers are soft: each is a choice, not a finding.
+The values below are the ones the code actually uses — they live in
+`simulator.costs` and on `Simulator`, and every report prints them
+(`Simulator.assumptions`).
 
 | Assumption | Value | Why it is uncertain |
 |---|---|---|
-| **Utilisation** | 60% quoted, 27–52% break-even | Depends entirely on traffic a marketplace routes to us. Nothing measurable here. This is the single largest uncertainty. |
-| **GPU price** | $2.50/GPU-hr, Nebius committed | Chutes runs decentralised compute, possibly far cheaper. Providers who own hardware have a depreciation basis, not a rental one. |
-| **Margin** | 25% | Our choice. Competitors may run thinner or at a loss for share. |
+| **Utilisation** | 50% (`Simulator.utilisation`) | Depends entirely on traffic a marketplace routes to us. Nothing measurable here. This is the single largest uncertainty. The traffic-derived ceiling for a single-model deployment sized for peak is 48% (§5b, `Market.utilisation_ceiling`), so 50% is the round number just above it. |
+| **GPU price** | $3.00/GPU-hr, the agreed default (`costs.DEFAULT_USD_PER_HOUR`) | Between Nebius committed ($2.50) and list on-demand ($3.85). Chutes runs decentralised compute, possibly far cheaper. Providers who own hardware have a depreciation basis, not a rental one. |
+| **Margin** | 0% — break-even, by §5c | Not an assumption any more, which is the point: margin cancels in every internal comparison and is not ours to choose against a competitor. It belongs outside the cost model. |
 | **KV dtype** | bf16, 2 bytes/element | SGLang default; FP8 KV would halve KV bytes and change the batch/cost curve. |
 | **Weight dtype** | FP8, 1 byte/param | Matches the served checkpoint. |
 | **Competitor cost** | inferred from their price | Their $0.035 cache read is a *price*. OpenRouter's leaderboard sorts on effective input price, so pricing cache reads near zero is the cheapest way to top it. |
@@ -726,7 +749,7 @@ KV-pool ceiling**, and since the pool scales with GPU count, so does batch —
 which is the *mechanism* behind the §3.3.1(c) confound, not an artefact of how
 we chose `sat_users`. No load sweep can separate them.
 
-`predict_batch()` implements this. Against the sweep:
+A `predict_batch()` helper implemented this. Against the sweep:
 
     GPUs  predicted  measured  error
        1         15      15.6    -4%
@@ -747,31 +770,21 @@ with four times the capacity.
 What to try, in order: `--schedule-conservativeness` below 1.0 (raises
 admission directly), `SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION` below 4096
 (shrinks the per-request reservation), and `--mem-fraction-static` above 0.85.
-`tests/test_simulator.py::test_tp8_underfills_its_own_memory_ceiling` pins the
-gap; if it starts failing because the gap closed, that is the win.
+All three are `ServingConfig` fields or `extra_args`, so a candidate stack sets
+them in its own `serving.json` and the sweep prices the result. The helper and
+its regression test went with the multi-GPU study; on the 1xH100 standard
+environment there is no TP=8 configuration left to pin.
 
 ### 8.2b The 1.77x reservation factor
 
-`predict_batch` needs `RESERVATION_FACTOR = 1.77` to match: measured
+`predict_batch` needed `RESERVATION_FACTOR = 1.77` to match: measured
 bytes-per-sequence is 2.9 GB against 1.64 GB modelled (KV at 22.7k context plus
 155 MB linear state). The gap is the decode reservation (4096 tokens ~ 268 MB)
 plus page rounding and fragmentation — which accounts for roughly half of it.
 The remainder is unexplained and the factor is fitted, so it should be
 re-derived rather than trusted across a change of model or context.
 
-### 8.3 Smaller
-
-- TP=1 never found its N*: all four levels passed. Under-characterised, and
-  possibly better than measured. ~$2.50/hr to redo.
-- `BatchSampler` aliases on short requests: the `cached` mix sampled batch 0.0
-  at 100% idle because its requests finish inside the 2s interval. Trust it
-  only for mixes with long generations.
-- Simulator validated only against our own stack, one model, one GPU type.
-- No real agent traffic captured through the deployed OpenHands gateway.
-
----
-
-## 8.3 The decode slope at market context — the largest quantified headroom
+### 8.3 The decode slope at market context — the largest quantified headroom
 
 Measured on the 1xH100 baseline (run `1788287578`, 2026-09-01), at the
 marketplace's own 20,583-token context rather than the 6k the affine model in
@@ -818,18 +831,41 @@ batch, 2xH100 measured 0.82-0.94x the cost per token where that term predicts
 1.22x *worse*. Both constants were fitted at ~6k context and neither survives
 the move to 20.6k.
 
+### 8.4 Smaller
+
+- TP=1 never found its N*: all four levels passed. Under-characterised, and
+  possibly better than measured. About an hour of H100 to redo, ~$3 at the
+  agreed basis (§6.3).
+- `BatchSampler` aliases on short requests: the `cached` mix sampled batch 0.0
+  at 100% idle because its requests finish inside the 2s interval. Trust it
+  only for mixes with long generations.
+- Validated only against our own stack, one model, one GPU type.
+- No real agent traffic captured through a deployed gateway.
+
+---
 
 ## 9. Using it
 
-    from autoinf.simulator import (SWEEP_2026_08_31, calibrate_step,
-                                   validate_loo_step)
+The step model above is history: nothing in the tree fits or extrapolates a
+step time any more. A price comes from one measurement — sweep, read the device
+timer, divide (§5e) — so the API is one object.
 
-    model = calibrate_step(SWEEP_2026_08_31)      # -> StepModel(step_s=0.0214)
-    model.gpu_s_out(n_gpu=2, batch=40)            # cost per output token
-    validate_loo_step(SWEEP_2026_08_31)           # the fidelity number
+    from simulator import Simulator
 
-Re-measure `step_s` whenever the model, GPU, or workload shape changes — and
-treat a change in it as a finding, since §8.1 is the target.
+    sim = Simulator(root_dir="runs/baseline")     # stock, 1xH100, market SLO
+    res = await sim.eval()                        # 25-60 GPU-min
+    print(res.summary())                          # N*, $/1k, rank, share
 
-    uv run python scripts/market_pull.py qwen/qwen3.8-27b   # refresh §5
-    uv run python scripts/launch.py frontier --market ...   # new measurement
+    sim.analyse(record)                           # re-price a stored sweep, no GPU
+
+Everything the API does, the CLI does:
+
+    uv run simulate run     --root runs/baseline --mkdir      # new measurement
+    uv run simulate rescore --root runs/baseline --slo ttft:p90:2818,tpot:mean:20
+    make market                                               # refresh §5
+
+The step-time constants that §8.3 measured are carried where an agent can reach
+them, in `harness.tools.roofline`, which reports the *ratio* of measured step
+time to the bandwidth floor. Re-measure them whenever the model, GPU, or
+workload shape changes — and treat a change as a finding, since §8.1 is the
+target.

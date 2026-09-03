@@ -1,3 +1,18 @@
+"""The schema, and the only thing that writes it.
+
+SQLite because a kineto trace is answered by *queries* and nothing else here
+needs a server: the file travels with the run, an agent opens it read-only over
+MCP, and a window query costs milliseconds against tens of megabytes of JSON
+that no agent could read at all.
+
+Two decisions the schema encodes. **Names are interned** (`names` + `name_id`)
+because a GPU trace repeats a few hundred mangled kernel names across hundreds
+of thousands of spans, and storing them inline roughly triples the file.
+**Tracks carry a `kind`** (`gpu`/`cpu`) because almost every useful question --
+where the GPU went idle, whether comm hides under compute -- is a question
+about one side or the other, and recovering that from the category string at
+query time would mean re-deriving it in every query.
+"""
 from __future__ import annotations
 
 import json

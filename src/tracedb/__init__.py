@@ -7,7 +7,7 @@ and those are queries. So a trace is ingested once into SQLite and answered
 compactly, with timeline renders for the cases where a picture is faster.
 
 This is the tool that turns "decode is at 28% of memory bandwidth"
-(`docs/methodology.md` 8.3) into "and here is the kernel where it goes".
+(`docs/methodology.md` §8.3) into "and here is the kernel where it goes".
 
     tracedb ingest trace.json --db t.sqlite
     tracedb summary --db t.sqlite

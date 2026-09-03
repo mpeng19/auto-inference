@@ -210,7 +210,7 @@ def scale_sessions(sessions: list[list[TraceRound]], factor: float,
 
 
 # What OpenRouter's traffic for qwen/qwen3.8-27b actually looks like, from 17
-# days of `model_chart` totals (`scripts/market_pull.py`). TraceLab is Claude
+# days of `model_chart` totals (`simulator.price.market_pull`). TraceLab is Claude
 # Code traffic specifically; the marketplace mixes it with agents that generate
 # far more output (pi, Hermes Agent, LangChain, DeepSeek Harness).
 #

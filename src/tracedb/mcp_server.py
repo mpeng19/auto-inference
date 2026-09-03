@@ -1,9 +1,18 @@
-"""MCP server exposing tracedb to agents (stdio). Register with e.g.:
+"""MCP server exposing tracedb to agents (stdio).
 
-  claude mcp add tracedb -- uv run --directory /path/to/trace-db tracedb-mcp --db /path/to/t.sqlite
+The harness writes this into an agent's MCP config for it (`harness.profile`),
+naming the running interpreter so it works without an install:
 
-Every result is compact JSON; `trace_render` writes a PNG and returns its path so the agent can
-open the image of exactly the window a query surfaced.
+  {"command": "<python>", "args": ["-m", "tracedb.mcp_server", "--db", "<t.sqlite>"]}
+
+By hand, from a checkout:
+
+  claude mcp add tracedb -- uv run tracedb-mcp --db /path/to/t.sqlite
+
+One server per database, so an agent can hold its own profile and stock's side
+by side under different tool prefixes. Every result is compact JSON;
+`trace_render` writes a PNG and returns its path so the agent can open the
+image of exactly the window a query surfaced.
 """
 from __future__ import annotations
 
