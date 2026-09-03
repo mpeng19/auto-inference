@@ -187,6 +187,14 @@ class CallStats:
     returncode: int = 0
     cancelled: bool = False
     timed_out: bool = False
+    # From the stream: how many model responses the call took and what they
+    # cost, in aggregate. The per-message rows are in the calls log.
+    n_messages: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    log_path: str = ""
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -229,6 +237,9 @@ class ClaudeCodeProposer:
     # Every call this proposer has made, newest last. The loop stamps
     # `last_call` onto the turn it appends, so a trace can be read for where
     # the hours went without keeping the proposer alive.
+    # Where per-call event logs go (`<agent>/calls/<phase>-<ts>.jsonl`);
+    # set by the loop's workspace before a call. Empty: no log.
+    calls_dir: str = ""
     last_call: CallStats = field(default_factory=CallStats)
     calls: list[CallStats] = field(default_factory=list)
 
@@ -336,7 +347,10 @@ class ClaudeCodeProposer:
         """
         return [self.binary, "-p", prompt,
                 "--model", model or self.model,
-                "--output-format", "json",
+                # stream-json: one event per inner request and response, each
+                # with its own usage, so tokens are counted as they are spent
+                # rather than when a two-hour call finally returns.
+                "--output-format", "stream-json", "--verbose",
                 "--permission-mode", self.permission_mode,
                 *(("--mcp-config", self.mcp_config) if self.mcp_config else ()),
                 *self.extra_args,
@@ -376,13 +390,17 @@ class ClaudeCodeProposer:
                 "Claude Code processes; install it or pass a different Proposer.")
         limit = self.timeout_s if timeout_s is None else timeout_s
         started = time.time()
+        acct = _CallAccounting(self, phase, started)
         proc = subprocess.Popen(
             self._cmd(prompt, model), cwd=str(cwd), env=self._env(),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, start_new_session=True)
-        out, err, cancelled, timed_out = self._wait(proc, limit, cancel)
+        out, err, cancelled, timed_out = self._wait(proc, limit, cancel, on_line=acct.line)
 
         text, use, meta = _parse(out)
+        if not use.total and acct.reported.total:
+            use = acct.reported            # cancelled: no envelope, but the stream counted
+        acct.close()
         stats = CallStats(
             phase=phase, model=model or self.model, started_at=started,
             wall_s=round(time.time() - started, 3),
@@ -392,7 +410,10 @@ class ClaudeCodeProposer:
             is_error=bool(meta.get("is_error", False)),
             denials=int(meta.get("denials", 0)),
             returncode=proc.returncode if proc.returncode is not None else -1,
-            cancelled=cancelled, timed_out=timed_out)
+            cancelled=cancelled, timed_out=timed_out,
+            n_messages=acct.n_messages, input_tokens=use.input, output_tokens=use.output,
+            cache_read=use.cache_read, cache_write=use.cache_write,
+            log_path=acct.log_path)
         self.last_call = stats
         self.calls.append(stats)
 
@@ -405,13 +426,17 @@ class ClaudeCodeProposer:
                 f"claude exited {proc.returncode}: {(err or out)[-800:]}")
         self.last_usage = use
         if self.on_tokens is not None:
-            # Accounting must never take an experiment down.
-            with contextlib.suppress(Exception):
-                self.on_tokens(use)
+            # The stream already reported each message as it landed; report
+            # only what the envelope adds, so the total matches the envelope
+            # and nothing is counted twice.
+            rest = use - acct.reported
+            if rest.total:
+                with contextlib.suppress(Exception):
+                    self.on_tokens(rest)
         return text, use
 
     def _wait(self, proc, limit: float,
-              cancel: threading.Event | None) -> tuple[str, str, bool, bool]:
+              cancel: threading.Event | None, on_line=None) -> tuple[str, str, bool, bool]:
         """Poll until the child exits, the clock runs out, or `cancel` is set.
 
         The pipes are drained by threads because a JSON envelope from a long
@@ -425,6 +450,9 @@ class ClaudeCodeProposer:
             try:
                 for line in iter(stream.readline, ""):
                     chunks[key].append(line)
+                    if key == "out" and on_line is not None:
+                        with contextlib.suppress(Exception):
+                            on_line(line)
             except (ValueError, OSError):       # closed under us by the kill
                 pass
             finally:
@@ -484,6 +512,7 @@ class ClaudeCodeProposer:
         # Give it real files to open. Without this the first thing it does is
         # discover the directory is empty.
         files = idea.targets or self.targets
+        self.calls_dir = str(ws.root / "calls")
         self._install_skills(ws)
         self.mcp_config = self._mcp_for(ws, history) or self.mcp_config_default
         present = ws.materialise(*files)
@@ -551,13 +580,14 @@ def _parse(stdout: str) -> tuple[str, TokenUse, dict]:
     written -- so the raw stdout is returned as the text and the timings are
     zero. Partial thinking is still worth keeping in the trace.
     """
-    try:
-        d = json.loads(stdout)
-    except json.JSONDecodeError:
+    events = _events(stdout)
+    if not events:
         return stdout, TokenUse(), {}
-    if isinstance(d, list):                 # stream-json, if anyone sets it
-        d = next((x for x in reversed(d) if isinstance(x, dict)
-                  and x.get("type") == "result"), {})
+    d = next((x for x in reversed(events) if x.get("type") == "result"), None)
+    if d is None:
+        # Cancelled or killed before the envelope: keep what the model said.
+        text = "\n".join(_assistant_text(e) for e in events if e.get("type") == "assistant")
+        return text, TokenUse(), {}
     u = d.get("usage") or {}
     meta = {k: d[k] for k in ("duration_ms", "duration_api_ms", "num_turns",
                               "is_error") if k in d}
@@ -585,6 +615,103 @@ def _history(history: tuple[Attempt, ...]) -> str:
            else f"bill ${a.metrics.get('bill_per_1k', '?')}/1k, "
                 f"{a.delta.get('bill_per_1k_pct', 0):+.1f}% vs baseline")
         for a in history[-5:])
+
+
+def _events(stdout: str) -> list[dict]:
+    """stream-json is one JSON object per line; the old envelope is one
+    object. Both come back as a list of events."""
+    out = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
+
+
+def _assistant_text(event: dict) -> str:
+    content = (event.get("message") or {}).get("content") or []
+    if isinstance(content, str):
+        return content
+    return "".join(b.get("text", "") for b in content
+                   if isinstance(b, dict) and b.get("type") == "text")
+
+
+def _usage(u: dict | None) -> TokenUse:
+    u = u or {}
+    return TokenUse(input=int(u.get("input_tokens", 0)), output=int(u.get("output_tokens", 0)),
+                    cache_read=int(u.get("cache_read_input_tokens", 0)),
+                    cache_write=int(u.get("cache_creation_input_tokens", 0)))
+
+
+class _CallAccounting:
+    """Counts a call's stream as it happens: every assistant message's usage
+    goes to `on_tokens` immediately and to the call log as a row, so the
+    dashboard moves during a two-hour edit and the log answers "what did the
+    forty-first turn cost, and which tool did it call"."""
+
+    def __init__(self, proposer: ClaudeCodeProposer, phase: str, started: float):
+        self.p = proposer
+        self.reported = TokenUse()
+        self.n_messages = 0
+        self.prev_ts = started
+        self.log_path = ""
+        self._fh = None
+        if proposer.calls_dir:
+            try:
+                d = pathlib.Path(proposer.calls_dir)
+                d.mkdir(parents=True, exist_ok=True)
+                path = d / f"{phase or 'call'}-{int(started)}.jsonl"
+                self._fh = path.open("a")
+                self.log_path = str(path)
+            except OSError:
+                self._fh = None
+
+    def line(self, line: str) -> None:
+        line = line.strip()
+        if not line.startswith("{"):
+            return
+        d = json.loads(line)
+        kind = d.get("type")
+        now = time.time()
+        row = {"ts": round(now, 3), "since_prev_s": round(now - self.prev_ts, 3), "type": kind}
+        if kind == "assistant":
+            msg = d.get("message") or {}
+            use = _usage(msg.get("usage"))
+            content = msg.get("content") or []
+            tools = [b.get("name") for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            row.update({"input": use.input, "output": use.output, "cache_read": use.cache_read,
+                        "cache_write": use.cache_write, "tools": tools,
+                        "text_chars": len(_assistant_text(d))})
+            self.reported = self.reported + use
+            self.n_messages += 1
+            if self.p.on_tokens is not None and use.total:
+                with contextlib.suppress(Exception):
+                    self.p.on_tokens(use)
+        elif kind == "user":
+            content = (d.get("message") or {}).get("content") or []
+            row["tool_result_chars"] = sum(
+                len(str(b.get("content", ""))) for b in content
+                if isinstance(b, dict) and b.get("type") == "tool_result")
+        elif kind == "result":
+            row.update({"duration_ms": d.get("duration_ms"), "num_turns": d.get("num_turns"),
+                        "is_error": d.get("is_error"), "total": _usage(d.get("usage")).__dict__})
+        else:
+            return
+        self.prev_ts = now
+        if self._fh is not None:
+            self._fh.write(json.dumps(row) + "\n")
+            self._fh.flush()
+
+    def close(self) -> None:
+        if self._fh is not None:
+            with contextlib.suppress(Exception):
+                self._fh.close()
 
 
 def _parse_idea(text: str, targets: tuple[str, ...]) -> Idea:

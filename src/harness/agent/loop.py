@@ -84,6 +84,12 @@ class Evaluator(Protocol):
         ...
 
 
+# Trace phases, folded into the four an operator reasons about.
+_PHASE_BUCKET = {"propose": "edit", "submit": "edit", "check": "edit", "edit": "edit",
+                 "study": "study", "wait": "wait", "recall": "recall", "start": "other",
+                 "done": "other"}
+
+
 @dataclass
 class IterativeAgent:
     """One agent loop. Owns a workspace, reads memory, writes back what it learns."""
@@ -121,6 +127,8 @@ class IterativeAgent:
         """
         data = {"phase": phase or turn.name or turn.kind,
                 "elapsed_s": round(time.time() - since, 3), **turn.data}
+        # The fleet keeps a running total per phase for the dashboard.
+        self._report(phase_delta=(_PHASE_BUCKET.get(data["phase"], "other"), data["elapsed_s"]))
         if call:
             stats = getattr(self.proposer, "last_call", None)
             with contextlib.suppress(Exception):

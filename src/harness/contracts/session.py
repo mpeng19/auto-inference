@@ -48,6 +48,11 @@ class TokenUse:
     cache_read: int = 0
     cache_write: int = 0
 
+    def __sub__(self, o: TokenUse) -> TokenUse:
+        return TokenUse(max(0, self.input - o.input), max(0, self.output - o.output),
+                        max(0, self.cache_read - o.cache_read),
+                        max(0, self.cache_write - o.cache_write))
+
     def __add__(self, o: TokenUse) -> TokenUse:
         return TokenUse(self.input + o.input, self.output + o.output,
                         self.cache_read + o.cache_read,
@@ -75,6 +80,11 @@ class AgentView:
     last_bill_per_1k: float | None = None
     last_rank: str = ""
     last_share_pct: float | None = None
+    # Seconds by phase: edit, study, wait (on a GPU), recall, other. What an
+    # agent-hour actually went on, and the number to look at when a run is
+    # slow -- a fleet spending its time in `wait` needs GPUs, one in `edit`
+    # needs a faster model or smaller ideas.
+    phase_s: dict = field(default_factory=dict)
     cost_usd: float = 0.0
     tokens: TokenUse = field(default_factory=TokenUse)
     eval_ticket: str = ""

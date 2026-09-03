@@ -241,6 +241,12 @@ class Fleet:
             # idea ends -- left the dashboard at $0.00 and the budget blind
             # for up to `max_attempts` sweeps per agent, which on the first
             # real run was every dollar the fleet had spent.
+            ph = fields.pop("phase_delta", None)
+            if ph:
+                name, secs = ph
+                spent = dict(s.view.phase_s)
+                spent[name] = round(spent.get(name, 0.0) + float(secs), 1)
+                s.view = replace(s.view, phase_s=spent)
             usd = fields.pop("cost_delta", None)
             if usd:
                 self._cost += usd

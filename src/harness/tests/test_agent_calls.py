@@ -366,3 +366,57 @@ def test_agent_shell_can_find_harness():
     env = ClaudeCodeProposer()._env()
     assert env["PATH"].split(os.pathsep)[0] == os.path.dirname(sys.executable)
     assert "ANTHROPIC_API_KEY" not in env
+
+
+STREAM = "\n".join(json.dumps(e) for e in [
+    {"type": "system", "subtype": "init"},
+    {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}],
+                                      "usage": {"input_tokens": 2, "output_tokens": 20,
+                                                "cache_read_input_tokens": 18000,
+                                                "cache_creation_input_tokens": 100}}},
+    {"type": "user", "message": {"content": [{"type": "tool_result", "content": "hi"}]}},
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}],
+                                      "usage": {"input_tokens": 2, "output_tokens": 1,
+                                                "cache_read_input_tokens": 28000,
+                                                "cache_creation_input_tokens": 0}}},
+    {"type": "result", "subtype": "success", "result": "done", "duration_ms": 3779,
+     "num_turns": 2, "is_error": False, "permission_denials": [],
+     "usage": {"input_tokens": 4, "output_tokens": 77, "cache_read_input_tokens": 46000,
+               "cache_creation_input_tokens": 100}},
+])
+
+
+def test_stream_json_tokens_land_per_message_and_reconcile_to_the_envelope(tmp_path, stock_dir):
+    """The fleet showed 0 tokens for an hour because usage arrived only in the
+    envelope. Each assistant message is now reported as it lands, the
+    envelope tops it up, and the total equals the envelope exactly."""
+    binary = _fake_claude(tmp_path, f"cat <<'JSON'\n{STREAM}\nJSON\n")
+    reports = []
+    prop = ClaudeCodeProposer(binary=binary, calls_dir=str(tmp_path / "calls"))
+    prop.on_tokens = reports.append
+    text, use = prop._run("hi", cwd=str(tmp_path), phase="edit")
+    assert text == "done"
+    assert (use.input, use.output, use.cache_read, use.cache_write) == (4, 77, 46000, 100)
+    assert len(reports) == 3                          # two messages, then the remainder
+    total = reports[0] + reports[1] + reports[2]
+    assert (total.input, total.output, total.cache_read) == (4, 77, 46000)
+    assert reports[0].output == 20 and reports[2].output == 56
+    st = prop.last_call
+    assert st.n_messages == 2 and st.output_tokens == 77 and st.num_turns == 2
+    log = pathlib.Path(st.log_path)
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [r["type"] for r in rows] == ["assistant", "user", "assistant", "result"]
+    assert rows[0]["tools"] == ["Bash"] and rows[1]["tool_result_chars"] == 2
+    assert "stream-json" in prop._cmd("x", "sonnet") and "--verbose" in prop._cmd("x", "sonnet")
+
+
+def test_a_cancelled_stream_still_keeps_text_and_tokens(tmp_path, stock_dir):
+    """No envelope, but the messages that landed were counted and kept."""
+    partial = "\n".join(STREAM.splitlines()[:2])
+    binary = _fake_claude(tmp_path, f"cat <<'JSON'\n{partial}\nJSON\nsleep 30\n")
+    import threading
+    cancel = threading.Event()
+    prop = ClaudeCodeProposer(binary=binary)
+    threading.Timer(0.5, cancel.set).start()
+    text, use = prop._run("hi", cwd=str(tmp_path), phase="study", cancel=cancel)
+    assert prop.last_call.cancelled and use.output == 20

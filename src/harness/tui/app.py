@@ -221,6 +221,10 @@ class FleetApp(App):
         t.append(f"{_money(a.cost_usd)}   {a.attempts_total} attempts\n")
         t.append(f"in {_tokens(a.tokens.input)}  out {_tokens(a.tokens.output)}\n")
         t.append(f"cache read {_tokens(a.tokens.cache_read)}\n\n", style="dim")
+        if a.phase_s:
+            t.append("time\n", style="bold")
+            t.append("  ".join(f"{k} {_dur(v)}" for k, v in sorted(
+                a.phase_s.items(), key=lambda kv: -kv[1])) + "\n")
         if a.queued_s:
             t.append(f"last wait for a GPU: {a.queued_s:.0f}s\n", style="dim")
         if a.idle_s:
@@ -380,6 +384,10 @@ class FleetApp(App):
 
     def action_stop_fleet(self) -> None:
         self._send("stop")
+
+
+def _dur(s: float) -> str:
+    return f"{s/3600:.1f}h" if s >= 3600 else f"{s/60:.0f}m" if s >= 90 else f"{s:.0f}s"
 
 
 def _bar(x: float, total: float, width: int = 16) -> str:

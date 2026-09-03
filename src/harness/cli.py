@@ -370,6 +370,39 @@ def cmd_results(a) -> int:
     return 0
 
 
+def cmd_calls(a) -> int:
+    """Every model call an agent made, with per-message tokens and tool use:
+    the most granular view there is of where an agent-hour went."""
+    root = pathlib.Path(_root_of(a))
+    agents = [a.agent] if a.agent else sorted(p.name for p in root.iterdir()
+                                              if (p / "calls").is_dir())
+    for ag in agents:
+        d = root / ag / "calls"
+        if not d.is_dir():
+            continue
+        print(ag)
+        for f in sorted(d.glob("*.jsonl")):
+            rows = [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
+            msgs = [r for r in rows if r.get("type") == "assistant"]
+            tot = {k: sum(r.get(k, 0) for r in msgs) for k in ("input", "output", "cache_read", "cache_write")}
+            tools = {}
+            for r in msgs:
+                for t in r.get("tools") or ():
+                    tools[t] = tools.get(t, 0) + 1
+            res = next((r for r in rows if r.get("type") == "result"), {})
+            span = (rows[-1]["ts"] - rows[0]["ts"]) / 60 if rows else 0
+            print(f"  {f.stem:<22} {len(msgs):>4} msgs {span:>6.1f} min  "
+                  f"in {tot['input']:>7,} out {tot['output']:>7,} cache {tot['cache_read']:>10,}"
+                  f"  turns {res.get('num_turns', '-')}  tools: "
+                  + ", ".join(f"{k}x{v}" for k, v in sorted(tools.items(), key=lambda kv: -kv[1])[:6]))
+            if a.verbose:
+                for r in rows:
+                    if r.get("type") == "assistant":
+                        print(f"      +{r['since_prev_s']:>6.1f}s  out {r['output']:>5} cache {r['cache_read']:>8}"
+                              f"  {', '.join(r.get('tools') or []) or 'text'}")
+    return 0
+
+
 def cmd_timeline(a) -> int:
     from . import timeline as tl
 
@@ -532,6 +565,12 @@ def main(argv: list[str] | None = None) -> int:
     rz.add_argument("--diff", action="store_true", help="print the best result's diff")
     rz.add_argument("--json", action="store_true")
     rz.set_defaults(fn=cmd_results)
+
+    cl = sub.add_parser("calls", help="every model call, with per-message tokens and tools")
+    cl.add_argument("--root", default="", help="fleet root (default: the session's)")
+    cl.add_argument("--agent", default="", help="one agent only")
+    cl.add_argument("-v", "--verbose", action="store_true", help="one line per message")
+    cl.set_defaults(fn=cmd_calls)
 
     tl = sub.add_parser("timeline", help="the run as a readable timeline")
     tl.add_argument("--root", default="", help="fleet root (default: the session's)")
