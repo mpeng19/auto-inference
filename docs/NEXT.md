@@ -245,6 +245,28 @@ LongBench 53 -> 28; P-greedy nested KV pages -6.2% at screen; low-rank
 latent KV 1% then 57% quality; aged-KV merging +19%; two two-hour edit
 timeouts).
 
+## Where build-4's time went (measured 2026-09-03, first 12 hours)
+
+Per agent: 5 h of model latency (opus, median 3 s per message, p90 30 s)
+and 2.5-4 h of tool execution, for 3-4 ideas each. Per evaluation: 126 s
+of load generation on a screen inside a 560-900 s call; 615 s inside
+1150-1340 s on a full sweep. The overhead, in order:
+
+| cost | per eval | cause | status |
+|---|---|---|---|
+| model load | 160-340 s | 27 GB from the volume; 160 s when the container's page cache is warm | `startup` marks now record weights / graph capture / ready per sweep, so the next run says which part |
+| flush between levels | 90 s x4 on a full, x1 on a screen | cancelled streams kept generating until the server noticed the disconnect | level end now POSTs `/abort_request {abort_all}` |
+| tool calls cut at 600 s | 21 across the fleet, ~40 min each incl. the rerun | Claude Code's shell timeout; `gpu-run` takes 5-15 min; the Modal call billed anyway | agents run with a 30-min default, 60-min max |
+| edits killed at 2 h | 3 ideas | diff discarded | diff now priced |
+| 529 outage | ~1 h, 23 error entries | no retry | 3 retries over 11 min |
+
+Modal is not the bottleneck: eval capacity was 3 and 0-1 were running
+almost all night. Keeping the server up between a full sweep and its
+replicate was considered and rejected: a warm GPU container idles at
+$3-4/h and evals are rarely back to back, so a 2-minute window would cost
+more than the five replicate loads it saves. The lever that remains is the
+agents' edit time, which is model latency, not harness.
+
 ## Known gaps, worth fixing before scaling to ten
 
 - **Equivalence is a tool, not a gate.** build-4's a01 (query-aware sparse KV
