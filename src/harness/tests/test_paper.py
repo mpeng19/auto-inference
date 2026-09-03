@@ -34,10 +34,15 @@ def test_compile_uses_tectonic_when_present_and_keeps_tex_otherwise(tmp_path, mo
     monkeypatch.setattr(shutil, "which", lambda name: None)
     assert pp.compile_tex(tex) is None and "not installed" in (d / "paper.log").read_text()
     fake = tmp_path / "tectonic"
-    fake.write_text("#!/bin/sh\nout=$(dirname \"$4\")/PAPER.pdf\nprintf '%%PDF-1.4 fake' > \"$out\"\n")
+    # Like the real binary, refuse a -o directory that does not exist from
+    # the cwd it is run in: a relative paper path handed through unchanged is
+    # what left build-4's two papers as .tex.
+    fake.write_text("#!/bin/sh\n[ -d \"$3\" ] || { echo 'output directory does not exist' >&2; exit 1; }\n"
+                    "out=$(dirname \"$4\")/PAPER.pdf\nprintf '%%PDF-1.4 fake' > \"$out\"\n")
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setattr(shutil, "which", lambda name: str(fake) if name == "tectonic" else None)
-    out = pp.compile_tex(tex)
+    monkeypatch.chdir(tmp_path)
+    out = pp.compile_tex(tex.relative_to(tmp_path))
     assert out == d / "paper.pdf" and out.read_bytes().startswith(b"%PDF")
     assert pp.find_papers(tmp_path / "..") == {} or True
     assert pathlib.Path(out).is_file()

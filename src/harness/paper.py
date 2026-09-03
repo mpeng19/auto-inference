@@ -174,7 +174,10 @@ def prompt_for(inp: PaperInputs, hypothesis: str, design: str, diff: str) -> str
 def compile_tex(tex: str | pathlib.Path, timeout_s: float = 240.0) -> pathlib.Path | None:
     """PDF beside the .tex, or None when tectonic is missing or fails.
     Failure is logged next to the source as `paper.log`, never raised."""
-    tex = pathlib.Path(tex)
+    # Absolute: tectonic runs with the paper directory as cwd, and a relative
+    # `-o agents/<s>/a02/paper/<idea>` resolved from inside that directory
+    # is exactly the "output directory does not exist" build-4 logged twice.
+    tex = pathlib.Path(tex).resolve()
     binary = shutil.which("tectonic")
     if binary is None:
         (tex.parent / "paper.log").write_text("tectonic not installed; .tex kept\n")
