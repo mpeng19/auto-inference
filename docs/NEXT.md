@@ -195,6 +195,34 @@ runs the daemon under `caffeinate -i -s`, which prevents idle and AC sleep
 but **not clamshell sleep** -- leave the lid open, or attach an external
 display. The status line and TUI print `host slept ~N min` when it happens.
 
+## What build-4 found so far (2026-09-03, five opus agents, still running)
+
+Two replicated wins against runner-v3 stock ($8.32/1k, N*=12), both rank 1/12:
+
+| agent | idea | full / replicate | vs stock | equivalence (prefill / decode) | gates |
+|---|---|---|---|---|---|
+| a02 | SLO-budgeted shrink-only chunked-prefill sizer | $6.94 / $6.82 | -16.6% | 1.0000 / 1.0000 | gsm8k .64 longbench .49 mmlu .66 |
+| a01 | query-aware top-k KV pages | $5.85 / $7.70 | -7.5% | 1.0000 / 0.7721 | gsm8k .66 longbench .52 mmlu .71 |
+
+a02 is the one to trust. Same launch line as stock, every one of the 32
+long equivalence prompts generates the same 64 tokens, and an ablation of
+its own kill switch (`SGLANG_DISABLE_ADAPTIVE_CHUNK=1`, `runs/a02-ablate-kill`)
+prices at $8.30: the sizer is the entire effect. It works by cutting decode
+stalls, mean TPOT 19.4 -> 16.4 ms at the same batch, with GPU forward time
+122.6 -> 109.7 s over the same 123 s wall while serving more tokens. The
+agent's DESIGN.md says the sizer is a "provable no-op on a healthy batch";
+the ablation says otherwise, so read the paper's mechanism section against
+the numbers. Open question: why decode forward time per output token fell
+18% (2.17 -> 1.78 ms) when the launch line, batch and hit rate did not move.
+
+a01 holds every gate and changes what the model says on 38% of long
+prompts; see the equivalence gap below.
+
+Five ideas closed as losses or errors (attention sinks -10.6% at screen but
+LongBench 53 -> 28; P-greedy nested KV pages -6.2% at screen; low-rank
+latent KV 1% then 57% quality; aged-KV merging +19%; two two-hour edit
+timeouts).
+
 ## Known gaps, worth fixing before scaling to ten
 
 - **Equivalence is a tool, not a gate.** build-4's a01 (query-aware sparse KV
