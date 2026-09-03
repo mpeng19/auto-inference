@@ -268,7 +268,7 @@ class Simulator:
     # A speed win that costs accuracy is not a win, and the price model cannot
     # see the difference. Run before load on an idle server, so this measures
     # the model rather than the scheduler.
-    quality_suites: tuple[str, ...] = ("gsm8k", "longbench")
+    quality_suites: tuple[str, ...] = ("gsm8k", "longbench", "mmlu")
     quality_n: int = 100
     quality_baseline: dict = field(default_factory=dict)
     quality_tolerance_pp: float = 10.0   # see measure/quality.regressed

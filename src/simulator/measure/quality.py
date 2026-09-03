@@ -57,6 +57,17 @@ LONGBENCH_PROMPT = (
     "and do not output any other words.\n\nThe following are given passages.\n"
     "{context}\n\nAnswer the question based on the given passages. Only give me "
     "the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:")
+# The gate's prompt. The model reasons before it answers whatever it is told,
+# and a 32-token budget cut every answer off mid-reasoning (stock scored 6%,
+# and the record showed "We need answer question... Need use passages...").
+# So, as with GSM8K: room to reason, and the answer on its own marked line.
+LONGBENCH_QA_PROMPT = (
+    "Answer the question based on the given passages. Think briefly if you "
+    "must, then give the final answer on its own last line in the form "
+    "'#### <answer>', with no other words on that line.\n\n"
+    "The following are given passages.\n{context}\n\n"
+    "Question: {input}\n")
+LONGBENCH_MAX_TOKENS = 256
 
 GSM8K_PROMPT = (
     "Solve the problem. Think step by step, then give the final numeric answer "
@@ -134,9 +145,9 @@ def load(suite: str = "gsm8k", n: int = 100, seed: int = 0) -> list[Item]:
         rows = load_longbench_rows()
         random.Random(seed).shuffle(rows)
         return [Item(f"longbench-{i}",
-                     LONGBENCH_PROMPT.format(context=_truncate_middle(r["context"], LONGBENCH_MAX_CHARS),
-                                             input=r["input"]),
-                     "\x1f".join(_answers(r)), max_tokens=32)
+                     LONGBENCH_QA_PROMPT.format(context=_truncate_middle(r["context"], LONGBENCH_MAX_CHARS),
+                                                input=r["input"]),
+                     "\x1f".join(_answers(r)), max_tokens=LONGBENCH_MAX_TOKENS)
                 for i, r in enumerate(rows[:n])]
 
     p = hf_hub_download(MMLU_REPO, MMLU_FILE, repo_type="dataset",
@@ -198,11 +209,33 @@ def _qa_normalise(s: str) -> list[str]:
     return [w for w in s.split() if w not in ("a", "an", "the")]
 
 
+def _last_line(text: str) -> str:
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def suite_digest(suite: str) -> str:
+    """What decides a suite's score besides the stack: dataset revision,
+    prompt, budget. Part of the quality cache key, so a prompt change never
+    serves a stale score."""
+    import hashlib
+    import json
+
+    if suite == "longbench":
+        body = [LONGBENCH_REV, list(LONGBENCH_SETS), LONGBENCH_MAX_CHARS,
+                LONGBENCH_QA_PROMPT, LONGBENCH_MAX_TOKENS]
+    elif suite == "mmlu":
+        body = [MMLU_REV, MMLU_PROMPT, 4]
+    else:
+        body = [GSM8K_REV, GSM8K_PROMPT, 320]
+    return hashlib.sha256(json.dumps(body).encode()).hexdigest()[:10]
+
+
 def qa_f1(prediction: str, golds: list[str]) -> float:
     """Token F1 against the best of several gold answers, LongBench-style."""
     from collections import Counter
 
-    pred = _qa_normalise(prediction.strip().split("\n")[0])
+    pred = _qa_normalise(prediction.strip())
     best = 0.0
     for g in golds:
         gold = _qa_normalise(g)
@@ -220,7 +253,8 @@ def score(suite: str, output: str, gold: str) -> float:
     """1.0 / 0.0 for exact suites; token F1 in [0, 1] for long-context QA.
     `correct` sums these, so `accuracy` is mean F1 there."""
     if suite == "longbench":
-        return qa_f1(output, gold.split("\x1f"))
+        text = output.split("####")[-1] if "####" in output else _last_line(output)
+        return qa_f1(text, gold.split("\x1f"))
     if suite == "mmlu":
         m = re.search(r"\b([ABCD])\b", output.strip().upper())
         return float(bool(m) and m.group(1) == gold.strip().upper())

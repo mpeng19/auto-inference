@@ -453,3 +453,29 @@ async def stop_profile(base_url: str) -> dict:
             return {"status": r.status, "body": (await r.text())[:400]}
     except Exception as e:
         return {"status": 0, "body": f"{type(e).__name__}: {e}"}
+
+
+async def wait_idle(base_url: str, timeout_s: float = 90.0, poll_s: float = 1.0) -> dict:
+    """Wait until the server reports no running and no queued requests.
+
+    Between concurrency levels. A level ends at its deadline with replies
+    still streaming; the client cancels them and the server aborts them on
+    disconnect, but not instantly. Starting the next level over that tail
+    inflates its batch and its GPU-seconds, which is what the first
+    deadline-cut baseline showed (running batch 10.0 with 8 users). Returns
+    what it saw, so a level record says whether it started clean.
+    """
+    import asyncio
+
+    t0 = time.time()
+    last = None
+    while time.time() - t0 < timeout_s:
+        snap = await scrape(base_url)
+        if snap is not None:
+            r = snap.gauges.get("sglang:num_running_reqs") or 0
+            q = snap.gauges.get("sglang:num_queue_reqs") or 0
+            last = {"running": r, "queued": q}
+            if r <= 0 and q <= 0:
+                return {"clean": True, "waited_s": round(time.time() - t0, 1), **last}
+        await asyncio.sleep(poll_s)
+    return {"clean": False, "waited_s": round(time.time() - t0, 1), **(last or {})}

@@ -143,7 +143,7 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
           target_in: int = 0, target_out: int = 0, n_sessions: int = 300,
           canaries: bool = True, note: str = "", allow_stale: bool = False,
           profile_level: int = 0, profile_steps: int = 20,
-          quality_suites: tuple = ("gsm8k",), quality_n: int = 50,
+          quality_suites: tuple = ("gsm8k", "longbench", "mmlu"), quality_n: int = 100,
           quality_baseline: dict | None = None,
           quality_tolerance_pp: float = 10.0) -> dict:
     """Sweep concurrent conversations; return one record per level.
@@ -269,7 +269,9 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
                     # it is scored once per (stack, suite, n) and reused: a
                     # candidate promoted from a screen does not pay for GSM8K
                     # and LongBench twice, and stock never pays again.
-                    cache = pathlib.Path(f"/results/quality/{st.digest}-{suite}-{quality_n}.json")
+                    cache = pathlib.Path(
+                        f"/results/quality/{st.digest}-{suite}-{quality_n}-"
+                        f"{quality_mod.suite_digest(suite)}.json")
                     if cache.is_file():
                         cached = json.loads(cache.read_text())
                         q = quality_mod.QualityResult(
@@ -318,6 +320,11 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
                             {"level": n_users, "dir": pdir,
                              "start": asyncio.run(srv.start_profile(
                                  SERVER_URL, pdir, profile_steps))})
+                    # Nothing from the previous level may still be decoding
+                    # when this one starts: levels end at the deadline and
+                    # cancel their in-flight replies, and the first cut
+                    # without this wait showed a running batch of 10 at N=8.
+                    flushed = asyncio.run(srv.wait_idle(SERVER_URL, timeout_s=90.0))
                     before = asyncio.run(srv.scrape(SERVER_URL))
                     t0 = time.perf_counter()
                     res, batch = asyncio.run(measure(n_users, seconds_per_level))
@@ -335,6 +342,7 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
                     lvl = {
                         "n_users": n_users, "repeat": rep,
                         "wall_s": round(wall, 1),
+                        "flush": flushed,
                         "goodput_rps": m["goodput_rps"],
                         "throughput_rps": m["throughput_rps"],
                         "good_frac": m["good_frac"], "n_failed": m["n_failed"],
@@ -511,6 +519,9 @@ def workbench(stack: dict, script: str, timeout_s: int = 600,
     # `_write_helpers` covers the other end, since Python puts the script's own
     # directory ahead of PYTHONPATH.
     env = dict(os.environ)
+    # The candidate's environment (serving.json "env") applies here too, or an
+    # env-gated numerics change scores as exactly stock in the workbench.
+    env.update({str(k): str(v) for k, v in (st.env or {}).items()})
     site = str(sglang_root().parent)
     env["PYTHONPATH"] = os.pathsep.join(
         [site, env.get("PYTHONPATH", "")]).rstrip(os.pathsep)

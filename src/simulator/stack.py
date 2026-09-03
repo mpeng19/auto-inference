@@ -235,7 +235,10 @@ def _git_apply(root: pathlib.Path, rel: str, patch: str) -> None:
     with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as f:
         f.write(patch if patch.endswith("\n") else patch + "\n")
         p = f.name
-    r = subprocess.run(["git", "apply", "--unsafe-paths", f"--directory={root}",
-                        "-p1", p], capture_output=True, text=True, cwd=str(root))
+    try:
+        r = subprocess.run(["git", "apply", "--unsafe-paths", f"--directory={root}",
+                            "-p1", p], capture_output=True, text=True, cwd=str(root))
+    finally:
+        pathlib.Path(p).unlink(missing_ok=True)
     if r.returncode != 0:
         raise RuntimeError(f"patch for {rel} did not apply: {r.stderr.strip()}")

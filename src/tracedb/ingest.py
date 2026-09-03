@@ -7,7 +7,9 @@ from pathlib import Path
 
 from .store import TraceStore
 
-_GPU_CATS = ("kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation", "cuda", "mps")
+# No bare "cuda": it matched the CPU-side cuda_runtime/cuda_driver spans and
+# could classify a launch thread as GPU on its first span.
+_GPU_CATS = ("kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation", "mps")
 _STEP_RE = re.compile(r"ProfilerStep#?\s*(\d+)")
 
 
@@ -52,7 +54,9 @@ def ingest(trace_path: str | Path, db_path: str | Path) -> dict:
         tid = ev.get("tid", 0)
         track = st.track_id(ev.get("pid", 0), tid, kind=kind)
         args = ev.get("args") or {}
-        corr = args.get("correlation") or args.get("External id")
+        corr = args.get("correlation")
+        if corr is None:
+            corr = args.get("External id")        # id 0 is a real id
         rows.append((st.name_id(name), track, float(ts), float(dur), cat, corr))
         t_min, t_max = min(t_min, ts), max(t_max, ts + dur)
         n += 1
