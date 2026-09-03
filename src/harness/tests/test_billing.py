@@ -11,11 +11,19 @@ def test_the_line_says_usage_credits_and_the_coming_payment():
                         "  ·  next payment $372.92 on 2026-10-01")
 
 
-def test_fetch_is_none_without_modal_and_never_raises():
-    # The suite blocks sockets; a token may or may not exist. Either way: None, quickly.
+def test_fetch_is_none_when_modal_fails_and_never_raises(monkeypatch):
+    import sys
+    import types
+
+    class Workspace:
+        @staticmethod
+        def from_context():
+            raise RuntimeError("no token")
+
+    monkeypatch.setitem(sys.modules, "modal", types.SimpleNamespace(Workspace=Workspace))
     t0 = time.time()
     assert billing.fetch(timeout_s=5.0) is None
-    assert time.time() - t0 < 6.0
+    assert time.time() - t0 < 1.0
 
 
 def test_cached_refreshes_in_the_background_and_keeps_the_last_value():
