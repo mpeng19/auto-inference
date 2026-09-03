@@ -35,6 +35,14 @@ class Result:
     ts: float
     metrics: dict = field(default_factory=dict)
     tier: str = "full"
+    # What backs the verdict beyond the price (see `evidence_for`): the
+    # ablation for this stack, the decode agreement, whether the win was
+    # measured twice, whether the accuracy suites were scored. `publishable`
+    # is the owner's bar -- a win is publishable only when it is *explained*
+    # -- and `pub` the one-word reason it is or is not (`publishable`).
+    evidence: dict = field(default_factory=dict)
+    publishable: bool = False
+    pub: str = "no"
 
     @property
     def title(self) -> str:
@@ -49,7 +57,7 @@ def leaderboard(root: str | pathlib.Path) -> list[Result]:
         return []
     c = sqlite3.connect(db)
     c.row_factory = sqlite3.Row
-    tiers = _tiers_from_traces(root)
+    tiers, full_runs = _evals_from_traces(root)
     out = []
     for r in c.execute("SELECT * FROM experiments ORDER BY ts"):
         m = json.loads(r["metrics"] or "{}")
@@ -72,15 +80,23 @@ def leaderboard(root: str | pathlib.Path) -> list[Result]:
             if isinstance(row, dict) and row.get("suite"):
                 q = f"{row['suite']} {row.get('accuracy', 0):.0%}"
         share = m.get("share_per_node")
+        digest = r["stack_digest"] or ""
+        verdict = r["verdict"] or ""
+        ev = evidence_for(root, r["agent_id"] or "", digest, baseline=b0,
+                          replicated=full_runs.get(digest, 0) >= 2 or _replicated_on_disk(
+                              pathlib.Path(root) / (r["agent_id"] or ""), digest),
+                          verdict=verdict, metrics=m)
+        ok_pub, why = publishable(verdict, ev)
         out.append(Result(
-            experiment_id=r["id"], agent_id=r["agent_id"] or "", verdict=r["verdict"] or "",
+            experiment_id=r["id"], agent_id=r["agent_id"] or "", verdict=verdict,
             hypothesis=r["hypothesis"] or "", summary=r["summary"] or "",
             bill_per_1k=bill if isinstance(bill, (int, float)) else None,
             delta_pct=delta, rank=rank,
             share_pct=(share * 100 if isinstance(share, (int, float)) else None),
             n_star=m.get("n_star"), quality=q, tier=m.get("tier") or "full",
-            stack_digest=r["stack_digest"] or "",
-            trace_ref=r["trace_ref"] or "", ts=r["ts"] or 0.0, metrics=m))
+            stack_digest=digest,
+            trace_ref=r["trace_ref"] or "", ts=r["ts"] or 0.0, metrics=m,
+            evidence=ev, publishable=ok_pub, pub=why))
     c.close()
     priced = sorted((x for x in out if x.delta_pct is not None), key=lambda x: x.delta_pct)
     rest = sorted((x for x in out if x.delta_pct is None), key=lambda x: -x.ts)
@@ -91,16 +107,181 @@ def _tiers_from_traces(root: str | pathlib.Path) -> dict[str, str]:
     """stack digest -> the tier of the *last* eval_result for it in the
     traces. A screen that was promoted has a later full result, which is the
     one memory recorded."""
-    out: dict[str, str] = {}
+    return _evals_from_traces(root)[0]
+
+
+def _evals_from_traces(root: str | pathlib.Path) -> tuple[dict[str, str], dict[str, int]]:
+    """One pass over the traces' eval_result turns: (digest -> last tier,
+    digest -> priced full-tier runs). Two full prices for one digest is a
+    replicated measurement (`loop.run`: a win is measured twice and the
+    worse kept), which is the first thing `publishable` asks for."""
+    tiers: dict[str, str] = {}
+    full: dict[str, int] = {}
     for tf in tr.find(root):
         try:
             for t in tr.read(tf.path, kinds=("eval_result",)):
-                tier = (t.get("data") or {}).get("tier")
-                if tier and t.get("name"):
-                    out[t["name"]] = tier
+                d = t.get("data") or {}
+                tier, name = d.get("tier"), t.get("name")
+                if tier and name:
+                    tiers[name] = tier
+                    if tier == "full" and d.get("bill_per_1k") is not None:
+                        full[name] = full.get(name, 0) + 1
         except Exception:
             continue
-    return out
+    return tiers, full
+
+
+def _replicated_on_disk(agent_root: pathlib.Path, digest: str) -> bool:
+    """A `runs/attempt-NNN-repK/` whose `stack.json` is this digest and
+    whose `result.json` priced: the replicate, for a run whose traces are
+    gone or were never written by this harness version."""
+    if not digest or not agent_root.is_dir():
+        return False
+    for d in agent_root.glob("runs/attempt-*-rep*"):
+        try:
+            st = json.loads((d / "stack.json").read_text())
+            res = json.loads((d / "result.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if _stack_digest_of(st) == digest and res.get("ok"):
+            return True
+    return False
+
+
+def _stack_digest_of(stack_dict: dict) -> str:
+    try:
+        from simulator import InferenceStack
+
+        return InferenceStack.from_dict(stack_dict).digest
+    except Exception:
+        return ""
+
+
+# ── evidence: what backs a verdict beyond its price ─────────────────────
+
+# `loop.IterativeAgent.NOISE_PCT`, repeated so this module stays a reader of
+# files and never imports the agent loop.
+NOISE_PCT = 3.0
+
+
+def evidence_for(root: str | pathlib.Path, agent_id: str, stack_digest: str, *,
+                 baseline: float | None = None, replicated: bool = False,
+                 verdict: str = "", metrics: dict | None = None) -> dict:
+    """Everything on disk that bears on whether a result is *explained*.
+
+    Read from the agent directory alone -- no memory.db -- so the paper step
+    can ask for it with only a workspace and a digest. Keys:
+
+    - `ablation`: the latest `ablation.json` for this stack (`tools.ablate`),
+      or None; `explains`: whether its disabled price sits within `NOISE_PCT`
+      of baseline, i.e. the mechanism accounts for the delta.
+    - `decode_agreement`, `lossless`, `equivalence_path`: the latest
+      equivalence record for this stack (`tools.equivalence` writes them
+      under `<agent>/equivalence/`); None when never run.
+    - `replicated`: measured twice at full tier.
+    - `gates`: "held" when the accuracy suites were scored and did not
+      reject (a rejected stack never records a win), "not scored" when no
+      suite ran, "failed" otherwise.
+    - `profile_db`: the tracedb file of the full sweep, when captured.
+    """
+    agent = pathlib.Path(root) / agent_id if agent_id else pathlib.Path(root)
+    m = metrics or {}
+    abl = latest_ablation(agent, stack_digest)
+    eqv = latest_equivalence(agent, stack_digest)
+    quality = [q for q in (m.get("quality") or ()) if isinstance(q, dict) and q.get("suite")]
+    if not quality:
+        gates = "not scored"
+    elif verdict in ("loss", "invalid"):
+        gates = "failed"
+    else:
+        gates = "held"
+    return {"ablation": abl, "explains": ablation_explains(abl, baseline) if abl else None,
+            "decode_agreement": (eqv or {}).get("decode_agreement"),
+            "lossless": (eqv or {}).get("lossless"),
+            "equivalence_path": (eqv or {}).get("path"),
+            "replicated": bool(replicated), "gates": gates,
+            "profile_db": m.get("profile_db") or ""}
+
+
+def publishable(verdict: str, ev: dict) -> tuple[bool, str]:
+    """The owner's bar: a win, measured twice, with the accuracy suites
+    held, and an ablation in which switching the mechanism off returns the
+    price to within noise of baseline. Returns (yes, label) where the label
+    is the `pub` column: yes / no / no-ablation / no-replicate."""
+    if verdict != "win":
+        return False, "no"
+    if not ev.get("replicated"):
+        return False, "no-replicate"
+    if not ev.get("ablation"):
+        return False, "no-ablation"
+    if ev.get("gates") != "held" or not ev.get("explains"):
+        return False, "no"
+    return True, "yes"
+
+
+def ablation_explains(abl: dict | None, baseline: float | None) -> bool | None:
+    """Does this ablation say the mechanism is the delta? The record's own
+    answer when it has one (written against the fleet's baseline at its
+    tier); else recomputed from its disabled price and `baseline`."""
+    if not abl:
+        return None
+    if isinstance(abl.get("explains"), bool):
+        return abl["explains"]
+    off = (abl.get("disabled") or {}).get("bill_per_1k")
+    base = abl.get("baseline_bill_per_1k") or baseline
+    if not (isinstance(off, (int, float)) and isinstance(base, (int, float)) and base):
+        return None
+    return abs((off - base) / base * 100) <= NOISE_PCT
+
+
+def latest_ablation(agent_root: str | pathlib.Path, stack_digest: str) -> dict | None:
+    """The newest `ablation.json` under `<agent>/ablations/*/` or beside a
+    run (`<agent>/runs/*/`) whose `stack_digest` is this one."""
+    agent = pathlib.Path(agent_root)
+    best: tuple[float, dict] | None = None
+    for f in [*agent.glob("ablations/*/ablation.json"), *agent.glob("runs/*/ablation.json")]:
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict) or d.get("stack_digest") != stack_digest:
+            continue
+        ts = float(d.get("ts") or f.stat().st_mtime)
+        if best is None or ts > best[0]:
+            d.setdefault("path", str(f))
+            best = (ts, d)
+    return best[1] if best else None
+
+
+def latest_equivalence(agent_root: str | pathlib.Path, stack_digest: str) -> dict | None:
+    """The newest equivalence record for this stack: `<agent>/equivalence/
+    *.json` (written by `tools.equivalence`), else a `workbench-*/result.json`
+    that carries one. Returns `{decode_agreement, lossless, top1_agreement,
+    summary, path}` or None."""
+    agent = pathlib.Path(agent_root)
+    best: tuple[float, dict] | None = None
+    for f in [*agent.glob("equivalence/*.json"), *agent.glob("workbench-*/result.json")]:
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict) or d.get("stack_digest") != stack_digest:
+            continue
+        res = d.get("result") if isinstance(d.get("result"), dict) else {}
+        dec = d.get("decode_agreement", res.get("decode_agreement"))
+        if dec is None and "top1_agreement" not in res:
+            continue
+        lossless = d.get("lossless", res.get("lossless"))
+        if lossless is None and isinstance(dec, (int, float)):
+            from simulator.measure.equivalence import MIN_DECODE_AGREEMENT
+
+            lossless = dec >= MIN_DECODE_AGREEMENT
+        ts = float(d.get("ts") or f.stat().st_mtime)
+        if best is None or ts > best[0]:
+            best = (ts, {"decode_agreement": dec, "lossless": lossless,
+                         "top1_agreement": res.get("top1_agreement"),
+                         "summary": d.get("summary") or "", "path": str(f)})
+    return best[1] if best else None
 
 
 def diff_for(root: str | pathlib.Path, res: Result, limit: int = 12000) -> str:
@@ -123,13 +304,42 @@ def summary_text(root: str | pathlib.Path, k: int = 8) -> str:
     rows = leaderboard(root)
     if not rows:
         return "no experiments recorded yet"
-    lines = [f"{len(rows)} experiments; best first"]
+    lines = [f"{len(rows)} experiments; best first  "
+             "(pub: publishable = win, replicated, gates held, ablation explains it)"]
     for r in rows[:k]:
         d = "-" if r.delta_pct is None else f"{r.delta_pct:+.1f}%"
         bill = "-" if r.bill_per_1k is None else f"${r.bill_per_1k:.2f}/1k"
-        lines.append(f"  {r.verdict:8s} {r.tier:6s} {d:>7} {bill:>10} {r.rank or '-':>6}  "
+        lines.append(f"  {r.verdict:8s} {r.pub:12s} {r.tier:6s} {d:>7} {bill:>10} {r.rank or '-':>6}  "
                      f"{r.agent_id}  {r.title}")
     return "\n".join(lines)
+
+
+def evidence_text(r: Result) -> str:
+    """The evidence behind one result, as the lines a detail pane shows."""
+    ev = r.evidence or {}
+    out = [f"publishable: {r.pub}",
+           f"replicated: {'yes' if ev.get('replicated') else 'no'}   gates: {ev.get('gates', '-')}"]
+    abl = ev.get("ablation")
+    if abl:
+        on = (abl.get("as_is") or {}).get("bill_per_1k")
+        off = (abl.get("disabled") or {}).get("bill_per_1k")
+        env = ", ".join(f"{k}={v}" for k, v in sorted((abl.get("env") or {}).items()))
+        exp = abl.get("explained_pct")
+        out.append(f"ablation ({abl.get('tier', '?')}, {env}): as is "
+                   f"{'-' if on is None else f'${on:.2f}'}/1k, disabled "
+                   f"{'-' if off is None else f'${off:.2f}'}/1k; "
+                   + ("explains " + (f"{exp:.0f}% of the delta" if exp is not None else "?")
+                      + ("; within" if ev.get("explains") else "; outside")
+                      + f" the {NOISE_PCT:.0f}% noise floor"))
+    else:
+        out.append("ablation: none (harness tool ablate --env KEY=VAL)")
+    dec = ev.get("decode_agreement")
+    if dec is not None:
+        out.append(f"equivalence: decode agreement {dec:.4f}, "
+                   + ("lossless" if ev.get("lossless") else "lossy"))
+    else:
+        out.append("equivalence: not run")
+    return "\n".join(out)
 
 
 # ── what the run directory says about the fleet itself ──────────────────

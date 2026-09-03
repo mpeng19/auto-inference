@@ -220,6 +220,7 @@ class FleetApp(App):
         self.baseline_text = ""
         self.detail_text = ""
         self.results_text = ""
+        self.result_detail_text = ""
         self.answer_text = ""
         self._asker = None
         self._results = []
@@ -260,8 +261,11 @@ class FleetApp(App):
                        ("$ modal", 9), ("tokens", 8)):
             t.add_column(col, width=w)
         r = self.query_one("#results", DataTable)
-        for col, w in (("verdict", 8), ("tier", 6), ("Δ%", 7), ("$/1k", 7), ("rank", 6),
-                       ("share", 7), ("N*", 4), ("agent", 6), ("hypothesis", 40)):
+        # `pub`: publishable -- a replicated win with the gates held and an
+        # ablation that explains it (`results.publishable`); the label says
+        # what is missing when it is not.
+        for col, w in (("verdict", 8), ("pub", 12), ("tier", 6), ("Δ%", 7), ("$/1k", 7),
+                       ("rank", 6), ("share", 7), ("N*", 4), ("agent", 6), ("hypothesis", 40)):
             r.add_column(col, width=w)
         self.set_interval(REFRESH_S, self.refresh_view)
         # Modal's own bill, so the dollars on this screen can be read against
@@ -546,7 +550,7 @@ class FleetApp(App):
         except Exception:
             rows = []
         self._results = rows
-        fingerprint = [(r.experiment_id, r.verdict, r.tier, r.delta_pct, r.bill_per_1k,
+        fingerprint = [(r.experiment_id, r.verdict, r.pub, r.tier, r.delta_pct, r.bill_per_1k,
                         r.rank, r.share_pct, r.n_star, r.agent_id, r.title) for r in rows]
         if fingerprint == getattr(self, "_results_rows", None):
             return
@@ -561,8 +565,9 @@ class FleetApp(App):
             style = {"win": "bold green", "loss": "red", "neutral": "", "invalid": "dim"}.get(r.verdict, "")
             # Colour follows the verdict, not the sign: a -2% inside the
             # noise floor is neutral and must not look like a win.
-            t.add_row(Text(r.verdict, style=style), r.tier,
-                      Text(d, style=style),
+            t.add_row(Text(r.verdict, style=style),
+                      Text(r.pub, style="bold green" if r.publishable else "dim"),
+                      r.tier, Text(d, style=style),
                       bill, r.rank or "-", share, str(r.n_star or "-"),
                       r.agent_id, r.title, key=r.experiment_id)
         if cur is not None and t.row_count:
@@ -592,6 +597,11 @@ class FleetApp(App):
         x.append(f"{r.summary or '-'}\n", style="dim")
         if r.quality:
             x.append(f"quality {r.quality}\n", style="dim")
+        from ..results import evidence_text
+
+        x.append("\nevidence\n", style="bold")
+        x.append(evidence_text(r) + "\n",
+                 style="green" if r.publishable else "dim")
         if r.rank:
             x.append(f"rank {r.rank} on the OpenRouter board; one node serves "
                      f"{r.share_pct:.2f}% of the market\n", style="dim")
@@ -604,6 +614,7 @@ class FleetApp(App):
         else:
             x.append("\nno files on disk for this result (not a completed run)\n", style="dim")
         self.result_artifacts = arts
+        self.result_detail_text = x.plain
         d.update(x)
 
     def on_data_table_row_highlighted(self, event) -> None:

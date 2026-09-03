@@ -107,6 +107,8 @@ def cmd_start(a) -> int:
         profile_level=a.profile_level,
         seeds=tuple(s for s in (a.seed or [])),
         baseline=json.loads(a.baseline) if a.baseline else {})
+    if a.base:
+        cfg = cfg.with_base(a.base)          # refuses here, not in the daemon's log
     cfg_path = root / "fleet.json"
     cfg.save(cfg_path)
 
@@ -132,6 +134,8 @@ def cmd_start(a) -> int:
     print(f"agents    {a.agents}   eval capacity {a.evals}"
           + (f"   [{', '.join(fakes)}]" if fakes else ""))
     print(f"root      {root}")
+    if cfg.base:
+        print(f"base      {cfg.base_digest}  {cfg.base_label}  ({cfg.base})")
     print(f"pid       {proc.pid}   log {root / 'daemon.log'}")
     print(f"\nwatch:    uv run harness --session {session_id} tui")
     print(f"stop:     uv run harness --session {session_id} stop")
@@ -166,6 +170,20 @@ def _mark_dead(v):
     return v
 
 
+def _base_of(root: str) -> str:
+    """`<digest> <label>` of the stack a fleet compounds on, from its
+    fleet.json; empty for a fleet that started from stock."""
+    if not root:
+        return ""
+    try:
+        d = json.loads((pathlib.Path(root) / "fleet.json").read_text())
+    except (OSError, ValueError):
+        return ""
+    if not d.get("base"):
+        return ""
+    return " ".join(t for t in (d.get("base_digest") or "?", d.get("base_label") or "") if t)
+
+
 def cmd_status(a) -> int:
     v = _resolve(_store(a), a.session)
     if v is None:
@@ -187,6 +205,9 @@ def cmd_status(a) -> int:
           f"   {v.tokens.total:,} tokens   updated {age:.0f}s ago")
     if v.note:
         print(f"note:  {v.note}")
+    base = _base_of(root)
+    if base:
+        print(f"base:  {base}")
     from .billing import fetch as fetch_bill
 
     b = fetch_bill(timeout_s=8.0)
@@ -215,8 +236,10 @@ def cmd_sessions(a) -> int:
     for v in _store(a).sessions(limit=a.limit):
         root = _root_for(a, v)
         usd = rs.fleet_modal_spend(root, v.cost_usd) if root else v.cost_usd
+        base = _base_of(root)
         print(f"{v.session_id:<22}{v.phase:<10}{len(v.agents):>3} agents"
-              f"  ${usd:>8.2f}  {v.tokens.total:>12,} tok")
+              f"  ${usd:>8.2f}  {v.tokens.total:>12,} tok"
+              + (f"  base {base.split()[0]}" if base else ""))
     return 0
 
 
@@ -388,7 +411,36 @@ def cmd_delete(a) -> int:
 
 def cmd_tool(a) -> int:
     from . import tools
+
+    if a.action == "ablate":
+        return _tool_ablate(tools, a)
     return tools.main(a.action, a)
+
+
+def _tool_ablate(tools, a) -> int:
+    """`harness tool ablate --env K=V --tier screen`: the workspace's stack
+    swept once per env setting, so an agent can price a flag-gated change
+    with the flag on and off. Dispatched here because `tools.ablate` is
+    landing separately; until it does, say so instead of a traceback."""
+    fn = getattr(tools, "ablate", None)
+    if fn is None:
+        print("harness tool ablate is not available in this build: "
+              "harness.tools.ablate is missing", file=sys.stderr)
+        return 2
+    env = {}
+    for kv in a.env or []:
+        if "=" not in kv:
+            print(f"--env expects KEY=VAL, got {kv!r}", file=sys.stderr)
+            return 2
+        k, v = kv.split("=", 1)
+        env[k.strip()] = v
+    rep = fn(workspace=a.workspace, env=env, tier=a.tier)
+    if a.json or not isinstance(rep, dict):
+        print(json.dumps(rep, indent=1, default=str))
+    else:
+        for k, v in rep.items():
+            print(f"{k}: {v if not isinstance(v, (dict, list)) else json.dumps(v, default=str)}")
+    return 0 if not isinstance(rep, dict) or rep.get("ok", True) else 1
 
 
 # ── ideas ────────────────────────────────────────────────────────────────
@@ -743,9 +795,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="review outcomes and stash reusable tools under <root>/tools/")
     s.add_argument("--seed", action="append", help="a starting hypothesis; repeatable")
     s.add_argument("--baseline", default="",
-                   help='stock, measured on this grid; required. JSON: '
+                   help='stock (or the base), measured on this grid; required. JSON: '
                         '{"bill_per_1k": 12.23, "quality": {"gsm8k": 0.69}, '
                         '"screen": {"bill_per_1k": 17.30}}')
+    s.add_argument("--base", default="",
+                   help="compound: every agent starts from this saved stack instead of "
+                        "stock (a run directory, a stack.json, or a mirrored sglang/ "
+                        "tree); --baseline is then that stack's own report")
     s.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="fake the GPU evaluations (saves dollars, still runs "
                         "real Claude Code agents)")
@@ -767,13 +823,17 @@ def main(argv: list[str] | None = None) -> int:
 
     tl = sub.add_parser("tool", help="tools for agents (and for reading runs)")
     tl.add_argument("action", choices=["recall", "preflight", "roofline",
-                                       "gpu-run", "equivalence", "ncu"])
+                                       "gpu-run", "equivalence", "ncu", "ablate"])
     tl.add_argument("intent", nargs="?", default="", metavar="ARG",
                     help="recall: what you are about to do; "
                          "gpu-run: the script to run")
     tl.add_argument("--kernel", default="", help="ncu: regex on kernel names to profile")
+    tl.add_argument("--env", action="append", metavar="KEY=VAL",
+                    help="ablate: a server environment variable; repeatable")
+    tl.add_argument("--tier", default="screen", choices=["screen", "full"],
+                    help="ablate: which sweep to price at (default screen)")
     tl.add_argument("--workspace", default=".",
-                    help="the agent directory (preflight, gpu-run, equivalence)")
+                    help="the agent directory (preflight, gpu-run, equivalence, ablate)")
     tl.add_argument("--timeout", type=int, default=0,
                     help="gpu-run/equivalence: seconds the script itself gets; "
                          "0 takes the tool's own default (600s, 1800s), which "

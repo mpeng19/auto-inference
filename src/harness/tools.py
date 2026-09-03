@@ -9,6 +9,7 @@ signal in front of that, cheaply.
     harness tool roofline --context 20583 --batch 12
     harness tool gpu-run bench.py --workspace agents/a01
     harness tool equivalence --workspace agents/a01
+    harness tool ablate --env SGLANG_DISABLE_X=1 --tier screen --workspace agents/a01
 
 `recall` matters most. The fleet's memory is injected into the prompt once per
 attempt, but an agent that gets a surprising result mid-task should be able to
@@ -31,6 +32,13 @@ the same numbers -- none of which has anything to do with a price, and a
 sweep is 17-35 minutes and a price. Each rents an H100 for minutes and costs
 real money: `cost_usd` comes back with the answer and lands in the agent's
 ledger (`harness.agent.ledger`), so the fleet's spend counts it.
+
+`ablate` is the most expensive and the one that makes a win *publishable*: it
+prices the stack twice, as is and with the mechanism switched off through its
+env kill switch, and says how much of the measured delta the mechanism
+accounts for. A faster stack without that number is a speed-up nobody can
+explain (`docs/methodology.md` §5f); `harness results` shows the difference
+as the `pub` column.
 """
 from __future__ import annotations
 
@@ -213,8 +221,11 @@ def _workspace_stack(workspace: str | pathlib.Path | None, source=None):
     # testable without the real 1,600-module SGLang tree. The CLI never passes one.
     ws = Workspace(workspace, source=source)
     if not ws.touched():
-        return (InferenceStack.stock(), ws.root,
-                "workspace has no changes: ran stock sglang")
+        # A compounding fleet's workspace builds on a base stack (earlier
+        # wins, `Workspace.base`); with no edits that base *is* the stack,
+        # not stock -- pricing stock here would ablate the wrong thing.
+        return (ws.base or InferenceStack.stock(), ws.root,
+                f"workspace has no changes: ran {ws.base_name}")
     ok, why = ws.check()
     if not ok:
         raise ValueError(why)
@@ -395,7 +406,226 @@ def equivalence(workspace: str | pathlib.Path | None = None,
     _ledger(root, "equivalence", rec)
     if note:
         rec["note"] = note
+    # Kept on disk under the agent, keyed by stack digest: `results.py` reads
+    # the latest one as the experiment's decode-agreement evidence, and the
+    # paper cites it. Before this the record lived only in the agent's
+    # transcript.
+    with contextlib.suppress(OSError, TypeError, ValueError):
+        import time
+
+        d = root / "equivalence"
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{rec.get('stack_digest') or 'stock'}-{int(time.time())}.json"
+        path.write_text(json.dumps(rec, indent=1, default=str))
+        rec["path"] = str(path)
     return rec
+
+
+# The fleet's two tiers, as `harness.daemon.FleetConfig` defaults them:
+# levels x seconds per level. Repeated rather than imported because this
+# runs from an agent's shell and the daemon module drags in the whole
+# orchestration layer; `test_ablate_tiers_match_the_daemon` keeps them equal.
+TIERS: dict[str, tuple[tuple[int, ...], float]] = {
+    "screen": ((8, 12), 60.0),
+    "full": ((4, 8, 12, 16, 24), 120.0),
+}
+# Run-to-run noise of a sweep (loop.IterativeAgent.NOISE_PCT): the disabled
+# stack has to land inside this band of baseline for the mechanism to be the
+# explanation, not a bystander.
+ABLATION_NOISE_PCT = 3.0
+
+
+def ablate(workspace: str | pathlib.Path | None, env: dict[str, str],
+           tier: str = "screen", baseline: float | None = None,
+           source=None) -> dict:
+    """Price the stack with and without its mechanism. **Two sweeps of real
+    money** -- a screen is ~$0.80 and ~10 minutes, a full tier ~$4.50 and
+    ~35 minutes, paid twice -- so run it once, on the diff that won.
+
+    `env` is the kill switch the diff must have: the variables that, set on
+    the server, make the new path inert (`SGLANG_DISABLE_ADAPTIVE_CHUNK=1`).
+    The workspace's stack is priced as is and with `env` merged into its
+    `serving.json` env, at the fleet's `tier` (`TIERS`), both sweeps in
+    parallel on two GPUs. The answer is the fraction of the delta against
+    baseline that disappears when the mechanism is off:
+
+        explained = (disabled - as_is) / (baseline - as_is)
+
+    and whether the disabled stack is *within noise of baseline*
+    (`ABLATION_NOISE_PCT`) -- which is what `results.py` reads as "the
+    mechanism explains the delta" and what makes a replicated win
+    publishable. A disabled stack still well under baseline means something
+    else in the diff is doing the work, and the paper cannot claim the
+    mechanism.
+
+    `baseline` is stock's bill at this tier; taken from the fleet's
+    `fleet.json` beside the agent directory when not given. Without one the
+    two prices and their delta are still reported, but not the explained
+    fraction.
+
+    Writes `<agent>/ablations/<n>/ablation.json` (both prices, N*, the delta,
+    the env, the stack digests, the cost) with each sweep's own artifacts in
+    `as-is/` and `disabled/` beside it, and returns the same record with a
+    one-paragraph `verdict`. Returns rather than raises, like the other
+    tools: a bad workspace or an unknown tier must not cost a GPU.
+    """
+    import asyncio
+    import time
+    from dataclasses import replace
+
+    env = {str(k): str(v) for k, v in (env or {}).items()}
+    if not env:
+        return {"ok": False, "error": "ablate needs the mechanism's kill switch: "
+                                      "--env KEY=VALUE (the variable that makes the "
+                                      "new path inert on the server)"}
+    if tier not in TIERS:
+        return {"ok": False, "error": f"unknown tier {tier!r}; one of {', '.join(TIERS)}"}
+    try:
+        stack, root, note = _workspace_stack(workspace, source)
+    except ValueError as e:
+        return {"ok": False, "error": f"workspace is not runnable: {e}"}
+    levels, seconds = TIERS[tier]
+    if baseline is None:
+        baseline = _fleet_baseline(root, tier)
+    disabled = replace(stack, env={**stack.env, **env},
+                       label=f"{stack.label} [ablation: "
+                             + ", ".join(f"{k}={v}" for k, v in sorted(env.items())) + "]")
+
+    from simulator import Simulator
+
+    out = _next_dir(root / "ablations")
+    dirs = {"as_is": out / "as-is", "disabled": out / "disabled"}
+    for d in dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
+    sims = {"as_is": Simulator(root_dir=dirs["as_is"], stack=stack,
+                               levels=levels, seconds_per_level=seconds),
+            "disabled": Simulator(root_dir=dirs["disabled"], stack=disabled,
+                                  levels=levels, seconds_per_level=seconds)}
+
+    async def _both():
+        # Submitted together, collected together: the point of two sweeps is
+        # one answer, and serially they would be an hour apart at full tier.
+        ids = await asyncio.gather(*(s.submit_async() for s in sims.values()))
+        return await asyncio.gather(*(s.collect(i) for s, i in zip(sims.values(), ids, strict=True)))
+
+    t0 = time.time()
+    results = dict(zip(sims, asyncio.run(_both()), strict=True))
+    from harness.agent.evaluator import sweep_cost
+
+    arms = {}
+    cost = 0.0
+    for name, res in results.items():
+        c = sweep_cost(res.record)
+        cost += c
+        arms[name] = {"ok": bool(res.ok), "reason": res.reason or "",
+                      "bill_per_1k": res.bill_per_1k, "n_star": res.n_star,
+                      "stack_digest": sims[name].stack.digest,
+                      "cost_usd": round(c, 4), "dir": str(dirs[name])}
+    rec = {"ok": all(a["ok"] for a in arms.values()),
+           "tier": tier, "levels": list(levels), "seconds_per_level": seconds,
+           "env": env, "stack_digest": stack.digest,
+           "disabled_digest": disabled.digest,
+           "baseline_bill_per_1k": baseline,
+           "as_is": arms["as_is"], "disabled": arms["disabled"],
+           "cost_usd": round(cost, 4), "elapsed_s": round(time.time() - t0, 1),
+           "gpu": (results["as_is"].record.get("serving") or {}).get("gpu", ""),
+           "ts": time.time(), "dir": str(out)}
+    rec.update(_ablation_arithmetic(rec))
+    rec["verdict"] = _ablation_verdict(rec)
+    if note:
+        rec["note"] = note
+    rec["path"] = str(out / "ablation.json")
+    (out / "ablation.json").write_text(json.dumps(rec, indent=1, default=str))
+    _ledger(root, "ablate", rec)
+    return rec
+
+
+def _ablation_arithmetic(rec: dict) -> dict:
+    """The deltas an ablation record implies. Pure, so `results.py` can
+    recompute them for a record written with a different baseline."""
+    on, off = rec["as_is"].get("bill_per_1k"), rec["disabled"].get("bill_per_1k")
+    base = rec.get("baseline_bill_per_1k")
+    out: dict = {"delta_pct": None, "total_pct": None, "explained_pct": None,
+                 "disabled_vs_baseline_pct": None, "explains": None}
+    if not (isinstance(on, (int, float)) and isinstance(off, (int, float)) and off):
+        return out
+    out["delta_pct"] = round((on - off) / off * 100, 2)      # the mechanism's own effect
+    if isinstance(base, (int, float)) and base:
+        out["total_pct"] = round((on - base) / base * 100, 2)
+        out["disabled_vs_baseline_pct"] = round((off - base) / base * 100, 2)
+        if base != on:
+            out["explained_pct"] = round((off - on) / (base - on) * 100, 1)
+        out["explains"] = abs(out["disabled_vs_baseline_pct"]) <= ABLATION_NOISE_PCT
+    return out
+
+
+def _ablation_verdict(rec: dict) -> str:
+    env = ", ".join(f"{k}={v}" for k, v in sorted(rec["env"].items()))
+    head = (f"Ablation at {rec['tier']} tier ({'/'.join(map(str, rec['levels']))} users x "
+            f"{rec['seconds_per_level']:.0f}s), mechanism disabled with {env}. ")
+    for name, label in (("as_is", "as-is"), ("disabled", "disabled")):
+        if not rec[name]["ok"]:
+            return (head + f"The {label} sweep did not price: {rec[name]['reason'] or 'no reason'}. "
+                    f"Nothing is explained. Cost ${rec['cost_usd']:.2f} of GPU time.")
+    on, off = rec["as_is"], rec["disabled"]
+    text = (head + f"As is ${on['bill_per_1k']:.2f}/1k (N*={on['n_star']}); disabled "
+            f"${off['bill_per_1k']:.2f}/1k (N*={off['n_star']}): switching the mechanism off "
+            f"moves the price {-rec['delta_pct']:+.1f}%.")
+    if rec.get("total_pct") is None:
+        text += (" No baseline was given (fleet.json has none), so the share of the delta "
+                 "the mechanism explains is not computed; pass one to get it.")
+    else:
+        share = ("undefined (the stack prices at baseline)" if rec["explained_pct"] is None
+                 else f"{rec['explained_pct']:.0f}%")
+        text += (f" Against the baseline ${rec['baseline_bill_per_1k']:.2f}/1k the stack is "
+                 f"{rec['total_pct']:+.1f}%; the mechanism accounts for {share} of that "
+                 f"{rec['total_pct']:+.1f}% delta. The disabled stack sits "
+                 f"{rec['disabled_vs_baseline_pct']:+.1f}% from baseline, "
+                 + (f"within the {ABLATION_NOISE_PCT:.0f}% noise floor: the mechanism explains "
+                    "the delta." if rec["explains"] else
+                    f"outside the {ABLATION_NOISE_PCT:.0f}% noise floor: something other than "
+                    "this mechanism is moving the price, and the paper cannot claim it."))
+    return text + f" Cost ${rec['cost_usd']:.2f} of GPU time (two sweeps)."
+
+
+def _fleet_baseline(agent_root: pathlib.Path, tier: str) -> float | None:
+    """Stock's bill at `tier` from the fleet's `fleet.json` (the agent
+    directory's parent), the way `loop._delta` reads it: the `screen` map
+    for a screen, the top-level figure otherwise."""
+    for cand in (agent_root.parent / "fleet.json", agent_root / "fleet.json"):
+        try:
+            base = (json.loads(cand.read_text()) or {}).get("baseline") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        if tier == "screen" and isinstance(base.get("screen"), dict):
+            base = base["screen"]
+        b = base.get("bill_per_1k")
+        if isinstance(b, (int, float)):
+            return float(b)
+    return None
+
+
+def _next_dir(base: pathlib.Path) -> pathlib.Path:
+    n = 0
+    while (base / str(n)).exists():
+        n += 1
+    return base / str(n)
+
+
+def _parse_env(raw) -> dict[str, str]:
+    """`--env KEY=VAL` in whatever shape the CLI hands over: a dict, a list
+    of `KEY=VAL`, or one comma-separated string."""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}
+    items = raw.split(",") if isinstance(raw, str) else list(raw)
+    out = {}
+    for it in items:
+        k, _, v = str(it).partition("=")
+        if k.strip():
+            out[k.strip()] = v.strip()
+    return out
 
 
 def _ledger(root, tool: str, rec: dict) -> None:
@@ -538,8 +768,28 @@ def main(action: str, args) -> int:
         print(f"  {rep['summary']}")
         print("  " + ("REGRESSION: " + rep["why"] if rep["regressed"]
                       else "equivalent to stock within the provisional thresholds"))
+        if rep.get("lossless") is not None:
+            print("  " + ("lossless: greedy decode matches stock's" if rep["lossless"] else
+                          "lossy: not a rejection -- the accuracy suites decide; the "
+                          "write-up must say so"))
         print(f"  spent ${rep['cost_usd']:.3f}")
         return 1 if rep["regressed"] else 0
+
+    if action == "ablate":
+        rep = ablate(args.workspace or None, env=_parse_env(getattr(args, "env", None)),
+                     tier=getattr(args, "tier", "") or "screen")
+        if args.json:
+            print(json.dumps(rep, indent=1, default=str))
+            return 0 if rep.get("ok") else 1
+        if "error" in rep:
+            print(rep["error"], file=sys.stderr)
+            return 2
+        print(rep["verdict"])
+        if rep.get("note"):
+            print(f"  note: {rep['note']}")
+        print(f"  written: {rep['path']}")
+        print(f"  spent ${rep['cost_usd']:.2f} -- two sweeps of real GPU time; the ledger has it")
+        return 0 if rep.get("ok") else 1
 
     if action == "preflight":
         rep = preflight(args.workspace)

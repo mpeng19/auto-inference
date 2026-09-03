@@ -87,14 +87,23 @@ class EquivalenceResult:
     # in full. None for records made before decode scoring existed.
     decode_agreement: float | None = None
     decode_exact: float | None = None
+    # A label, not a gate: `decode_agreement >= MIN_DECODE_AGREEMENT`. The
+    # policy (module docstring, "Lossless is a label") is that a change need
+    # not be lossless to be a win -- the accuracy suites decide that -- but
+    # a write-up has to say which it was. None when decode was not scored.
+    lossless: bool | None = None
 
     def as_dict(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
 
     def summary(self) -> str:
-        dec = ("" if self.decode_agreement is None else
-               f"   decode agreement {self.decode_agreement:.4f} "
-               f"(exact {self.decode_exact:.0%})")
+        dec = ""
+        if self.decode_agreement is not None:
+            dec = (f"   decode agreement {self.decode_agreement:.4f} "
+                   f"(exact {self.decode_exact:.0%})   "
+                   + ("lossless" if self.lossless else
+                      f"lossy (decode agreement {self.decode_agreement:.2f}; floor "
+                      f"for a correct kernel {CORRECT_KERNEL_DECODE_AGREEMENT:.2f})"))
         return (f"{self.n} positions over {self.n_prompts} prompts   "
                 f"top-1 agreement {self.top1_agreement:.4f}   "
                 f"|dlogprob| mean {self.mean_abs_dlogprob:.4f} "
@@ -444,7 +453,8 @@ def compare(reference: dict, candidate: dict) -> EquivalenceResult:
         top1_agreement=round(matches / n, 6),
         mean_abs_dlogprob=round(total_d / n, 6),
         max_abs_dlogprob=round(max_d, 6),
-        decode_agreement=dec_agree, decode_exact=dec_exact)
+        decode_agreement=dec_agree, decode_exact=dec_exact,
+        lossless=None if dec_agree is None else dec_agree >= MIN_DECODE_AGREEMENT)
 
 
 # Calibrated 2026-09-03 on 32 LongBench prompts x 64 greedy tokens:
@@ -455,17 +465,29 @@ def compare(reference: dict, candidate: dict) -> EquivalenceResult:
 # Greedy decode is chaotic: one flipped token near the start loses the rest of
 # the 64, so a different-but-correct summation order lands near 0.84. The line
 # sits under that floor and above the lossy approximation.
+#
+# **Lossless is a label, not a gate.** Until 2026-09-03 `regressed()` failed a
+# stack under this line. The owner's policy since: a change need not be
+# lossless -- KV compression, sparse attention and lower-precision kernels
+# are on the table -- as long as the accuracy suites (GSM8K, LongBench, MMLU;
+# `quality.py`) hold. So the line only sets `EquivalenceResult.lossless`, the
+# summary says "lossless" or "lossy (...)", and the write-up reports which.
 MIN_DECODE_AGREEMENT = 0.80
+# What two *correct* kernels score against each other (triton vs FA3 above):
+# quoted in the lossy message so a reader knows what the number is measured
+# against, not just that it fell under a line.
+CORRECT_KERNEL_DECODE_AGREEMENT = 0.8367
 
 
 def regressed(result: EquivalenceResult, min_agreement: float = MIN_AGREEMENT,
-              max_mean_dlogprob: float = MAX_MEAN_DLOGPROB,
-              min_decode_agreement: float = MIN_DECODE_AGREEMENT) -> tuple[bool, str]:
+              max_mean_dlogprob: float = MAX_MEAN_DLOGPROB) -> tuple[bool, str]:
     """Has this stack changed what the model computes? Returns (yes, why).
 
-    The teacher-forced thresholds are provisional (module docstring); the
-    decode threshold was calibrated above. `aligned=False` is always a
-    rejection: the comparison did not happen.
+    The teacher-forced thresholds are provisional (module docstring).
+    `aligned=False` is always a rejection: the comparison did not happen.
+    Decode agreement is deliberately *not* checked here: it sets the
+    `lossless` label (see `MIN_DECODE_AGREEMENT`), and the accuracy suites
+    are the gate on a lossy change.
     """
     if not result.aligned:
         return True, result.note or "the two runs did not score the same sequences"
@@ -479,10 +501,6 @@ def regressed(result: EquivalenceResult, min_agreement: float = MIN_AGREEMENT,
         return True, (f"mean |dlogprob| {result.mean_abs_dlogprob:.4f} exceeds "
                       f"{max_mean_dlogprob:.4f}; the argmax mostly held but the "
                       "logits moved")
-    if result.decode_agreement is not None and result.decode_agreement < min_decode_agreement:
-        return True, (f"decode agreement {result.decode_agreement:.4f} is below "
-                      f"{min_decode_agreement:.2f}: greedy generation diverges from "
-                      "stock's; the decode path computes something different")
     return False, ""
 
 
@@ -554,7 +572,9 @@ async def measure(sim, timeout_s: int = 1800,
     res = compare(have, cand)
     bad, why = regressed(res, min_agreement, max_mean_dlogprob)
     out.update({"ok": True, "result": res.as_dict(), "regressed": bad,
-                "why": why, "cost_usd": round(out["cost_usd"], 4),
+                "why": why, "lossless": res.lossless,
+                "decode_agreement": res.decode_agreement,
+                "cost_usd": round(out["cost_usd"], 4),
                 "summary": res.summary()})
     return out
 

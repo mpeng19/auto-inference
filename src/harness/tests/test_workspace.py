@@ -188,3 +188,114 @@ def test_skills_are_installed_where_claude_code_looks(ws):
     assert (ws.candidates / ".claude" / "skills" / "tracedb" / "SKILL.md").read_text().endswith("query it")
     ws.materialise("srt/managers/schedule_policy.py")
     assert ws.touched() == () and ws.misplaced() == ()      # not part of the diff
+
+
+# ── compounding: a workspace built on a saved stack ─────────────────────
+
+BASE_ONLY = "srt/new/base_only.py"
+
+
+def _base(stock_dir):
+    """The best stack of a previous fleet: one edited file, one new file, a
+    launch line and an env var."""
+    from simulator import InferenceStack
+
+    return InferenceStack(
+        files={P: "CHUNK = 4096\n\n\nclass SchedulePolicy:\n    pass\n",
+               BASE_ONLY: "B = 1\n"},
+        upstream_sha={P: FakeStock(stock_dir).sha(P)},
+        serving={"chunked_prefill_size": 4096, "extra_args": ["--a"]},
+        env={"SGLANG_X": "1"}, label="build-1 best")
+
+
+@pytest.fixture
+def based(tmp_path, stock_dir):
+    return Workspace(tmp_path / "a02", agent_id="a02", source=FakeStock(stock_dir),
+                     base=_base(stock_dir))
+
+
+def test_base_files_show_through_read(based):
+    """The agent's "current file" is the base's version, not stock's."""
+    assert "CHUNK = 4096" in based.read(P) and "CHUNK = 4096" in based.stock_text(P)
+    assert based.read(BASE_ONLY) == "B = 1\n"
+    assert based.materialise(P, BASE_ONLY) == (P, BASE_ONLY)
+    assert based.touched() == (), "base copies are not a diff"
+    ok, why = based.check()
+    assert not ok and "identical to the base" in why
+
+
+def test_touched_is_relative_to_the_base_not_stock(based):
+    """Reverting the base's edit back to stock text IS a change."""
+    based.edit(P, "CHUNK = 8192\n\n\nclass SchedulePolicy:\n    pass\n")
+    assert based.touched() == (P,)
+    assert "-CHUNK = 4096" in based.diff() and "+CHUNK = 8192" in based.diff()
+    assert "base/" + P in based.diff()
+
+
+def test_stack_is_the_full_base_plus_the_edits(based, tmp_path, stock_dir):
+    """The runner gets base files it never saw plus the agent's, and the
+    digest is different from the same edit made on stock."""
+    based.replace(P, "4096", "2048")
+    st = based.stack()
+    assert "CHUNK = 2048" in st.files[P] and st.files[BASE_ONLY] == "B = 1\n"
+    # Drift is measured against the installed package, not the base's text.
+    assert st.upstream_sha[P] == FakeStock(stock_dir).sha(P)
+    assert BASE_ONLY not in st.upstream_sha
+    assert st.serving == {"chunked_prefill_size": 4096, "extra_args": ["--a"]}
+    assert st.env == {"SGLANG_X": "1"}
+    assert st.base == based.base.digest and "build-1 best" in st.label
+    plain = Workspace(tmp_path / "a03", source=FakeStock(stock_dir))
+    plain.edit(P, st.files[P])
+    assert plain.stack().digest != st.digest
+
+
+def test_serving_and_env_layer_over_the_base(based):
+    import json
+
+    (based.candidates / "serving.json").write_text(json.dumps(
+        {"serving": {"schedule_policy": "lpm", "extra_args": ["--b"]},
+         "env": {"SGLANG_Y": "2"}}))
+    ok, why = based.check()
+    assert ok, why
+    st = based.stack()
+    assert st.serving == {"chunked_prefill_size": 4096, "schedule_policy": "lpm",
+                          "extra_args": ["--a", "--b"]}
+    assert st.env == {"SGLANG_X": "1", "SGLANG_Y": "2"}
+    assert st.files[P] == based.base.files[P], "base files travel even with no edit"
+    # Base value replaced, not appended: with_overrides semantics.
+    (based.candidates / "serving.json").write_text(json.dumps(
+        {"chunked_prefill_size": 16384}))
+    assert based.stack().serving["chunked_prefill_size"] == 16384
+
+
+def test_the_base_is_found_from_base_json(based, stock_dir):
+    """`harness tool` builds `Workspace(root)` from the agent's shell with no
+    base argument; it must see the same base the daemon set."""
+    assert (based.root / "base.json").is_file()
+    again = Workspace(based.root, source=FakeStock(stock_dir))
+    assert again.base is not None and again.base.digest == based.base.digest
+    assert "CHUNK = 4096" in again.read(P)
+    again.set_base(None)
+    assert not (based.root / "base.json").exists()
+    assert "CHUNK = 8192" in Workspace(based.root, source=FakeStock(stock_dir)).read(P)
+
+
+def test_compose_is_the_rule_the_workspace_follows():
+    from simulator import InferenceStack
+
+    base = InferenceStack(files={"a.py": "1", "b.py": "1"}, patches={"c.py": "p"},
+                          upstream_sha={"a.py": "sa"}, serving={"x": 1, "extra_args": ["--a"]},
+                          env={"E": "1", "F": "1"}, label="base")
+    over = InferenceStack(files={"b.py": "2", "d.py": "2"}, upstream_sha={"b.py": "sb"},
+                          serving={"x": 2, "extra_args": ["--b"]}, env={"F": "2"}, label="edit")
+    full = InferenceStack.compose(base, over)
+    assert full.files == {"a.py": "1", "b.py": "2", "d.py": "2"}
+    assert full.patches == {"c.py": "p"}
+    assert full.upstream_sha == {"a.py": "sa", "b.py": "sb"}
+    assert full.serving == {"x": 2, "extra_args": ["--a", "--b"]}
+    assert full.env == {"E": "1", "F": "2"}
+    assert full.base == base.digest and full.label == "edit on base"
+    # Round trip keeps the provenance; a plain stack's dict is unchanged.
+    assert InferenceStack.from_dict(full.as_dict()) == full
+    assert "base" not in base.as_dict()
+    assert InferenceStack.compose(base, InferenceStack()).digest == base.digest

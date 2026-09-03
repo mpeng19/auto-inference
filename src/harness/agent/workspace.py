@@ -33,6 +33,15 @@ minutes if it reaches the runner, which is roughly a dollar per typo.
 modified SGLang is only ever executed inside a fresh Modal container. The
 isolation that matters is already paid for, and the resource agents genuinely
 contend over is GPU concurrency, which the orchestrator gates.
+
+**A base, when the fleet compounds.** With `base=` (or a `base.json` in the
+agent directory, which is how `harness tool` finds it from the agent's shell)
+the workspace's "stock" is that saved stack: `read` shows the base's files,
+`touched` means "differs from the base", and `stack()` returns the *full*
+stack -- base files plus the agent's edits, base serving and env with the
+agent's `serving.json` layered on top -- so the evaluator, the quality cache
+and the equivalence reference all see one digest that already includes the
+base.
 """
 from __future__ import annotations
 
@@ -42,8 +51,12 @@ import json
 import pathlib
 import shutil
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from .stock import SGLANG_VERSION, StockSource, stock
+from .stock import SGLANG_VERSION, BaseSource, StockSource, stock
+
+if TYPE_CHECKING:
+    from simulator.stack import InferenceStack
 
 
 @dataclass
@@ -53,12 +66,51 @@ class Workspace:
     agent_id: str = ""
     sglang_version: str = SGLANG_VERSION
     source: StockSource | None = None
+    # The stack this workspace's edits are relative to (see the module
+    # docstring). None means stock; when None and `<root>/base.json` exists,
+    # that file is the base, so tools run from the agent's shell agree with
+    # the daemon that wrote it.
+    base: InferenceStack | None = None
+
+    BASE_FILE = "base.json"
 
     def __post_init__(self):
         self.root = self.locate(self.root)
+        if isinstance(self.source, BaseSource):
+            self.base = self.source.base
+        elif self.base is None and (self.root / self.BASE_FILE).is_file():
+            from simulator import InferenceStack
+            self.base = InferenceStack.load(self.root / self.BASE_FILE)
         self.source = self.source or stock(self.sglang_version)
+        if self.base is not None and not isinstance(self.source, BaseSource):
+            self.source = BaseSource(self.base, self.source)
         for d in (self.candidates, self.traces, self.runs):
             d.mkdir(parents=True, exist_ok=True)
+        if self.base is not None:
+            self._persist_base()
+
+    def set_base(self, base: InferenceStack | None) -> None:
+        """Make `base` the stack this workspace builds on (None: stock), and
+        record it in `<root>/base.json` so a later `Workspace(root)` -- the
+        agent's own `harness tool` calls -- sees the same base."""
+        under = self.source.stock if isinstance(self.source, BaseSource) else self.source
+        self.base = base
+        self.source = BaseSource(base, under) if base is not None else under
+        if base is None:
+            (self.root / self.BASE_FILE).unlink(missing_ok=True)
+        else:
+            self._persist_base()
+
+    def _persist_base(self) -> None:
+        p = self.root / self.BASE_FILE
+        text = json.dumps(self.base.as_dict(), sort_keys=True)
+        if not p.is_file() or p.read_text() != text:
+            p.write_text(text)
+
+    @property
+    def base_name(self) -> str:
+        """"stock", or the base's digest: what the diff is against."""
+        return f"base {self.base.digest}" if self.base is not None else "stock"
 
     # ── layout ──────────────────────────────────────────────────────────
     @property
@@ -113,7 +165,7 @@ class Workspace:
         self.edit(rel, cur.replace(old, new))
 
     def reset(self) -> None:
-        """Back to stock: the loop calls this before every attempt."""
+        """Back to stock (or the base): the loop calls this before every attempt."""
         shutil.rmtree(self.candidates, ignore_errors=True)
         self.candidates.mkdir(parents=True, exist_ok=True)
 
@@ -168,7 +220,8 @@ class Workspace:
         return tuple(out)
 
     def touched(self) -> tuple[str, ...]:
-        """Files that actually differ from stock.
+        """Files that actually differ from stock -- or from the base, if the
+        workspace has one.
 
         Not "files present": an agent editing in place starts from a stock copy
         of everything it might touch, and most of those stay identical. A stack
@@ -192,6 +245,18 @@ class Workspace:
             return True
         except (OSError, FileNotFoundError):
             return False
+
+    def _upstream_sha(self, rel: str) -> str | None:
+        """The hash of the upstream file `rel` was derived from, or None for a
+        file that is new. With a base this is the *stock* hash underneath,
+        not the base's text: drift is measured against the installed
+        package, which is what `apply` compares with."""
+        try:
+            if isinstance(self.source, BaseSource):
+                return self.source.stock_sha(rel)
+            return self.source.sha(rel)
+        except (OSError, FileNotFoundError):
+            return None
 
     def install_skills(self, skills: dict[str, str]) -> tuple[pathlib.Path, ...]:
         """Write `.claude/skills/<name>/SKILL.md` into the candidate directory,
@@ -221,17 +286,18 @@ class Workspace:
         For the agent to review and for the log."""
         rels = (rel,) if rel else self.touched()
         out = []
+        against = "base" if self.base is not None else "stock"
         if rel is None:
             serving, env, _ = self.serving()
             if serving or env:
-                out.append("--- launch: stock\n+++ launch: candidate\n")
+                out.append(f"--- launch: {against}\n+++ launch: candidate\n")
                 out.extend(f"+{k}={v}\n" for k, v in sorted(serving.items()))
                 out.extend(f"+env {k}={v}\n" for k, v in sorted(env.items()))
         for r in rels:
             a = self.stock_text(r).splitlines(keepends=True)
             b = self.read(r).splitlines(keepends=True)
             out.extend(difflib.unified_diff(
-                a, b, fromfile=f"stock/{r}", tofile=f"candidate/{r}", n=context))
+                a, b, fromfile=f"{against}/{r}", tofile=f"candidate/{r}", n=context))
         return "".join(out)
 
     SERVING_FILE = "serving.json"
@@ -260,7 +326,10 @@ class Workspace:
         env = {str(k): str(v) for k, v in env.items()}
         try:
             from simulator.config import ServingConfig
-            ServingConfig().with_overrides(serving)
+            cfg = ServingConfig()
+            if self.base is not None:
+                cfg = cfg.with_overrides(self.base.serving)   # the launch line it lands on
+            cfg.with_overrides(serving)
         except ValueError as e:
             return {}, {}, f"{self.SERVING_FILE}: {e}"
         return serving, env, ""
@@ -287,12 +356,18 @@ class Workspace:
             return False, why
         if not self.touched() and not serving and not env:
             return False, ("no files changed and no serving.json; the stack would be "
-                           "identical to stock")
+                           f"identical to {'the base' if self.base is not None else 'stock'}")
         return True, ""
 
     # ── handing it to the simulator ─────────────────────────────────────
     def stack(self, label: str = ""):
-        """Build the `simulator.InferenceStack` this workspace describes."""
+        """Build the `simulator.InferenceStack` this workspace describes.
+
+        With a base, the **full** stack: `InferenceStack.compose(base,
+        edits)`. The agent's edits alone would be a diff against files the
+        runner does not have, and a digest that collides with the same edit
+        made on stock.
+        """
         from simulator import InferenceStack
 
         ok, why = self.check()
@@ -301,10 +376,14 @@ class Workspace:
         rels = self.touched()
         serving, env, _ = self.serving()
         what = list(rels) + [f"{k}={v}" for k, v in sorted(serving.items())]
-        return InferenceStack(
+        shas = {r: self._upstream_sha(r) for r in rels}
+        overlay = InferenceStack(
             files={r: self.read(r) for r in rels},
             # Recorded from the same source the agent read, so drift is caught
             # at apply time instead of producing a quietly wrong experiment.
-            upstream_sha={r: self.source.sha(r) for r in rels if self._in_stock(r)},
+            upstream_sha={r: h for r, h in shas.items() if h},
             serving=serving, env=env,
             label=label or f"{self.agent_id or self.root.name}: {', '.join(what)}")
+        if self.base is None:
+            return overlay
+        return InferenceStack.compose(self.base, overlay)

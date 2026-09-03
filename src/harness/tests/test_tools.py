@@ -1,4 +1,7 @@
 """The tools an agent uses between sweeps."""
+import json
+import pathlib
+
 import pytest
 
 from harness import tools
@@ -287,3 +290,169 @@ def test_ncu_builds_a_driver_and_parses_the_counters(tmp_path, stock_dir, monkey
     assert "--clock-control" in seen["driver"] and "'gemm'" in seen["driver"]
     assert seen["files"] == {"target.py": "print('hi')\n"}
     assert tools.ncu(tmp_path / "missing.py", workspace=ws.root, source=ws.source)["ok"] is False
+
+
+# ── ablation: the mechanism's share of the delta ─────────────────────────
+
+class _FakeEval:
+    def __init__(self, ok, bill, n_star=12, reason=""):
+        self.ok, self.bill_per_1k, self.n_star, self.reason = ok, bill, n_star, reason
+        self.record = {"serving": {"gpu": "H100", "n_gpu": 1}, "started_at": 100.0,
+                       "finished_at": 700.0, "levels": []}
+
+
+def _stub_simulator(prices: dict, seen: dict):
+    """A Simulator that prices a stack by whether its env carries the kill
+    switch, and records what it was asked to run."""
+
+    class Stub:
+        def __init__(self, root_dir, stack, levels=(), seconds_per_level=0.0, **kw):
+            assert pathlib.Path(root_dir).is_dir(), "the tool makes the run dirs first"
+            self.root, self.stack = pathlib.Path(root_dir), stack
+            seen.setdefault("runs", []).append(
+                {"dir": str(root_dir), "env": dict(stack.env), "levels": tuple(levels),
+                 "seconds": seconds_per_level, "digest": stack.digest})
+
+        async def submit_async(self):
+            return f"call-{len(seen['runs'])}"
+
+        async def collect(self, call_id):
+            seen.setdefault("collected", []).append(call_id)
+            key = "disabled" if "SGLANG_DISABLE_X" in self.stack.env else "as_is"
+            p = prices[key]
+            return _FakeEval(p is not None, p, reason="" if p is not None else "no level met the SLO")
+
+    return Stub
+
+
+def _edited_ws(tmp_path, stock_dir, fleet_baseline=None):
+    from harness.agent.workspace import Workspace
+
+    from .test_workspace import FakeStock
+
+    root = tmp_path / "agents" / "S"
+    root.mkdir(parents=True)
+    if fleet_baseline is not None:
+        (root / "fleet.json").write_text(json.dumps({"baseline": fleet_baseline}))
+    ws = Workspace(root / "a01", agent_id="a01", source=FakeStock(stock_dir))
+    ws.materialise("srt/managers/schedule_policy.py")
+    ws.edit("srt/managers/schedule_policy.py", "CHUNK = 16384\n\n\nclass SchedulePolicy:\n    pass\n")
+    return ws
+
+
+def test_ablate_prices_the_stack_with_and_without_its_kill_switch(tmp_path, stock_dir):
+    """Two sweeps at the tier's grid, one with the env applied; the record
+    says how much of the delta against baseline the mechanism explains, and
+    the verdict says it in a paragraph. Screen baseline $17.52, as-is $15.00,
+    disabled $17.40: the mechanism explains 84% and the disabled stack sits
+    within noise of baseline."""
+    import simulator
+
+    ws = _edited_ws(tmp_path, stock_dir,
+                    fleet_baseline={"bill_per_1k": 14.96, "screen": {"bill_per_1k": 17.52}})
+    seen: dict = {}
+    real = simulator.Simulator
+    simulator.Simulator = _stub_simulator({"as_is": 15.0, "disabled": 17.4}, seen)
+    try:
+        rep = tools.ablate(ws.root, env={"SGLANG_DISABLE_X": "1"}, tier="screen", source=ws.source)
+    finally:
+        simulator.Simulator = real
+    assert rep["ok"] and rep["tier"] == "screen"
+    assert [r["levels"] for r in seen["runs"]] == [(8, 12), (8, 12)]
+    assert {r["seconds"] for r in seen["runs"]} == {60.0}
+    assert seen["runs"][0]["env"] == {} and seen["runs"][1]["env"] == {"SGLANG_DISABLE_X": "1"}
+    assert len(seen["collected"]) == 2
+    assert rep["as_is"]["bill_per_1k"] == 15.0 and rep["disabled"]["bill_per_1k"] == 17.4
+    assert rep["as_is"]["n_star"] == 12
+    assert rep["baseline_bill_per_1k"] == 17.52                       # the screen baseline
+    assert rep["delta_pct"] == pytest.approx(-13.79, abs=0.01)
+    assert rep["total_pct"] == pytest.approx(-14.38, abs=0.01)
+    assert rep["explained_pct"] == pytest.approx(95.2, abs=0.1)
+    assert rep["explains"] is True
+    assert rep["stack_digest"] != rep["disabled_digest"]
+    assert rep["cost_usd"] > 0
+    assert "accounts for 95% of that -14.4% delta" in rep["verdict"]
+    assert "within the 3% noise floor" in rep["verdict"] and "$" in rep["verdict"]
+    on_disk = json.loads((ws.root / "ablations" / "0" / "ablation.json").read_text())
+    assert on_disk["env"] == {"SGLANG_DISABLE_X": "1"} and on_disk["stack_digest"] == rep["stack_digest"]
+    assert (ws.root / "ablations" / "0" / "as-is").is_dir() and (ws.root / "ablations" / "0" / "disabled").is_dir()
+    ledger = (ws.root / "spend.jsonl").read_text()
+    assert '"ablate"' in ledger
+    # a second run gets its own directory
+    simulator.Simulator = _stub_simulator({"as_is": 15.0, "disabled": 15.2}, {})
+    try:
+        again = tools.ablate(ws.root, env={"SGLANG_DISABLE_X": "1"}, tier="screen", source=ws.source)
+    finally:
+        simulator.Simulator = real
+    assert again["dir"].endswith("ablations/1") and again["explains"] is False
+    assert "cannot claim it" in again["verdict"]
+
+
+def test_ablate_without_a_baseline_reports_prices_but_no_share(tmp_path, stock_dir):
+    import simulator
+
+    ws = _edited_ws(tmp_path, stock_dir)
+    real = simulator.Simulator
+    simulator.Simulator = _stub_simulator({"as_is": 15.0, "disabled": 17.4}, {})
+    try:
+        rep = tools.ablate(ws.root, env={"SGLANG_DISABLE_X": "1"}, tier="full", source=ws.source)
+    finally:
+        simulator.Simulator = real
+    assert rep["ok"] and rep["levels"] == [4, 8, 12, 16, 24] and rep["seconds_per_level"] == 120.0
+    assert rep["explained_pct"] is None and rep["explains"] is None
+    assert "No baseline" in rep["verdict"] and rep["delta_pct"] == pytest.approx(-13.79, abs=0.01)
+
+
+def test_ablate_refuses_before_renting_a_gpu(tmp_path, stock_dir):
+    import simulator
+
+    ws = _edited_ws(tmp_path, stock_dir)
+    assert "kill switch" in tools.ablate(ws.root, env={}, source=ws.source)["error"]
+    assert "unknown tier" in tools.ablate(ws.root, env={"X": "1"}, tier="huge", source=ws.source)["error"]
+    ws.edit("srt/managers/schedule_policy.py", "def (:\n")
+    assert "not runnable" in tools.ablate(ws.root, env={"X": "1"}, source=ws.source)["error"]
+    # a failed sweep is reported, not scored
+    ws.edit("srt/managers/schedule_policy.py", "CHUNK = 1\n")
+    real = simulator.Simulator
+    simulator.Simulator = _stub_simulator({"as_is": 15.0, "disabled": None}, {})
+    try:
+        rep = tools.ablate(ws.root, env={"SGLANG_DISABLE_X": "1"}, source=ws.source)
+    finally:
+        simulator.Simulator = real
+    assert not rep["ok"] and rep["explains"] is None
+    assert "disabled sweep did not price" in rep["verdict"]
+
+
+def test_ablate_tiers_match_the_daemon():
+    from harness.daemon import FleetConfig
+
+    cfg = FleetConfig(session_id="x", root="/tmp/x")
+    assert tools.TIERS["screen"] == (cfg.screen_levels, cfg.screen_seconds)
+    assert tools.TIERS["full"] == (cfg.levels, cfg.seconds_per_level)
+
+
+def test_env_flags_are_parsed_in_every_shape_the_cli_hands_over():
+    assert tools._parse_env(["A=1", "B=x=y"]) == {"A": "1", "B": "x=y"}
+    assert tools._parse_env("A=1,B=2") == {"A": "1", "B": "2"}
+    assert tools._parse_env({"A": 1}) == {"A": "1"}
+    assert tools._parse_env(None) == {}
+
+
+def test_equivalence_keeps_its_record_under_the_agent(tmp_path, stock_dir, monkeypatch):
+    """`results.py` reads decode agreement from `<agent>/equivalence/`; the
+    record has to land there, keyed by the stack digest."""
+    from simulator.measure import equivalence as eq
+
+    ws = _edited_ws(tmp_path, stock_dir)
+
+    async def fake(sim, timeout_s, min_agreement, max_mean_dlogprob):
+        return {"ok": True, "stack": "x", "stack_digest": sim.stack.digest, "cost_usd": 0.4,
+                "regressed": False, "why": "", "lossless": False, "decode_agreement": 0.77,
+                "summary": "s", "result": {"decode_agreement": 0.77}}
+
+    monkeypatch.setattr(eq, "measure", fake)
+    rep = tools.equivalence(workspace=ws.root, source=ws.source)
+    files = list((ws.root / "equivalence").glob("*.json"))
+    assert len(files) == 1 and files[0].name.startswith(rep["stack_digest"])
+    assert json.loads(files[0].read_text())["decode_agreement"] == 0.77
+    assert rep["path"] == str(files[0])

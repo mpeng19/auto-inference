@@ -7,14 +7,18 @@ operate. When something better exists it replaces this class and nothing else.
 
 **How a read is scored.** Three signals, combined, because none alone works:
 
-    lexical    FTS5 over hypothesis + summary
+    text       FTS5 over hypothesis + summary, blended with cosine over a
+               sentence embedding of the same text when an embedder is
+               present (`harness.embeddings`; lexical alone otherwise)
     graph      distance from the asking agent's own lineage
     recency    a half-life, so a stale timeline decays out of the brief
 
 Pure lexical retrieval is what `agent-db` measured as a **clean null**
 out-of-sample. The graph term is the part that is supposed to beat it: an
 experiment two edges from what you are about to try is relevant even when it
-shares no vocabulary with your query.
+shares no vocabulary with your query. The embedding closes the same gap from
+the other side: a hypothesis phrased differently from your intent still
+surfaces, marked "near your intent" in the audit trail.
 
 **Negative results are boosted, not filtered.** The expensive knowledge in a
 research loop is what already failed and why. A retrieval tuned for wins would
@@ -36,6 +40,7 @@ from dataclasses import asdict
 
 from ..contracts.common import Provenance
 from ..contracts.memory import Brief, Experiment, Finding, Hit, Recall, Relation
+from ..embeddings import DEFAULT, Embedder, EmbeddingStore, hybrid_search, resolve
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -88,15 +93,34 @@ def _fts_query(text: str) -> str:
     return " OR ".join(sorted(set(words))[:24])
 
 
+def _embed_text(hypothesis: str, summary: str) -> str:
+    """What an experiment's vector embeds: the same two fields FTS indexes."""
+    return f"{hypothesis} {summary}".strip()
+
+
+# Rows considered for the semantic half of a read: the newest ones. A fleet
+# writes ~20 an hour, so this is weeks of history in one matrix product.
+SEMANTIC_ROWS = 2000
+
+
 class SqliteMemory:
     """Reference implementation of `contracts.memory.MemoryService`."""
 
-    def __init__(self, path: str | pathlib.Path = "memory.db"):
+    def __init__(self, path: str | pathlib.Path = "memory.db",
+                 embedder: Embedder | None = DEFAULT):
+        """`embedder` defaults to `embeddings.default_embedder()`; pass
+        `None` for a purely lexical read."""
         self.path = pathlib.Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
+        self.embeddings = EmbeddingStore(resolve(embedder))
         self._conn().executescript(SCHEMA)
+        self.embeddings.ensure(self._conn())
         self._conn().commit()
+
+    @property
+    def embedder(self) -> Embedder | None:
+        return self.embeddings.embedder
 
     def _conn(self) -> sqlite3.Connection:
         """One connection per thread.
@@ -128,6 +152,8 @@ class SqliteMemory:
              exp.verdict, json.dumps(exp.metrics), json.dumps(exp.baseline_metrics),
              exp.summary, json.dumps(list(exp.tags)),
              json.dumps(asdict(exp.provenance)), exp.trace_ref))
+        self.embeddings.forget(self._c, [exp.id])
+        self.embeddings.vectors(self._c, {exp.id: _embed_text(exp.hypothesis, exp.summary)})
         self._c.commit()
         return exp.id
 
@@ -206,18 +232,31 @@ class SqliteMemory:
         dist = self._graph_distances(q)
         cand: dict[str, tuple[Experiment, float, list[str]]] = {}
 
+        width = max(q.k * 4, 40)
         match = _fts_query(q.intent)
+        lexical: dict[str, float] = {}
         if match:
             rows = self._c.execute(
-                "SELECT e.*, bm25(exp_fts) AS rank FROM exp_fts "
+                "SELECT e.id, bm25(exp_fts) AS rank FROM exp_fts "
                 "JOIN experiments e ON e.rowid = exp_fts.rowid "
-                "WHERE exp_fts MATCH ? ORDER BY rank LIMIT ?",
-                (match, max(q.k * 4, 40)))
+                "WHERE exp_fts MATCH ? ORDER BY rank LIMIT ?", (match, width))
             for r in rows:
-                e = self._row_to_exp(r)
                 # bm25 returns more-negative for better; map to (0, 1].
-                lex = 1.0 / (1.0 + math.exp(min(6.0, max(-6.0, r["rank"]))))
-                cand[e.id] = (e, W_LEXICAL * lex, ["matches your intent"])
+                lexical[r["id"]] = 1.0 / (1.0 + math.exp(min(6.0, max(-6.0, r["rank"]))))
+        if self.embeddings.active:
+            texts = {r["id"]: _embed_text(r["hypothesis"], r["summary"]) for r in self._c.execute(
+                "SELECT id, hypothesis, summary FROM experiments ORDER BY ts DESC LIMIT ?",
+                (SEMANTIC_ROWS,))}
+        else:
+            texts = dict.fromkeys(lexical, "")
+        for exp_id, score in hybrid_search(self.embeddings, self._c, q.intent, texts,
+                                           lexical, k=width):
+            row = self._c.execute("SELECT * FROM experiments WHERE id=?", (exp_id,)).fetchone()
+            if row is None:
+                continue
+            why = "matches your intent" if exp_id in lexical else "near your intent"
+            cand[exp_id] = (self._row_to_exp(row), W_LEXICAL * score, [why])
+        self._c.commit()                 # vectors embedded lazily above
 
         # Graph neighbours of the agent's own work, whether or not they match.
         for exp_id, d in dist.items():

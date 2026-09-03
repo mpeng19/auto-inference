@@ -17,6 +17,7 @@ been answered.
 host sleeps -- so the calls neither timed out nor looked slow.
 """
 import json
+import os
 import pathlib
 import threading
 import time
@@ -541,3 +542,73 @@ def test_what_an_agent_spends_in_its_own_tools_is_its_cost(
         broker.shutdown()
     assert 0.75 in reported
     assert out.cost_usd == 1.0 + 0.75                # the sweep plus the tool
+
+
+def test_skills_are_installed_for_the_edit_and_the_paper_and_extras_come_from_the_env(
+        tmp_path, stock_dir, monkeypatch):
+    """`writeup` and `tracedb` ship with the harness; `HARNESS_EXTRA_SKILLS`
+    adds directories from outside the repo, by name, for both steps. The
+    paper step runs in the paper directory, so that is where its skills go."""
+    extra = tmp_path / "latex-skill"
+    extra.mkdir()
+    (extra / "SKILL.md").write_text("---\nname: latex-skill\n---\ncompile it\n")
+    (extra / "scripts").mkdir()
+    (extra / "scripts" / "compile.sh").write_text("#!/bin/sh\n")
+    bogus = tmp_path / "not-a-skill"
+    bogus.mkdir()
+    monkeypatch.setenv("HARNESS_EXTRA_SKILLS", f"{extra}{os.pathsep}{bogus}{os.pathsep}/nowhere")
+
+    ws = Workspace(tmp_path / "a01", agent_id="a01", source=FakeStock(stock_dir))
+    prop = ClaudeCodeProposer(binary="claude-not-here", session_skills=lambda: "facts")
+    assert [d.name for d in prop.extra_skill_dirs()] == ["latex-skill"]
+    prop._install_skills(ws)
+    skills = ws.candidates / ".claude" / "skills"
+    assert "publishable" in (skills / "writeup" / "SKILL.md").read_text()
+    assert (skills / "tracedb" / "SKILL.md").is_file()
+    assert (skills / "serving-facts" / "SKILL.md").read_text() == "facts"
+    assert (skills / "latex-skill" / "SKILL.md").read_text().endswith("compile it\n")
+    assert (skills / "latex-skill" / "scripts" / "compile.sh").is_file()
+    assert not (skills / "not-a-skill").exists()
+    # installed again: replaced, not stacked
+    prop._install_skills(ws)
+    assert (skills / "latex-skill" / "SKILL.md").is_file()
+
+    paper = tmp_path / "a01" / "paper" / "idea_x"
+    paper.mkdir(parents=True)
+    prop._install_skills(ws, into=paper)
+    assert (paper / ".claude" / "skills" / "writeup" / "SKILL.md").is_file()
+    assert (paper / ".claude" / "skills" / "latex-skill" / "SKILL.md").is_file()
+    monkeypatch.delenv("HARNESS_EXTRA_SKILLS")
+    assert prop.extra_skill_dirs() == ()
+
+
+def test_the_paper_step_installs_the_skills_and_hands_over_the_evidence(tmp_path, stock_dir):
+    """The prompt points at the writeup skill and the run directory, and
+    the template it starts from carries the evidence table."""
+    from harness.contracts import Attempt
+
+    dump = tmp_path / "prompt.txt"
+    binary = _fake_claude(
+        tmp_path, f"printf '%s' \"$2\" > {dump}\ncat <<'JSON'\n{ENVELOPE}\nJSON\n")
+    root = tmp_path / "agents" / "S"
+    ws = Workspace(root / "a01", agent_id="a01", source=FakeStock(stock_dir))
+    (root / "a01" / "ablations" / "0").mkdir(parents=True)
+    (root / "a01" / "ablations" / "0" / "ablation.json").write_text(json.dumps({
+        "stack_digest": "dig", "env": {"K": "1"}, "tier": "screen", "baseline_bill_per_1k": 17.52,
+        "as_is": {"bill_per_1k": 15.0}, "disabled": {"bill_per_1k": 17.4},
+        "explained_pct": 95.2, "explains": True, "verdict": "explains 95%"}))
+    prop = ClaudeCodeProposer(binary=binary)
+    idea = Idea(title="sparse kv", hypothesis="read fewer pages", targets=(P,))
+    att = Attempt(n=1, tier="full", ok=True, stack_digest="dig",
+                  metrics={"bill_per_1k": 10.5, "n_star": 12,
+                           "quality": [{"suite": "gsm8k", "accuracy": 0.69}]},
+                  delta={"bill_per_1k_pct": -14.1})
+    out = prop.paper(ws, idea, (att, att), 12.23, "+x")
+    d = root / "a01" / "paper" / idea.id
+    assert out.endswith("PAPER.tex") or out.endswith("paper.pdf")
+    prompt = dump.read_text()
+    assert ".claude/skills/writeup/SKILL.md" in prompt and str(root / "a01") in prompt
+    assert "replicated: yes" in prompt and "explains 95%" in prompt
+    assert (d / ".claude" / "skills" / "writeup" / "SKILL.md").is_file()
+    tex = (d / "PAPER.tex").read_text()
+    assert "\\path{ablations/0/ablation.json}" in tex and "accounts for 95\\%" in tex

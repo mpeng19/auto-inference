@@ -9,12 +9,21 @@ a design. And a claim is exclusive, so diversity is a property of the bank
 rather than a hope about the agents.
 
 **How a claim is chosen.** Among available records, the one whose text is
-least similar (max Jaccard over word sets) to every text in `avoid` -- the
-ideas live in the fleet and those already tried -- with a tie broken toward a
-`scale` not in `live_scales`. Cheap, explainable, and good enough: the bank is
-tens to hundreds of records, not millions. The reference fleet passes `avoid`
-and not `live_scales`: an `Idea` does not carry the record's scale, so that
+least similar to every text in `avoid` -- the ideas live in the fleet and
+those already tried -- with a tie broken toward a `scale` not in
+`live_scales`. Similarity is two signals, each against its own threshold:
+Jaccard over word sets (`AVOID_CLOSENESS`) and, when an embedder is present,
+cosine between sentence embeddings (`embeddings.TWIN_COSINE`), so a paraphrase
+of a live idea is its twin even when the words differ. Closeness is the
+larger of the two ratios; at or above 1.0 the record is "the same idea".
+Cheap, explainable, and good enough: the bank is tens to hundreds of
+records, not millions. The reference fleet passes `avoid` and not
+`live_scales`: an `Idea` does not carry the record's scale, so that
 tie-break only fires for a caller that tracks it.
+
+`search` and `related` are hybrid (see `harness.embeddings`): BM25 or
+Jaccard blended with cosine when an embedder is present, lexical alone
+otherwise. Vectors live in the `embeddings` table of the same file.
 """
 from __future__ import annotations
 
@@ -25,6 +34,18 @@ import threading
 from dataclasses import asdict
 
 from ..contracts.ideas import BankStatus, IdeaRecord, Scale, content_id
+from ..embeddings import (
+    DEFAULT,
+    SEMANTIC_FLOOR,
+    TWIN_COSINE,
+    Embedder,
+    EmbeddingStore,
+    cosine_scores,
+    hybrid_rank,
+    hybrid_search,
+    max_cosine,
+    resolve,
+)
 
 SEEDS = pathlib.Path(__file__).parent / "seeds"
 
@@ -43,7 +64,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS ideas_fts USING fts5(
 _LIST_FIELDS = ("targets", "tags", "experiment_ids")
 # Jaccard above which a record counts as "the same idea" as a live one.
 # Two records about the same mechanism share most of their words (0.6-0.9);
-# records that merely share the field's vocabulary sit at 0.1-0.3.
+# records that merely share the field's vocabulary sit at 0.1-0.3. The
+# cosine counterpart is `embeddings.TWIN_COSINE`.
 AVOID_CLOSENESS = 0.35
 
 
@@ -66,13 +88,22 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 
 class SqliteIdeaBank:
-    def __init__(self, path: str | pathlib.Path):
+    def __init__(self, path: str | pathlib.Path, embedder: Embedder | None = DEFAULT):
+        """`embedder` defaults to `embeddings.default_embedder()` (the local
+        sentence model when installed, else nothing); pass `None` for a
+        purely lexical bank."""
         self.path = pathlib.Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._lock = threading.RLock()
+        self.embeddings = EmbeddingStore(resolve(embedder))
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self.embeddings.ensure(c)
+
+    @property
+    def embedder(self) -> Embedder | None:
+        return self.embeddings.embedder
 
     def _conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "conn", None)
@@ -101,6 +132,7 @@ class SqliteIdeaBank:
                                     "created_at": old.created_at})
                 c.execute("DELETE FROM ideas WHERE id=?", (old.id,))
                 c.execute("DELETE FROM ideas_fts WHERE id=?", (old.id,))
+                self.embeddings.forget(c, [old.id])
         d = asdict(rec)
         for k in _LIST_FIELDS:
             d[k] = json.dumps(list(d[k]))
@@ -114,6 +146,8 @@ class SqliteIdeaBank:
             c.execute("INSERT INTO ideas_fts(id,title,mechanism,hypothesis,tags) "
                       "VALUES (?,?,?,?,?)",
                       (rec.id, rec.title, rec.mechanism, rec.hypothesis, " ".join(rec.tags)))
+            self.embeddings.forget(c, [rec.id])
+            self.embeddings.vectors(c, {rec.id: rec.text})
         return rec.id
 
     def release(self, rec_id: str, status: BankStatus = "available") -> None:
@@ -157,15 +191,24 @@ class SqliteIdeaBank:
             return tuple(_row(r) for r in c.execute(q, args).fetchall())
 
     def search(self, text: str, k: int = 8) -> tuple[IdeaRecord, ...]:
-        words = [w for w in _tokens(text)]
-        if not words:
+        """BM25 over title, mechanism, hypothesis and tags, blended with
+        cosine over the record text when an embedder is present."""
+        words = _tokens(text)
+        if not words and not self.embeddings.active:
             return ()
-        q = " OR ".join(f'"{w}"' for w in words)
-        with self._conn() as c:
-            ids = [r["id"] for r in c.execute(
-                "SELECT id FROM ideas_fts WHERE ideas_fts MATCH ? "
-                "ORDER BY bm25(ideas_fts) LIMIT ?", (q, k)).fetchall()]
-        return tuple(r for r in (self.get(i) for i in ids) if r is not None)
+        by_id = {r.id: r for r in self.list()}
+        lexical: dict[str, float] = {}
+        with self._lock, self._conn() as c:
+            if words:
+                q = " OR ".join(f'"{w}"' for w in words)
+                # bm25() is more negative for better; negate so higher wins.
+                lexical = {r["id"]: -r["rank"] for r in c.execute(
+                    "SELECT id, bm25(ideas_fts) AS rank FROM ideas_fts "
+                    "WHERE ideas_fts MATCH ? ORDER BY rank LIMIT ?",
+                    (q, max(4 * k, 40))).fetchall()}
+            ranked = hybrid_search(self.embeddings, c, text,
+                                   {i: r.text for i, r in by_id.items()}, lexical, k)
+        return tuple(by_id[i] for i, _ in ranked)
 
     def count(self, status: BankStatus | None = None) -> int:
         with self._conn() as c:
@@ -175,13 +218,25 @@ class SqliteIdeaBank:
             return c.execute("SELECT COUNT(*) FROM ideas").fetchone()[0]
 
     def related(self, rec_id: str, k: int = 5) -> tuple[IdeaRecord, ...]:
+        """Jaccard blended with cosine; a record with neither signal (no
+        shared word, cosine under the floor) is not related."""
         me = self.get(rec_id)
         if me is None:
             return ()
         mine = _tokens(me.text)
-        scored = [(_jaccard(mine, _tokens(r.text)), r) for r in self.list() if r.id != rec_id]
-        scored.sort(key=lambda t: (-t[0], t[1].created_at))
-        return tuple(r for score, r in scored[:k] if score > 0.0)
+        others = sorted((r for r in self.list() if r.id != rec_id), key=lambda r: r.created_at)
+        jac = {r.id: _jaccard(mine, _tokens(r.text)) for r in others}
+        with self._lock, self._conn() as c:
+            vectors = self.embeddings.vectors(c, {r.id: r.text for r in [me, *others]})
+        mv = vectors.get(me.id)
+        cos = cosine_scores(mv, {r.id: vectors[r.id] for r in others if r.id in vectors}) \
+            if mv is not None else {}
+        cand = [(r.id, r.text) for r in others
+                if jac[r.id] > 0.0 or cos.get(r.id, 0.0) >= SEMANTIC_FLOOR]
+        ranked = hybrid_rank(me.text, cand, self.embedder if cos else None, jac,
+                             vectors=vectors, query_vec=mv)
+        by_id = {r.id: r for r in others}
+        return tuple(by_id[i] for i, _ in ranked[:k])
 
     # ── the claim ────────────────────────────────────────────────────────
     def claim(self, agent_id: str, avoid: tuple[str, ...] = (),
@@ -192,24 +247,37 @@ class SqliteIdeaBank:
             pool = self.list(status="available")
             if not pool:
                 return None
-            avoid_sets = [_tokens(t) for t in avoid if t]
+            avoid_texts = [t for t in avoid if t]
+            avoid_sets = [_tokens(t) for t in avoid_texts]
             live = set(live_scales)
+            with self._conn() as c:
+                vectors = self.embeddings.vectors(c, {r.id: r.text for r in pool})
+            avoid_vecs = self.embeddings.query_many(avoid_texts) if vectors else []
+            seed_vec = self.embeddings.query(seed) if vectors and seed.strip() else None
+            want = _tokens(seed)
 
             def closest(r: IdeaRecord) -> float:
-                return max((_jaccard(_tokens(r.text), a) for a in avoid_sets), default=0.0)
+                """Closeness in units of the twin threshold: max of Jaccard
+                over `AVOID_CLOSENESS` and cosine over `TWIN_COSINE`, so
+                1.0 means "the same idea" by either signal."""
+                jac = max((_jaccard(_tokens(r.text), a) for a in avoid_sets), default=0.0)
+                cos = max_cosine(vectors.get(r.id), avoid_vecs)
+                return max(jac / AVOID_CLOSENESS, cos / TWIN_COSINE)
+
+            def likeness(r: IdeaRecord) -> float:
+                return max(_jaccard(want, _tokens(r.text)),
+                           max_cosine(vectors.get(r.id), [seed_vec] if seed_vec is not None else []))
 
             if seed.strip():
-                want = _tokens(seed)
                 # "not close to avoid": a seed can steer, but never hand back
                 # the idea already running or its twin. Records near what is
                 # live are out; if that empties the pool, the seed is asking
                 # for exactly what is live and the fallback is diversity.
-                far = [r for r in pool if closest(r) < AVOID_CLOSENESS]
+                far = [r for r in pool if closest(r) < 1.0]
                 if not far:
                     best = min(pool, key=lambda r: (closest(r), r.created_at))
                 else:
-                    best = max(far, key=lambda r: (_jaccard(want, _tokens(r.text)),
-                                                   -closest(r), -r.created_at))
+                    best = max(far, key=lambda r: (likeness(r), -closest(r), -r.created_at))
             else:
                 best = min(pool, key=lambda r: (closest(r), r.scale in live, r.created_at))
             with self._conn() as c:

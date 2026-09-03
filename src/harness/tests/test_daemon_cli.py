@@ -301,3 +301,130 @@ def test_status_marks_a_dead_daemon(tmp_path, capsys):
     assert d.phase == "dead" and d.agents[0].status == "lost"
     assert "daemon exited" in d.agents[0].activity
     assert _mark_dead(SessionView(session_id="y", phase="stopped", pid=0)).phase == "stopped"
+
+
+# ── compounding: --base ─────────────────────────────────────────────────
+
+def _saved_stack(tmp_path):
+    """A run directory as `simulate run` / an attempt leaves it."""
+    from simulator import InferenceStack
+
+    run = tmp_path / "fleet-1" / "a02" / "runs" / "attempt-001"
+    run.mkdir(parents=True)
+    st = InferenceStack(files={"srt/managers/schedule_policy.py": "CHUNK = 4096\n"},
+                        serving={"chunked_prefill_size": 4096}, label="a02: ISRTF")
+    (run / "stack.json").write_text(json.dumps(st.as_dict()))
+    return run, st
+
+
+def test_a_base_that_does_not_load_is_refused(tmp_path):
+    from harness.daemon import check
+
+    ok = _saved_stack(tmp_path)[0]
+    cfg = FleetConfig(session_id="s", dry_run=True, fake_agents=True)
+    check(FleetConfig(session_id="s", dry_run=True, fake_agents=True, base=str(ok)))
+    with pytest.raises(SystemExit, match="stock"):          # nothing there to build on
+        check(FleetConfig(session_id="s", dry_run=True, fake_agents=True,
+                          base=str(tmp_path / "nowhere")))
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(SystemExit, match="does not load"):
+        check(FleetConfig(session_id="s", dry_run=True, fake_agents=True, base=str(bad)))
+    with pytest.raises(SystemExit, match="does not load"):
+        cfg.with_base(str(bad))
+
+
+def test_start_records_the_base_and_its_idea(tmp_path, monkeypatch):
+    """fleet.json says what the fleet compounds on -- path, digest, label --
+    and the hypothesis that produced it, read from the memory beside it."""
+    import harness.cli as cli
+    from harness.contracts import Experiment
+    from harness.memory import SqliteMemory
+
+    run, st = _saved_stack(tmp_path)
+    SqliteMemory(tmp_path / "fleet-1" / "memory.db").record(Experiment(
+        agent_id="a02", hypothesis="serve shortest remaining prefill first",
+        stack_digest=st.digest, verdict="win"))
+
+    class Proc:
+        pid = 4242
+
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: Proc())
+    root = tmp_path / "fleet-2"
+    assert cli_main(["--session", "s2", "start", "--root", str(root), "--dry-run",
+                     "--fake-agents", "--base", str(run)]) == 0
+    cfg = FleetConfig.load(root / "fleet.json")
+    assert cfg.base == str(run) and cfg.base_digest == st.digest
+    assert cfg.base_label == "a02: ISRTF"
+    assert cfg.base_idea == "serve shortest remaining prefill first"
+    assert cfg.base_seed == "a02: ISRTF serve shortest remaining prefill first"
+    # Refused in the terminal, before a daemon is spawned to fail in its log.
+    (tmp_path / "bad.json").write_text("{not json")
+    with pytest.raises(SystemExit, match="does not load"):
+        cli_main(["--session", "s3", "start", "--root", str(tmp_path / "f3"),
+                  "--dry-run", "--fake-agents", "--base", str(tmp_path / "bad.json")])
+    assert not (tmp_path / "f3" / "fleet.json").exists()
+
+
+def test_every_agent_starts_from_the_base(tmp_path):
+    """The daemon hands the base to each workspace, and takes a stale one
+    away when the next fleet on the same root starts from stock."""
+    from harness.tests.test_workspace import FakeStock  # noqa: F401  (import check only)
+
+    run, st = _saved_stack(tmp_path)
+    root = tmp_path / "agents"
+    cfg = FleetConfig(session_id="s1", root=str(root), dry_run=True, fake_agents=True,
+                      base=str(run), base_digest=st.digest)
+    fleet, broker = build(cfg)
+    try:
+        agent = fleet.make_agent("a01", fleet)
+        assert agent.workspace.base is not None and agent.workspace.base.digest == st.digest
+        assert (root / "a01" / "base.json").is_file()
+        assert "CHUNK = 4096" in agent.workspace.read("srt/managers/schedule_policy.py")
+    finally:
+        broker.shutdown(wait=False)
+    fleet, broker = build(FleetConfig(session_id="s2", root=str(root), dry_run=True,
+                                      fake_agents=True))
+    try:
+        assert fleet.make_agent("a01", fleet).workspace.base is None
+        assert not (root / "a01" / "base.json").exists()
+    finally:
+        broker.shutdown(wait=False)
+
+
+def test_status_and_sessions_name_the_base(tmp_path, capsys):
+    from harness.contracts.session import SessionView
+
+    run, st = _saved_stack(tmp_path)
+    root = tmp_path / "agents"
+    root.mkdir()
+    FleetConfig(session_id="s1", root=str(root), base=str(run), base_digest=st.digest,
+                base_label="a02: ISRTF").save(root / "fleet.json")
+    store = SqliteSessionStore(tmp_path / "s.db")
+    store.create(SessionView(session_id="s1", phase="stopped", root=str(root),
+                             note=f"base {st.digest}"))
+    cli_main(["--store", str(tmp_path / "s.db"), "--session", "s1", "sessions"])
+    assert f"base {st.digest}" in capsys.readouterr().out
+    cli_main(["--store", str(tmp_path / "s.db"), "--session", "s1", "status"])
+    assert f"base:  {st.digest} a02: ISRTF" in capsys.readouterr().out
+
+
+def test_tool_ablate_dispatches_or_says_it_is_missing(monkeypatch, capsys):
+    import harness.tools as tools
+
+    monkeypatch.delattr(tools, "ablate", raising=False)
+    assert cli_main(["tool", "ablate", "--env", "SGLANG_X=1"]) == 2
+    assert "ablate is not available" in capsys.readouterr().err
+    seen = {}
+
+    def fake(workspace, env, tier):
+        seen.update(workspace=workspace, env=env, tier=tier)
+        return {"ok": True, "delta_pct": -3.2}
+
+    monkeypatch.setattr(tools, "ablate", fake, raising=False)
+    assert cli_main(["tool", "ablate", "--workspace", "agents/s/a01", "--env", "SGLANG_X=1",
+                     "--env", "SGLANG_Y=a=b", "--tier", "full", "--json"]) == 0
+    assert seen == {"workspace": "agents/s/a01", "env": {"SGLANG_X": "1", "SGLANG_Y": "a=b"},
+                    "tier": "full"}
+    assert json.loads(capsys.readouterr().out)["delta_pct"] == -3.2
+    assert cli_main(["tool", "ablate", "--env", "NOEQUALS"]) == 2

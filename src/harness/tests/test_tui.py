@@ -249,6 +249,9 @@ async def test_results_tab_lists_experiments_and_answers_questions(tmp_path, mon
         results = app.query_one("#results")
         assert results.row_count == 2
         assert app.results_text.splitlines()[0].startswith("win -14.1")
+        assert [c.label.plain for c in results.columns.values()][:3] == ["verdict", "pub", "tier"]
+        assert results.get_row_at(0)[1].plain == "no-replicate"     # a win, measured once
+        assert "publishable: no-replicate" in app.result_detail_text
         assert not app._ask_open
         await pilot.press("a")
         await pilot.pause()

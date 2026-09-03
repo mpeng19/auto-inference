@@ -362,10 +362,16 @@ def test_decode_path_is_scored_by_generation_not_only_by_prefill():
     r2 = eq.compare(ref, diverged)
     assert r2.top1_agreement == 1.0                     # prefill scoring cannot see it
     assert r2.decode_agreement == 0.375 and r2.decode_exact == 0.0
-    bad, why = eq.regressed(r2)
-    assert bad and "decode" in why
+    # Lossless is a label, not a gate: the accuracy suites decide a lossy
+    # change, and the summary says which this was.
+    assert eq.regressed(r2) == (False, "")
+    assert r.lossless is True and "lossless" in r.summary()
+    assert r2.lossless is False
+    assert "lossy (decode agreement 0.38; floor for a correct kernel 0.84)" in r2.summary()
+    assert r2.as_dict()["lossless"] is False
     old = eq.compare(ref, dict(ref))                    # a record without generated_ids
-    assert old.decode_agreement is None and "decode" not in old.summary()
+    assert old.decode_agreement is None and old.lossless is None
+    assert "decode" not in old.summary() and "loss" not in old.summary()
     src = eq.build_script("m", mode="candidate", out_path="/results/c.json", reference_path="/results/r.json")
     assert "generated_ids" in src and 'input_ids=prompt_ids' in src
     compile(src, "s.py", "exec")
@@ -394,3 +400,18 @@ def test_reference_and_candidate_are_keyed_on_the_launch_line():
     assert E.reference_name("m", serving_args=stock) != E.reference_name("m", serving_args=triton)
     assert E.reference_name("m", serving_args=stock) == E.reference_name("m", serving_args=list(stock))
     assert E.candidate_name("m", "abc", serving_args=stock) != E.candidate_name("m", "abc", serving_args=triton)
+
+
+def test_the_lossless_line_sits_under_two_correct_kernels():
+    """Calibrated on 2026-09-03: triton vs FA3 scored 0.8367, the sparse-KV
+    kernel that drops 80% of pages 0.7721. The line separates them and the
+    message quotes the correct-kernel floor, not the line."""
+    from simulator.measure import equivalence as eq
+
+    assert eq.MIN_DECODE_AGREEMENT < eq.CORRECT_KERNEL_DECODE_AGREEMENT
+    assert 0.7721 < eq.MIN_DECODE_AGREEMENT < 0.8367
+    r = eq.EquivalenceResult(n=10, n_prompts=1, decode_agreement=0.7721, decode_exact=0.6,
+                             lossless=False)
+    assert "floor for a correct kernel 0.84" in r.summary()
+    import inspect
+    assert "min_decode_agreement" not in inspect.signature(eq.regressed).parameters

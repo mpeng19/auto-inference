@@ -30,6 +30,11 @@ dev = [
     "ruff>=0.16.5",
     "seaborn>=0.13.2",
 ]
+# Hybrid search in the harness (ideas, memory, skills): `uv sync --group
+# embeddings` adds a local sentence model; without it every read is lexical.
+embeddings = [
+    "sentence-transformers>=3",
+]
 
 [project.scripts]
 simulate = "simulator.cli:main"

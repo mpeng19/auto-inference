@@ -11,8 +11,10 @@ and `harness tool recall` asks the same question from an agent's shell.
     mem.assert_finding(Finding(...)); mem.prune_stale(current_stack=...)
 
 One SQLite file per fleet (`<root>/memory.db`): experiments, typed edges,
-findings, and FTS5 indexes over both. Reads combine lexical match, graph
-distance from the asking agent's own work, and recency.
+findings, FTS5 indexes over both, and an `embeddings` table. Reads combine
+text match (BM25 blended with sentence-embedding cosine when the optional
+model is installed: `uv sync --group embeddings`; see `harness.embeddings`),
+graph distance from the asking agent's own work, and recency.
 """
 from .sqlite import SqliteMemory
 

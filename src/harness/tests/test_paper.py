@@ -105,3 +105,62 @@ def test_ensure_pdf_compiles_when_missing_or_stale(tmp_path, monkeypatch):
     os.utime(tex, None)
     assert pp.ensure_pdf(tex) == pdf and pdf.stat().st_mtime >= first
     assert pp.find_papers(tmp_path, compile=True)["idea_x"] == pdf
+
+
+def test_template_carries_the_preamble_and_the_evidence_table(tmp_path):
+    """The preamble is the owner's academic-paper template, inlined; the
+    Mechanism section's evidence table is filled from results.evidence_for,
+    with the file each row came from, and says *not measured* where nothing
+    is on disk."""
+    inp = pp.PaperInputs(
+        title="Sparse KV", author="a01", attempts=[], baseline=14.96, figures=[],
+        run_root="/agents/S/a01",
+        evidence={"replicated": True, "gates": "held", "explains": True,
+                  "ablation": {"tier": "screen", "env": {"SGLANG_DISABLE_X": "1"},
+                               "as_is": {"bill_per_1k": 15.0}, "disabled": {"bill_per_1k": 17.4},
+                               "baseline_bill_per_1k": 17.52, "explained_pct": 95.2,
+                               "path": "/agents/S/a01/ablations/0/ablation.json",
+                               "verdict": "the mechanism accounts for 95%"},
+                  "decode_agreement": 0.7721, "lossless": False,
+                  "equivalence_path": "/agents/S/a01/equivalence/d-5.json",
+                  "profile_db": ""})
+    d = pp.paper_dir(tmp_path, "idea_y")
+    src = pp.render_template(inp, d).read_text()
+    for pkg in ("newtxtext", "microtype", "mathtools", "booktabs", "siunitx", "cleveref",
+                "hyperref", "caption", "enumitem", "tolblue"):
+        assert pkg in src, pkg
+    assert "\\newcommand{\\src}" in src and "\\pdfoutput=1\\n" not in src   # XeTeX, see the template
+    for sec in ("Mechanism", "What changed", "Results", "What the gates said",
+                "Limitations and what is unexplained", "Next"):
+        assert f"\\section{{{sec}}}" in src, sec
+    assert "\\label{tab:evidence}" in src and "\\label{tab:attempts}" in src
+    assert "As is \\$15.00/1k, disabled \\$17.40/1k, baseline \\$17.52/1k" in src
+    assert "accounts for 95\\% of the delta" in src and "within the 3\\%" in src
+    assert "\\path{ablations/0/ablation.json}" in src
+    assert "Decode agreement 0.7721" in src and "lossy" in src
+    assert "\\path{equivalence/d-5.json}" in src
+    assert "Profile & \\emph{not measured}" in src
+    assert "pdftitle={Sparse KV}" in src
+    # nothing measured: every row says so, nothing is invented
+    bare = pp.render_template(pp.PaperInputs(title="t", author="a", attempts=[], baseline=None,
+                                             figures=[]), pp.paper_dir(tmp_path, "idea_z"))
+    assert bare.read_text().count("& \\emph{not measured}") == 3
+    prompt = pp.prompt_for(inp, "h", "", "", files=["runs/attempt-002/report.txt"])
+    assert ".claude/skills/writeup/SKILL.md" in prompt and "/agents/S/a01" in prompt
+    assert "runs/attempt-002/report.txt" in prompt and "Refuse to write a number" in prompt
+    assert "accounts for 95%" in prompt and "decode agreement 0.7721 (lossy)" in prompt
+
+
+def test_run_files_lists_what_the_paper_may_cite(tmp_path):
+    a = tmp_path / "a01"
+    for rel in ("runs/attempt-002/report.txt", "runs/attempt-002/result.json",
+                "ablations/0/ablation.json", "equivalence/d-1.json", "workbench-3/stdout.txt"):
+        f = a / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("x")
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "profiles" / "d.sqlite").write_bytes(b"")
+    files = pp.run_files(a)
+    assert "runs/attempt-002/report.txt" in files and "ablations/0/ablation.json" in files
+    assert "workbench-3/stdout.txt" in files and "../profiles/d.sqlite" in files
+    assert pp.run_files(tmp_path / "nope") == []

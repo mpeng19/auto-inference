@@ -347,18 +347,26 @@ class Fleet:
 
     def claim_from_bank(self, agent_id: str) -> Idea | None:
         """A record no one else holds, least like what is live or tried.
-        Diversity here is a property of the claim, not of the agents."""
+        Diversity here is a property of the claim, not of the agents.
+
+        A compounding fleet claims *near* its base instead: the seed is the
+        base stack's label and the idea that produced it, so the bank hands
+        out what builds on the direction that worked. The bank still keeps
+        the claim away from what is live, so ten agents do not get one idea.
+        """
         if self.bank is None:
             return None
         with self._lock:
             live = tuple(i.hypothesis + " " + i.title for i in self._live_ideas)
             tried = tuple(o.idea.hypothesis for o in self._completed[-20:])
+            seed = self._spec.base_seed if self._spec is not None else ""
         # No `live_scales`: an `Idea` does not carry the record's `scale`, so
         # what used to be passed here was a tuple of empty strings and the
         # bank's scale tie-break never fired. Diversity is the text distance
         # above. Making the tie-break live means tracking claimed scales, which
         # changes which record an agent gets -- a decision, not a cleanup.
-        rec = self.bank.claim(agent_id, avoid=live + tried)
+        kw = {"seed": seed} if seed else {}
+        rec = self.bank.claim(agent_id, avoid=live + tried, **kw)
         if rec is None:
             return None
         idea = replace(rec.as_idea(), design=_design_note(rec))
@@ -426,7 +434,12 @@ class Fleet:
                 evals_deduped=getattr(q, "deduped", 0),
                 gpu_utilisation=getattr(q, "utilisation", 0.0),
                 budget_usd=self._spec.fleet_budget.max_usd_total if self._spec else 0.0,
-                pid=os.getpid(), root=self.root, note=self._sleep_note)
+                pid=os.getpid(), root=self.root,
+                # A host-sleep warning outranks it, but otherwise the note
+                # names the base: the one small place a watcher can see
+                # that this fleet is compounding, and on what.
+                note=self._sleep_note or (f"base {self._spec.base_digest}"
+                                          if self._spec and self._spec.base_digest else ""))
 
     # A tick that takes far longer than `tick_s` of wall time means the host
     # was suspended: every agent's Claude call and timeout froze with it,
@@ -513,6 +526,8 @@ class Fleet:
             spec = self._spec
         doc = {"snapshot": asdict(view), "written_at": time.time(),
                "baseline": dict(spec.baseline_metrics) if spec else {},
+               "base": {"digest": spec.base_digest, "seed": spec.base_seed}
+                       if spec and spec.base_digest else {},
                "outcomes": outcomes}
         p = pathlib.Path(self.root) / "summary.json"
         tmp = p.with_suffix(".json.tmp")

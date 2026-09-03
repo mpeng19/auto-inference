@@ -21,6 +21,13 @@ those.
 from. If SGLang is upgraded and that file changes underneath, the stack is
 stale: it would silently revert upstream fixes while still looking like a valid
 experiment. `apply()` refuses rather than producing a plausible wrong number.
+
+**Compounding.** A stack can be built on another: `compose(base, overlay)` is
+the base's files, serving overrides and env with the overlay's layered on top.
+That is how a fleet starts from the best stack of the last one instead of from
+stock -- the overlay is one agent's edits relative to the base, and the result
+is the full stack the runner applies, so its digest (and every cache keyed on
+it) already accounts for the base.
 """
 from __future__ import annotations
 
@@ -67,6 +74,9 @@ class InferenceStack:
     # size is a different experiment.
     serving: dict = field(default_factory=dict)
     env: dict[str, str] = field(default_factory=dict)
+    # Provenance only: the digest of the stack this one was composed on, if
+    # any. Not part of the digest -- the base's content already is.
+    base: str = ""
 
     # ── construction ────────────────────────────────────────────────────
     @classmethod
@@ -119,6 +129,33 @@ class InferenceStack:
         return cls(files={k: pathlib.Path(v).read_text() for k, v in mapping.items()},
                    label=label or f"{len(mapping)} file(s)")
 
+    @classmethod
+    def compose(cls, base: InferenceStack, overlay: InferenceStack) -> InferenceStack:
+        """The full stack `overlay` describes when its edits are relative to
+        `base`: base files, patches, serving and env, with the overlay's
+        layered on top.
+
+        Files and patches: the overlay's version of a path wins. Serving:
+        `ServingConfig.with_overrides` semantics -- a key in the overlay
+        replaces the base's, except `extra_args`, which append. Env: the
+        overlay's variables win, the base's others are kept. `upstream_sha`
+        merges the same way, so drift detection still checks every file
+        against the upstream it was actually derived from.
+        """
+        serving = dict(base.serving)
+        for k, v in overlay.serving.items():
+            if k == "extra_args":
+                serving[k] = list(serving.get(k) or ()) + list(v or ())
+            else:
+                serving[k] = v
+        label = (f"{overlay.label} on {base.label}" if overlay.label and base.label
+                 else overlay.label or base.label)
+        return cls(files={**base.files, **overlay.files},
+                   patches={**base.patches, **overlay.patches},
+                   upstream_sha={**base.upstream_sha, **overlay.upstream_sha},
+                   serving=serving, env={**base.env, **overlay.env},
+                   label=label, base=base.digest)
+
     # ── identity ────────────────────────────────────────────────────────
     @property
     def is_stock(self) -> bool:
@@ -153,15 +190,19 @@ class InferenceStack:
         return f"[{self.digest}] " + "; ".join(parts)
 
     def as_dict(self) -> dict:
-        return {"files": self.files, "patches": self.patches,
-                "upstream_sha": self.upstream_sha, "label": self.label,
-                "serving": self.serving, "env": self.env}
+        d = {"files": self.files, "patches": self.patches,
+             "upstream_sha": self.upstream_sha, "label": self.label,
+             "serving": self.serving, "env": self.env}
+        if self.base:
+            d["base"] = self.base
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> InferenceStack:
         return cls(files=d.get("files", {}), patches=d.get("patches", {}),
                    upstream_sha=d.get("upstream_sha", {}), label=d.get("label", ""),
-                   serving=dict(d.get("serving") or {}), env=dict(d.get("env") or {}))
+                   serving=dict(d.get("serving") or {}), env=dict(d.get("env") or {}),
+                   base=str(d.get("base") or ""))
 
     # ── application, inside the container ───────────────────────────────
     def apply(self, allow_stale: bool = False, root: pathlib.Path | None = None) -> dict:
@@ -189,6 +230,8 @@ class InferenceStack:
                       "digest": self.digest, "label": self.label,
                       "stock": self.is_stock, "applied": [], "stale": [],
                       "restored": restore_stock(root)}
+        if self.base:
+            prov["base"] = self.base
         if not (self.files or self.patches):
             return prov                      # serving-only, or stock: nothing to write
 

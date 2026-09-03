@@ -52,6 +52,16 @@ class FleetConfig:
     screen_seconds: float = 60.0
     baseline: dict = field(default_factory=dict)
     seeds: tuple[str, ...] = ()     # free-text hypotheses to start from
+    # Compounding: the saved stack every agent starts from (anything
+    # `InferenceStack.load` accepts -- a run directory, a stack.json, a
+    # mirrored sglang/ tree). `baseline` is then that stack's own measured
+    # price. The digest and label are recorded so fleet.json says what was
+    # built on even if the path moves; `base_idea` is the hypothesis that
+    # produced it, when memory.db beside it still knows, and seeds claims.
+    base: str = ""
+    base_digest: str = ""
+    base_label: str = ""
+    base_idea: str = ""
     # Where ideas come from once the seeds run out: records are claimed from
     # the bank, one per agent, least similar first. Required unless the
     # agents are fake -- a real agent left to seed itself produced one-line
@@ -83,6 +93,60 @@ class FleetConfig:
 
     def save(self, path) -> None:
         pathlib.Path(path).write_text(json.dumps(asdict(self), indent=1, default=str))
+
+    @property
+    def base_seed(self) -> str:
+        """What a bank claim is steered toward: the base's label and the idea
+        that produced it. Empty when there is no base."""
+        return " ".join(t for t in (self.base_label, self.base_idea) if t).strip()
+
+    def with_base(self, path: str) -> FleetConfig:
+        """This config built on the stack at `path`. Loads it, so a path that
+        does not hold a stack fails here, in the terminal, not in a detached
+        daemon's log."""
+        from dataclasses import replace
+
+        stack = load_base(path)
+        return replace(self, base=str(path), base_digest=stack.digest,
+                       base_label=stack.label, base_idea=base_idea_text(path, stack.digest))
+
+
+def load_base(path: str):
+    """The base stack at `path`, or a `SystemExit` that says why not."""
+    from simulator import InferenceStack
+
+    try:
+        stack = InferenceStack.load(path)
+    except Exception as e:
+        raise SystemExit(f"--base {path}: does not load as a stack "
+                         f"({type(e).__name__}: {e})") from None
+    if stack.is_stock:
+        raise SystemExit(f"--base {path}: loads as stock SGLang; a base must carry "
+                         "files, serving overrides or env, or there is nothing to build on")
+    return stack
+
+
+def base_idea_text(path: str, digest: str) -> str:
+    """The hypothesis that produced the stack with `digest`, if a fleet's
+    `memory.db` above `path` recorded it. A run directory sits at
+    `<root>/<agent>/runs/attempt-NNN`, so walking up finds the root; a
+    stack.json copied elsewhere simply has no idea attached."""
+    import sqlite3
+
+    p = pathlib.Path(path).resolve()
+    for d in (p, *p.parents):
+        db = d / "memory.db"
+        if not db.is_file():
+            continue
+        try:
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            row = c.execute("SELECT hypothesis FROM experiments WHERE stack_digest=? "
+                            "ORDER BY ts DESC LIMIT 1", (digest,)).fetchone()
+            c.close()
+        except sqlite3.Error:
+            return ""
+        return (row[0] or "") if row else ""
+    return ""
 
 
 class _ScriptedProposer:
@@ -175,6 +239,7 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     fleet.bank = bank
     skills = SqliteSkillBank(default_skills_path())
     fleet.skills = skills
+    base = load_base(cfg.base) if cfg.base else None
     if cfg.manager and not cfg.fake_agents:
         from .ideas.llm import ask_with
         from .manager import Manager
@@ -183,6 +248,9 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
 
     def make_agent(agent_id: str, fl: Fleet):
         ws = Workspace(root / agent_id, agent_id=agent_id)
+        # Every agent's "stock" is the base; None also clears a base.json a
+        # previous fleet on this root left behind.
+        ws.set_base(base)
         if cfg.fake_agents:
             prop = _ScriptedProposer(agent_id)
         else:
@@ -207,6 +275,8 @@ def check(cfg: FleetConfig) -> None:
     if not cfg.bank and not cfg.fake_agents:
         raise SystemExit("--bank is required: agents implement a recorded mechanism "
                          "and cannot seed themselves (only --fake-agents can)")
+    if cfg.base:
+        load_base(cfg.base)
     if cfg.dry_run:
         return
     base = cfg.baseline or {}
@@ -237,7 +307,8 @@ def run(cfg: FleetConfig) -> None:
                                  max_concurrent_evals=cfg.eval_capacity,
                                  max_usd_total=cfg.budget_usd,
                                  max_wall_s=cfg.max_wall_s),
-        root=cfg.root, note=cfg.note)
+        root=cfg.root, note=cfg.note,
+        base_digest=cfg.base_digest, base_seed=cfg.base_seed)
 
     stopping = {"flag": False}
 

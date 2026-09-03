@@ -15,11 +15,14 @@ shared by every run on the machine; `HARNESS_HOME` moves it).
     bank.release(rec.id)                    # back to available (an error, not a result)
 
 Ids are content-addressed (`contracts.ideas.content_id`): the same title and
-mechanism imported twice is one record. Similarity is lexical (Jaccard over
-word sets for claims and neighbours, FTS5 BM25 for search): the bank is tens
-to hundreds of records and every decision has to be explainable in the
-timeline; an embedding index buys nothing at this size and would add a
-model call to every claim.
+mechanism imported twice is one record. Similarity is hybrid: Jaccard over
+word sets and FTS5 BM25 for the lexical half, cosine over sentence
+embeddings (`harness.embeddings`, all-MiniLM-L6-v2 on CPU) for the other, so
+a paraphrase of a live idea is recognised as its twin. The model is
+optional -- `uv sync --group embeddings` enables it, and the constructor's
+`embedder=` overrides the default -- and without it every read is lexical
+alone. The bank is tens to hundreds of records, so cosine is one matrix
+product and every decision stays explainable in the timeline.
 
 Producers: `pdf.harvest` (a book, windowed, via a model), `arxiv.harvest`
 (the feed, relevance-sorted, via a model), `SqliteIdeaBank.import_jsonl`

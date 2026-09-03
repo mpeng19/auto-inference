@@ -904,3 +904,59 @@ def test_the_fleet_keeps_publishing_while_it_winds_down():
         assert store.read("wind").phase == "stopped"
     finally:
         broker.shutdown()
+
+
+def test_a_compounding_fleet_claims_near_its_base(tmp_path):
+    """With a base, the bank is asked for what builds on the direction that
+    worked, and the snapshot says what the fleet is built on."""
+    import time
+
+    from harness.contracts import AgentOutcome, Attempt, IdeaRecord
+    from harness.ideas import SqliteIdeaBank
+
+    bank = SqliteIdeaBank(tmp_path / "ideas.db")
+    for t, m, sc in (("fused decode attention", "fuse qk softmax pv in one kernel", "kernel"),
+                     ("int8 KV cache", "store kv in int8 with per-head scales", "memory")):
+        bank.add(IdeaRecord(title=t, mechanism=m, hypothesis=f"{t} lowers cost", scale=sc))
+    seeds = []
+    real_claim = bank.claim
+
+    def claim(agent_id, avoid=(), live_scales=(), seed=""):
+        seeds.append(seed)
+        return real_claim(agent_id, avoid=avoid, live_scales=live_scales, seed=seed)
+
+    bank.claim = claim
+    got = []
+
+    class Agent:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+
+        def propose(self, seed=None, live_ideas=()):
+            raise AssertionError("must not self-seed while the bank has records")
+
+        def run(self, idea, budget):
+            got.append(idea)
+            return AgentOutcome(agent_id=self.agent_id, idea=idea, stop="no_progress",
+                                attempts=(Attempt(idea_id=idea.id, ok=True,
+                                                  experiment_id="exp_9"),), cost_usd=0.0)
+
+    broker = EvalBroker(lambda r: (True, {}, ""), capacity=1)
+    fleet = Fleet(lambda a, f: Agent(a), broker)
+    fleet.bank = bank
+    fleet.start(FleetSpec(fleet_budget=FleetBudget(max_agents=1, max_usd_total=5),
+                          base_digest="abc123def456",
+                          base_seed="a02: int8 kv cache with per-head scales"))
+    try:
+        for _ in range(200):
+            if got:
+                break
+            time.sleep(0.02)
+        assert seeds and seeds[0] == "a02: int8 kv cache with per-head scales"
+        # Without the seed the first record added is handed out; the seed
+        # steers toward the one that continues the base.
+        assert got[0].title == "int8 KV cache"
+        assert fleet._snapshot().note == "base abc123def456"
+    finally:
+        fleet.stop()
+        broker.shutdown()

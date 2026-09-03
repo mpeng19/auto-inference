@@ -49,6 +49,17 @@ Token usage comes back in the JSON envelope, which is what makes per-agent
 cost visible on the dashboard without any estimation. `CallStats` carries the
 rest of that envelope -- duration, API duration, turn count -- so a trace can
 say *why* an agent took two hours.
+
+**Skills.** Before every edit and before the paper step, the harness's own
+skills (`harness/skills/docs/*/SKILL.md`: `tracedb`, `writeup`) and the
+rendered skill bank (`serving-facts`) are written into `.claude/skills/` of
+the directory the call runs in -- the candidate tree for an edit, the paper
+directory for the write-up -- which is where Claude Code discovers project
+skills. `HARNESS_EXTRA_SKILLS`, a colon-separated list of skill directories
+(each holding a `SKILL.md`), adds skills from outside the repo the same way:
+a LaTeX document skill for the paper step, say. Each is symlinked (copied
+when a symlink cannot be made) under `.claude/skills/<directory name>/`.
+Nothing here names a particular path; the variable is the only way in.
 """
 from __future__ import annotations
 
@@ -289,15 +300,44 @@ class ClaudeCodeProposer:
                     out[d.name] = f.read_text()
         return out
 
-    def _install_skills(self, ws: Workspace) -> None:
+    EXTRA_SKILLS_VAR = "HARNESS_EXTRA_SKILLS"
+
+    @classmethod
+    def extra_skill_dirs(cls) -> tuple[pathlib.Path, ...]:
+        """Skill directories named by `HARNESS_EXTRA_SKILLS` (colon-separated)
+        that exist and hold a `SKILL.md`. Anything else in the variable is
+        ignored rather than fatal: a missing skill is a poorer paper, not a
+        dead agent."""
+        raw = os.environ.get(cls.EXTRA_SKILLS_VAR, "")
+        out = []
+        for part in raw.split(os.pathsep):
+            part = part.strip()
+            if not part:
+                continue
+            d = pathlib.Path(part).expanduser()
+            if d.is_dir() and (d / "SKILL.md").is_file():
+                out.append(d)
+        return tuple(out)
+
+    def _install_skills(self, ws: Workspace, into: pathlib.Path | None = None) -> None:
+        """Write the skills where this call's cwd will find them: the
+        candidate tree by default, `into` for a call that runs elsewhere
+        (the paper step runs in the paper directory)."""
         skills = dict(self.skill_docs())
         if self.session_skills is not None:
             with contextlib.suppress(Exception):
                 text = str(self.session_skills() or "")
                 if text:
                     skills["serving-facts"] = text
+        target = pathlib.Path(into) if into is not None else ws.candidates
         with contextlib.suppress(Exception):
-            ws.install_skills(skills)
+            if into is None:
+                ws.install_skills(skills)
+            else:
+                _write_skills(target, skills)
+        for d in self.extra_skill_dirs():
+            with contextlib.suppress(Exception):
+                _link_skill(target / ".claude" / "skills" / d.name, d)
 
     def _mcp_for(self, ws: Workspace, history: tuple[Attempt, ...]) -> str:
         """An MCP config for this attempt: the agent's latest profile, and
@@ -526,10 +566,19 @@ class ClaudeCodeProposer:
             ws.materialise(*files)
         else:
             files = tuple(present)
+        base = getattr(ws, "base", None)
+        base_note = ""
+        if base is not None:
+            base_note = (f"\n**You are editing a base stack, not stock.** This tree is "
+                         f"{ws.base_name}: it already carries earlier wins (its files, "
+                         "serving.json and env are the starting point, and the diff and "
+                         "the price are measured against it). Build on it; do not undo "
+                         "what it does.\n")
         prompt = _EDIT_PROMPT.format(
             hypothesis=idea.hypothesis, title=idea.title, attempt=attempt,
             design=_indent(idea.design) or "    (the idea bank recorded none; "
                                            "work it out and say so in DESIGN.md)",
+            base_note=base_note,
             brief=self._brief_text(brief, "(nothing on record yet)"),
             history=_history(history),
             files="\n".join(f"  - {t}" for t in files)
@@ -564,6 +613,7 @@ class ClaudeCodeProposer:
             prompt_for,
             render_template,
         )
+        from ..results import evidence_for
 
         priced = [a for a in attempts if a.ok and a.metrics.get("bill_per_1k") is not None]
         rows = []
@@ -575,11 +625,30 @@ class ClaudeCodeProposer:
                          "delta": a.delta.get("bill_per_1k_pct"),
                          "n_star": a.metrics.get("n_star"), "gates": gates})
         best_ns = sorted({a.n for a in priced if a.tier == "full"}) or sorted({a.n for a in priced})
+        # The evidence for the stack the paper is about: the best full-tier
+        # attempt's. Replicated means two priced full runs of that digest
+        # (the loop appends the first run before keeping the worse).
+        full = [a for a in priced if a.tier == "full"]
+        best = min(full or priced, key=lambda a: a.metrics.get("bill_per_1k") or 0.0, default=None)
+        ev: dict = {}
+        if best is not None:
+            n_full = sum(1 for a in full if a.stack_digest == best.stack_digest)
+            d_pct = best.delta.get("bill_per_1k_pct")
+            verdict = "win" if d_pct is not None and d_pct <= -3.0 else "neutral"
+            with contextlib.suppress(Exception):
+                ev = evidence_for(ws.root.parent, ws.root.name, best.stack_digest,
+                                  baseline=baseline, replicated=n_full >= 2,
+                                  verdict=verdict, metrics=best.metrics)
         inp = PaperInputs(title=idea.title, author=f"{ws.agent_id or ws.root.name} (auto-inference)",
                           attempts=rows, baseline=baseline,
-                          figures=figures_for(ws.root, best_ns[-2:]))
+                          figures=figures_for(ws.root, best_ns[-2:]),
+                          evidence=ev, run_root=str(ws.root))
         d = paper_dir(ws.root, idea.id)
         tex = render_template(inp, d)
+        # The write-up runs in the paper directory, so the skills go there:
+        # `writeup` (what a paper is here), `tracedb` (how to cite the
+        # profile) and whatever HARNESS_EXTRA_SKILLS names.
+        self._install_skills(ws, into=d)
         design = ""
         for cand in (ws.candidates / "DESIGN.md", ws.root / "DESIGN.md"):
             if cand.is_file():
@@ -614,6 +683,35 @@ class ClaudeCodeProposer:
 
 
 # ── plumbing ─────────────────────────────────────────────────────────────
+
+def _write_skills(base: pathlib.Path, skills: dict[str, str]) -> tuple[pathlib.Path, ...]:
+    """`Workspace.install_skills` for a directory that is not the candidate
+    tree: `.claude/skills/<name>/SKILL.md` under `base`."""
+    out = []
+    for name, text in skills.items():
+        if not text:
+            continue
+        d = base / ".claude" / "skills" / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(text)
+        out.append(d / "SKILL.md")
+    return tuple(out)
+
+
+def _link_skill(dst: pathlib.Path, src: pathlib.Path) -> None:
+    """Put an external skill directory at `dst`: a symlink, so the skill
+    is always current and a 30 MB skill costs nothing per call; a copy when
+    the filesystem refuses. Whatever was at `dst` before is replaced."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.is_symlink() or dst.is_file():
+        dst.unlink()
+    elif dst.is_dir():
+        shutil.rmtree(dst)
+    try:
+        dst.symlink_to(src.resolve(), target_is_directory=True)
+    except OSError:
+        shutil.copytree(src, dst)
+
 
 _TRANSIENT_STATUS = {429, 500, 502, 503, 529}
 _TRANSIENT_RE = re.compile(r"Overloaded|overloaded_error|rate.?limit|API Error: 5\d\d", re.I)
@@ -784,7 +882,7 @@ The idea, as the idea bank recorded it:
 {files}
 
 This is attempt {attempt}.
-
+{base_note}
 What the fleet already knows:
 {brief}
 

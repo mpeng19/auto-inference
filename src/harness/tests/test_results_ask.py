@@ -285,3 +285,95 @@ def test_context_fits_its_budget_by_dropping_the_oldest_runs_first(tmp_path):
     assert len(tiny) <= 1800 and "[truncated]" in tiny
     assert tiny.startswith(f"## Run root\n{root}\n\n## Fleet config")
     assert tiny.count("### a00/workbench-") <= WORKBENCH_KEEP
+
+
+# ── publishable: a win that is explained ─────────────────────────────────
+
+def _evidence_run(tmp_path, *, replicate=True, ablation=True, explains=True, equivalence=True):
+    """The `_run` fixture plus what makes its win publishable: two full
+    prices for the digest in the trace, an ablation record, an equivalence
+    record."""
+    from harness.results import evidence_for, leaderboard
+
+    root = _run(tmp_path)
+    ctx = JsonlContext(root / "traces", session_id="x")
+    from harness.contracts import TraceMeta
+    trace = ctx.open(TraceMeta(agent_id="a00", idea_id="i1", model="proposer"))
+    ctx.append(trace, Turn(kind="eval_result", name="digest-win",
+                           data={"tier": "full", "bill_per_1k": 10.4, "n_star": 12}))
+    if replicate:
+        ctx.append(trace, Turn(kind="eval_result", name="digest-win",
+                               data={"tier": "full", "bill_per_1k": 10.5, "n_star": 12}))
+    agent = root / "a00"
+    if ablation:
+        d = agent / "ablations" / "0"
+        d.mkdir(parents=True)
+        d.joinpath("ablation.json").write_text(json.dumps({
+            "ok": True, "tier": "screen", "env": {"SGLANG_DISABLE_X": "1"},
+            "stack_digest": "digest-win", "baseline_bill_per_1k": 17.52,
+            "as_is": {"bill_per_1k": 15.0, "n_star": 12, "ok": True},
+            "disabled": {"bill_per_1k": 17.4 if explains else 15.3, "n_star": 12, "ok": True},
+            "explained_pct": 95.2 if explains else 12.0, "explains": explains, "ts": 5.0,
+            "verdict": "the mechanism accounts for 95% of the delta"}))
+    if equivalence:
+        d = agent / "equivalence"
+        d.mkdir(parents=True)
+        d.joinpath("digest-win-5.json").write_text(json.dumps({
+            "ok": True, "stack_digest": "digest-win", "decode_agreement": 0.7721,
+            "lossless": False, "result": {"top1_agreement": 0.998}, "ts": 5.0}))
+    return root, leaderboard, evidence_for
+
+
+def test_a_replicated_explained_win_is_publishable(tmp_path):
+    root, leaderboard, evidence_for = _evidence_run(tmp_path)
+    rows = leaderboard(root)
+    best = rows[0]
+    assert best.experiment_id == "exp_win" and best.publishable and best.pub == "yes"
+    ev = best.evidence
+    assert ev["replicated"] and ev["gates"] == "held" and ev["explains"] is True
+    assert ev["ablation"]["disabled"]["bill_per_1k"] == 17.4
+    assert ev["decode_agreement"] == 0.7721 and ev["lossless"] is False
+    assert ev["equivalence_path"].endswith("digest-win-5.json")
+    # the others are not wins, so "no" and no ablation lookup needed
+    assert [r.pub for r in rows[1:]] == ["no", "no"]
+    text = summary_text(root)
+    assert "yes" in text.splitlines()[1] and "pub" in text.splitlines()[0]
+    # the paper step asks with only a directory and a digest
+    ev2 = evidence_for(root, "a00", "digest-win", baseline=12.23, replicated=True,
+                       verdict="win", metrics={"quality": [{"suite": "gsm8k", "accuracy": 0.69}]})
+    assert ev2["explains"] is True and ev2["ablation"]["path"].endswith("ablation.json")
+
+
+def test_a_win_without_an_ablation_or_a_replicate_says_which(tmp_path):
+    root, leaderboard, _ = _evidence_run(tmp_path, ablation=False)
+    assert leaderboard(root)[0].pub == "no-ablation"
+    root2, leaderboard, _ = _evidence_run(tmp_path / "two", replicate=False)
+    assert leaderboard(root2)[0].pub == "no-replicate"
+    root3, leaderboard, _ = _evidence_run(tmp_path / "three", explains=False)
+    r = leaderboard(root3)[0]
+    assert r.pub == "no" and not r.publishable and r.evidence["explains"] is False
+    root4, leaderboard, _ = _evidence_run(tmp_path / "four", equivalence=False)
+    r = leaderboard(root4)[0]
+    assert r.pub == "yes" and r.evidence["decode_agreement"] is None   # lossless is a label, not a bar
+
+
+def test_publishable_rule_is_pure():
+    from harness.results import Result, ablation_explains, evidence_text, publishable
+
+    ev = {"replicated": True, "ablation": {"x": 1}, "gates": "held", "explains": True}
+    assert publishable("win", ev) == (True, "yes")
+    assert publishable("neutral", ev) == (False, "no")
+    assert publishable("win", {**ev, "replicated": False}) == (False, "no-replicate")
+    assert publishable("win", {**ev, "ablation": None}) == (False, "no-ablation")
+    assert publishable("win", {**ev, "gates": "not scored"}) == (False, "no")
+    assert publishable("win", {**ev, "explains": False}) == (False, "no")
+    # a record without its own answer is judged against the baseline given
+    assert ablation_explains({"disabled": {"bill_per_1k": 17.4}}, 17.52) is True
+    assert ablation_explains({"disabled": {"bill_per_1k": 15.0}}, 17.52) is False
+    assert ablation_explains({"explains": False}, 17.52) is False
+    assert ablation_explains(None, 17.52) is None
+    r = Result(experiment_id="e", agent_id="a", verdict="win", hypothesis="h", summary="",
+               bill_per_1k=10.0, delta_pct=-14.0, rank="", share_pct=None, n_star=12,
+               quality="", stack_digest="d", trace_ref="", ts=0.0, evidence=ev, pub="yes",
+               publishable=True)
+    assert "publishable: yes" in evidence_text(r) and "ablation" in evidence_text(r)

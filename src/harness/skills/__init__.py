@@ -2,9 +2,11 @@
 
 `SqliteSkillBank` implements `harness.contracts.SkillBankService`. The manager
 writes facts as it reviews outcomes (`add`, with a model as the contradiction
-`Judge`; `lexical_judge` is the fallback); every agent reads the bank rendered
-as a Claude Code skill (`render`) before it edits; `harness skills` lists,
-adds and retracts by hand.
+`Judge`; the fallback is `lexical_judge` plus embedding cosine when the
+optional model is installed: `uv sync --group embeddings`, see
+`harness.embeddings`); every agent reads the bank rendered as a Claude Code
+skill (`render`) before it edits; `harness skills` lists, adds and retracts
+by hand. `search` is hybrid the same way.
 
     bank = SqliteSkillBank(default_skills_path())
     bank.add(Fact(claim=..., topic=..., evidence=...), judge=...)   # (id, superseded ids)

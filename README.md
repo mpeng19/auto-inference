@@ -78,7 +78,19 @@ uv run harness --session build-1 start --agents 3 --evals 2 --model opus \
   --bank --manager --budget 200 --agent-budget 70 --max-attempts 4 \
   --baseline '{"bill_per_1k": <full>, "quality": {"gsm8k": <acc>, "longbench": <f1>, "mmlu": <acc>}, "screen": {"bill_per_1k": <screen>}}'
 uv run harness --session build-1 tui
+
+# 5. compound: start the next fleet from the best stack
+#    (`harness results` names the run; --baseline is now that run's own report)
+uv run harness --session build-2 start --agents 3 --evals 2 --model opus \
+  --bank --manager --budget 200 --agent-budget 70 --max-attempts 4 \
+  --base agents/build-1/a02/runs/attempt-001 \
+  --baseline '{"bill_per_1k": <base full>, "quality": {...}, "screen": {"bill_per_1k": <base screen>}}'
 ```
+
+Step 5 is the loop that compounds: every agent's "stock" becomes the base
+(its edits, diff and no-change check are all relative to it), the stack it
+evaluates is base plus its own edits, and bank claims are steered toward the
+idea that produced the base. Repeat with the winner of each fleet.
 
 The baseline numbers come from step 1's reports. `harness start` refuses a
 baseline it cannot score against, and refuses to start without a bank:
@@ -142,19 +154,37 @@ LongBench token F1 and MMLU before load, so a change gated on sequence length
 exercised, and a stack that answers worse is rejected whatever it priced at. A
 claimed win is measured twice and the worse run kept; verdicts are recorded as
 win, loss or neutral against a 3% noise floor; screens are judged against stock
-at screen tier. The token-equivalence check scores the prefill (teacher-forced top-1 and
-logprob) and the decode path (greedy generation against stock's; 1.0000 on
-stock itself, and the only score a decode kernel cannot fake). It is one an
-agent runs from its own shell, not a gate the pipeline applies -- the trace
-says whether it did.
+at screen tier. The token-equivalence check scores the prefill (teacher-forced
+top-1 and logprob) and the decode path (greedy generation against stock's;
+1.0000 on stock itself, and the only score a decode kernel cannot fake). Decode
+agreement is a *label*, not a rejection: the result says `lossless` (≥ 0.80;
+two correct kernels score 0.84 against each other) or `lossy`, and a lossy
+change is allowed as long as the accuracy suites hold. It is one an agent runs
+from its own shell, not a gate the pipeline applies -- the trace says whether
+it did.
 
-**What agents know.** Two skills are written into each agent's directory
-before every edit: `tracedb`, the GPU profile as a database (captured on every
-full sweep at one fixed concurrency, `--profile-level`, and served over MCP
-beside stock's profile once one has been ingested), and `serving-facts`, the
-skill bank. The manager reviews every few outcomes, stashes a reusable script
-under the run's `tools/` when it can name the hours saved, and writes facts the
-evidence supports.
+**Publishable means explained.** A win is publishable only when there is a
+measured reason it is faster. `harness tool ablate --env KEY=VAL --tier screen`
+prices the stack twice, as is and with the mechanism's kill switch set on the
+server, and writes `ablations/<n>/ablation.json`: both prices, N\*, the share of
+the delta the mechanism accounts for, and whether the disabled stack returns
+to within 3% of baseline. Two sweeps of real money, run once on the diff that
+won. `harness results` and the TUI show a `pub` column -- `yes`, `no`,
+`no-replicate`, `no-ablation` -- from `results.publishable`: verdict win,
+replicated, gates held, ablation explains it (`docs/methodology.md` §5f).
+
+**What agents know.** Three skills are written into each agent's directory
+before every edit and again into the paper directory before the write-up:
+`tracedb`, the GPU profile as a database (captured on every full sweep at one
+fixed concurrency, `--profile-level`, and served over MCP beside stock's
+profile once one has been ingested); `writeup`, what a paper is here -- every
+claim cites a file in the run directory, the mechanism section is hypothesis
+plus the measurement that tested it, the publishable bar above; and
+`serving-facts`, the skill bank. `HARNESS_EXTRA_SKILLS=/path/to/skill:/other`
+adds skill directories from outside the repo (a LaTeX document skill for the
+paper step, say), symlinked under `.claude/skills/<name>/`. The manager reviews
+every few outcomes, stashes a reusable script under the run's `tools/` when it
+can name the hours saved, and writes facts the evidence supports.
 
 ## Reading a run
 

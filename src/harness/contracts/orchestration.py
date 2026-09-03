@@ -49,6 +49,13 @@ class FleetSpec:
     fleet_budget: FleetBudget = field(default_factory=FleetBudget)
     root: str = "agents"            # per-agent working directories live here
     note: str = ""
+    # A compounding fleet: every agent starts from this saved stack rather
+    # than stock, and `baseline_metrics` is that stack's own measured price.
+    # The digest is what the snapshot shows; `base_seed` (the base's label
+    # plus the idea that produced it, when known) steers bank claims toward
+    # the direction that worked.
+    base_digest: str = ""
+    base_seed: str = ""
 
 
 @dataclass(frozen=True)

@@ -226,3 +226,77 @@ def test_reseeding_an_old_bank_migrates_ids_instead_of_duplicating(bank):
     same = [r for r in bank.list() if r.title == old.title]
     assert len(same) == 1 and same[0].status == "tried" and same[0].experiment_ids == ("exp_1",)
     assert same[0].id.startswith("idea_")
+
+
+# ── hybrid: the embedding half ───────────────────────────────────────────
+def test_a_paraphrased_twin_of_a_live_idea_is_refused_by_claim(tmp_path):
+    """Jaccard puts this twin at 0.27, under `AVOID_CLOSENESS`; the hash
+    embedding puts it at 0.78 (shared stems and `kv`), over `TWIN_COSINE`.
+    Without an embedder the seed hands the twin straight back."""
+    from harness.contracts.ideas import IdeaRecord
+    from harness.embeddings import HashEmbedder
+    live = "sparse kv pages: reads a subset of kv pages by attention score bounds"
+    seed = "sparse kv pages by attention score"
+
+    def fill(bank):
+        twin = bank.add(IdeaRecord(title="kv pages, sparsely",
+                                   mechanism="reads subsets of kv pages by attentional score bounded"))
+        bank.add(IdeaRecord(title="int4 kv cache",
+                            mechanism="store kv values in four bits with per-block scales"))
+        bank.add(IdeaRecord(title="speculative decoding",
+                            mechanism="draft model proposes tokens verified in one step"))
+        return twin
+
+    lexical = SqliteIdeaBank(tmp_path / "lex.db", embedder=None)
+    twin = fill(lexical)
+    assert lexical.claim("a01", avoid=(live,), seed=seed).id == twin     # the blind spot
+    hybrid = SqliteIdeaBank(tmp_path / "hyb.db", embedder=HashEmbedder())
+    twin = fill(hybrid)
+    got = hybrid.claim("a01", avoid=(live,), seed=seed)
+    assert got is not None and got.id != twin
+    hybrid.release(got.id)
+    # and without a seed the twin is the last record handed out
+    order = [hybrid.claim(f"a{i}", avoid=(live,)).id for i in range(3)]
+    assert order[-1] == twin and len(set(order)) == 3
+
+
+def test_hybrid_search_finds_a_record_worded_unlike_the_query(tmp_path):
+    """FTS5 does not stem, so "quantising" never matches "quantisation"."""
+    from harness.contracts.ideas import IdeaRecord
+    from harness.embeddings import HashEmbedder
+    recs = [IdeaRecord(title="int4 kv cache", mechanism="kv cache quantisation with per-block scales"),
+            IdeaRecord(title="speculative decoding", mechanism="draft model proposes tokens verified in one step"),
+            IdeaRecord(title="paged attention kernel", mechanism="reads kv pages by block table")]
+    lexical = SqliteIdeaBank(tmp_path / "lex.db", embedder=None)
+    hybrid = SqliteIdeaBank(tmp_path / "hyb.db", embedder=HashEmbedder())
+    for r in recs:
+        lexical.add(r)
+        hybrid.add(r)
+    assert lexical.search("quantising kv") == ()
+    assert [r.title for r in hybrid.search("quantising kv")] == ["int4 kv cache"]
+    assert hybrid.search("per-block scales")[0].title == "int4 kv cache"   # both signals agree
+    assert [r.title for r in hybrid.related(recs[0].id, k=1)] == ["paged attention kernel"]
+
+
+def test_idea_embeddings_persist_and_switching_model_reembeds(tmp_path):
+    import sqlite3
+
+    from harness.tests.test_embeddings import CountingEmbedder
+    e = CountingEmbedder("m1")
+    bank = SqliteIdeaBank(tmp_path / "ideas.db", embedder=e)
+    a = bank.add(_rec("paged attention", "reads kv pages"))
+    bank.add(_rec("int4 kv", "four bit kv"))
+    assert len(e.calls) == 2                             # one per add
+    bank.search("kv pages")
+    bank.related(a)
+    bank.claim("a01", avoid=("x",))
+    assert e.calls[2:] == [["kv pages"], ["x"]]           # queries only; records are read back
+    e2 = CountingEmbedder("m1")                          # reopened under the same model
+    SqliteIdeaBank(tmp_path / "ideas.db", embedder=e2).search("kv pages")
+    assert e2.calls == [["kv pages"]]
+    e3 = CountingEmbedder("m2")                          # another model: embeds itself on read
+    SqliteIdeaBank(tmp_path / "ideas.db", embedder=e3).search("kv pages")
+    assert sorted(len(c) for c in e3.calls) == [1, 2]
+    rows = sqlite3.connect(tmp_path / "ideas.db").execute(
+        "SELECT model, COUNT(*) FROM embeddings GROUP BY model ORDER BY model").fetchall()
+    assert rows == [("m1", 2), ("m2", 2)]

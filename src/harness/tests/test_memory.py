@@ -97,3 +97,30 @@ def test_negative_results_can_be_excluded_but_are_boosted_by_default(memory):
     with_neg = memory.recall(Recall(intent="chunked prefill", include_negative=True))
     without = memory.recall(Recall(intent="chunked prefill", include_negative=False))
     assert len(with_neg.hits) > len(without.hits)
+
+
+def test_recall_with_an_embedder_surfaces_a_hypothesis_worded_unlike_the_intent(tmp_path):
+    """FTS5 does not stem, so "chunking" never matches "chunked" and the
+    lexical read is blind to this loss; the embedding half sees it."""
+    from harness.embeddings import HashEmbedder
+    from harness.memory import SqliteMemory
+    intent = "increasing the chunking of prefilling"
+
+    def fill(m):
+        m.record(Experiment(id="exp_chunk", verdict="loss",
+                            hypothesis="increased chunked prefill size", summary="TTFT rose"))
+        m.record(Experiment(id="exp_lpm", verdict="win",
+                            hypothesis="lpm schedule policy for prefix reuse",
+                            summary="hit 0.75 -> 0.81, bill -6%"))
+
+    lexical = SqliteMemory(tmp_path / "lex.db", embedder=None)
+    fill(lexical)
+    assert "Nothing on record" in lexical.recall(Recall(intent=intent)).text
+    hybrid = SqliteMemory(tmp_path / "hyb.db", embedder=HashEmbedder())
+    fill(hybrid)
+    br = hybrid.recall(Recall(intent=intent))
+    assert [h.experiment.id for h in br.hits] == ["exp_chunk"]
+    assert br.hits[0].why == "near your intent" and "did NOT work" in br.text
+    # the lexical audit label survives for a hit both signals see
+    br = hybrid.recall(Recall(intent="lpm schedule policy"))
+    assert br.hits[0].experiment.id == "exp_lpm" and br.hits[0].why == "matches your intent"

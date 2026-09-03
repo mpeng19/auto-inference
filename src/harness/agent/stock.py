@@ -24,6 +24,13 @@ reading identical bytes.
 The version is pinned to whatever the runner will apply the diff against.
 Reading 0.5.18 and applying to 0.5.19 is the drift `InferenceStack` refuses at
 apply time; catching it here instead means catching it before a GPU is rented.
+
+**A base is a third source.** A compounding fleet starts every agent from the
+best stack of the last one, not from stock. `BaseSource` layers that stack's
+files over one of the two above: an agent asking for "the current file" gets
+the base's version where the base has one, so its edits -- and its diff, and
+"did anything change" -- are relative to the base. The upstream hash for drift
+detection still comes from the real stock underneath (`stock_sha`).
 """
 from __future__ import annotations
 
@@ -36,7 +43,10 @@ import shutil
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from simulator.stack import InferenceStack
 
 SGLANG_VERSION = "0.5.18"
 CACHE_ROOT = pathlib.Path.home() / ".cache" / "auto-inference" / "sglang"
@@ -173,3 +183,41 @@ def stock(version: str = SGLANG_VERSION) -> StockSource:
         if s.version == version or version == "":
             return s
     return WheelSource(version=version)
+
+
+@dataclass
+class BaseSource:
+    """A saved stack's files layered over a stock source.
+
+    `read(rel)` is the base's text when the base carries that file, else
+    stock's. A base's *patches* are not rendered here (that would need `git
+    apply` on the agent's machine); they travel with the composed stack and
+    are applied in the container, so an agent editing a patched file edits
+    its pre-patch text. Bases are saved from `Workspace.stack()`, which
+    carries whole files, so in practice the case does not arise.
+    """
+    base: InferenceStack
+    stock: StockSource
+    version: str = ""
+
+    def __post_init__(self):
+        self.version = self.version or self.stock.version
+
+    def read(self, rel: str) -> str:
+        text = self.base.files.get(rel)
+        return text if text is not None else self.stock.read(rel)
+
+    def ls(self, prefix: str = "srt") -> tuple[str, ...]:
+        have = set(self.stock.ls(prefix))
+        have.update(r for r in self.base.files if r.startswith(prefix.rstrip("/") + "/"))
+        return tuple(sorted(have))
+
+    def sha(self, rel: str) -> str:
+        return _sha(self.read(rel))
+
+    def stock_sha(self, rel: str) -> str:
+        """The hash of the *upstream* file, for drift detection: the base's
+        own record of it if it has one, else the stock text underneath.
+        Raises like `read` when the file is not in stock at all."""
+        rec = self.base.upstream_sha.get(rel)
+        return rec or self.stock.sha(rel)

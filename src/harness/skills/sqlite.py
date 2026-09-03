@@ -2,7 +2,10 @@
 
 Small by design: tens to a few hundred facts. The interesting part is the
 contradiction step in `add`, which takes a judge so the bank itself never
-has to decide what "contradicts" means.
+has to decide what "contradicts" means. The fallback judge is lexical
+(`lexical_judge`) plus, when an embedder is present, cosine over the claims
+at `embeddings.TWIN_COSINE`, so a restatement in other words also yields.
+`search` is hybrid the same way (see `harness.embeddings`).
 """
 from __future__ import annotations
 
@@ -14,6 +17,14 @@ import threading
 from dataclasses import asdict
 
 from ..contracts.skills import Fact, FactStatus, Judge
+from ..embeddings import (
+    DEFAULT,
+    TWIN_COSINE,
+    Embedder,
+    EmbeddingStore,
+    hybrid_search,
+    resolve,
+)
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -49,13 +60,21 @@ def lexical_judge(new: Fact, existing: tuple[Fact, ...]) -> tuple[str, ...]:
 
 
 class SqliteSkillBank:
-    def __init__(self, path: str | pathlib.Path):
+    def __init__(self, path: str | pathlib.Path, embedder: Embedder | None = DEFAULT):
+        """`embedder` defaults to `embeddings.default_embedder()`; pass
+        `None` for a purely lexical bank."""
         self.path = pathlib.Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._lock = threading.RLock()
+        self.embeddings = EmbeddingStore(resolve(embedder))
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self.embeddings.ensure(c)
+
+    @property
+    def embedder(self) -> Embedder | None:
+        return self.embeddings.embedder
 
     def _conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "conn", None)
@@ -69,7 +88,7 @@ class SqliteSkillBank:
     def add(self, fact: Fact, judge: Judge | None = None) -> tuple[str, tuple[str, ...]]:
         with self._lock:
             same_topic = self.list(topic=fact.topic) if fact.topic else ()
-            losers = tuple((judge or lexical_judge)(fact, same_topic)) if same_topic else ()
+            losers = tuple((judge or self._judge)(fact, same_topic)) if same_topic else ()
             d = asdict(fact)
             d["tags"] = json.dumps(list(fact.tags))
             with self._conn() as c:
@@ -79,6 +98,8 @@ class SqliteSkillBank:
                 c.execute("DELETE FROM facts_fts WHERE id=?", (fact.id,))
                 c.execute("INSERT INTO facts_fts(id,claim,topic,evidence,tags) VALUES (?,?,?,?,?)",
                           (fact.id, fact.claim, fact.topic, fact.evidence, " ".join(fact.tags)))
+                self.embeddings.forget(c, [fact.id])
+                self.embeddings.vectors(c, {fact.id: fact.claim})
             for old in losers:
                 if old != fact.id:
                     self.supersede(old, fact.id)
@@ -104,17 +125,37 @@ class SqliteSkillBank:
         with self._conn() as c:
             return tuple(_row(r) for r in c.execute(q, args).fetchall())
 
-    def search(self, text: str, k: int = 8) -> tuple[Fact, ...]:
-        words = _tokens(text)
-        if not words:
-            return ()
-        q = " OR ".join(f'"{w}"' for w in words)
+    def _judge(self, new: Fact, existing: tuple[Fact, ...]) -> tuple[str, ...]:
+        """The fallback judge: `lexical_judge`, plus any fact whose claim
+        sits at or above `TWIN_COSINE` from the new one when an embedder
+        is present. Both crude; the manager passes a model instead."""
+        losers = set(lexical_judge(new, existing))
         with self._conn() as c:
-            ids = [r["id"] for r in c.execute(
-                "SELECT id FROM facts_fts WHERE facts_fts MATCH ? ORDER BY bm25(facts_fts) LIMIT ?",
-                (q, k * 2)).fetchall()]
-        out = [f for f in (self.get(i) for i in ids) if f and f.status == "active"]
-        return tuple(out[:k])
+            vectors = self.embeddings.vectors(c, {f.id: f.claim for f in existing})
+        qv = self.embeddings.query(new.claim) if vectors else None
+        if qv is not None:
+            losers.update(f.id for f in existing
+                          if f.id in vectors and float(vectors[f.id] @ qv) >= TWIN_COSINE)
+        return tuple(f.id for f in existing if f.id in losers)
+
+    def search(self, text: str, k: int = 8) -> tuple[Fact, ...]:
+        """Active facts by BM25 over claim, topic, evidence and tags, blended
+        with cosine over the claim when an embedder is present."""
+        words = _tokens(text)
+        if not words and not self.embeddings.active:
+            return ()
+        active = {f.id: f for f in self.list()}
+        lexical: dict[str, float] = {}
+        with self._lock, self._conn() as c:
+            if words:
+                q = " OR ".join(f'"{w}"' for w in words)
+                lexical = {r["id"]: -r["rank"] for r in c.execute(
+                    "SELECT id, bm25(facts_fts) AS rank FROM facts_fts "
+                    "WHERE facts_fts MATCH ? ORDER BY rank LIMIT ?",
+                    (q, max(4 * k, 40))).fetchall()}
+            ranked = hybrid_search(self.embeddings, c, text,
+                                   {i: f.claim for i, f in active.items()}, lexical, k)
+        return tuple(active[i] for i, _ in ranked)
 
     def supersede(self, old_id: str, by: str) -> None:
         with self._lock, self._conn() as c:

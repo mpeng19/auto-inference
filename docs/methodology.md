@@ -641,6 +641,49 @@ replicas, a larger KV pool via `--mem-fraction-static`, and eviction policy in
 `radix_cache.py` — a file a candidate stack can replace outright, since
 SGLang's serving layer is pure Python.
 
+## 5f. Lossless is a label; publishable means explained
+
+Two policy decisions of 2026-09-03, both about what a number is allowed to
+claim.
+
+**Decode agreement no longer rejects.** The token-equivalence check
+(`simulator.measure.equivalence`) scores a candidate two ways: teacher-forced
+top-1 agreement and logprob drift over ~2,000 prefill positions, and greedy
+decode agreement against stock's own generation. The decode score was
+calibrated on 32 LongBench prompts × 64 tokens: stock against its own
+reference 1.0000; stock's triton attention against FA3 — two correct kernels
+— 0.8367; a wave-aligned paged decode 0.8787; a query-aware sparse-KV kernel
+that drops 80% of pages 0.7721. Greedy decode is chaotic, so a
+different-but-correct summation order lands near 0.84, and the line
+`MIN_DECODE_AGREEMENT = 0.80` sits under that floor. Until now a stack under
+the line was a regression. It is now a **label**: the result carries
+`lossless = decode_agreement >= 0.80`, the summary says `lossless` or `lossy
+(decode agreement 0.77; floor for a correct kernel 0.84)`, and nothing is
+rejected on it. The reason is the owner's policy: KV compression, sparse
+attention and low-precision kernels are on the table, and an improvement
+need not be lossless **as long as the accuracy benchmarks hold** — GSM8K,
+LongBench F1 and MMLU, scored on every evaluation, remain the gate. The
+teacher-forced thresholds and `aligned=False` still reject; they detect a
+broken comparison or a different model, not a lossy one. The paper reports
+which label the stack earned.
+
+**A win is publishable only when it is explained.** Being faster is not a
+finding; knowing *why* is. `harness results` and the TUI carry a `pub`
+column, and `results.publishable` says yes when all four hold: the verdict
+is a **win** (≤ −3%, the noise floor); it was **replicated** (two full-tier
+prices, the worse kept); the **accuracy gates held**; and an **ablation
+explains it** — `harness tool ablate --env KEY=VAL` prices the stack twice
+at a tier, as is and with the mechanism's kill switch set on the server, and
+the disabled price must return to within 3% of baseline. The record
+(`<agent>/ablations/<n>/ablation.json`) also carries the share of the delta
+the mechanism accounts for, `(disabled − as_is) / (baseline − as_is)`. A
+disabled stack still well under baseline means something else in the diff is
+doing the work, and the paper may not name the mechanism as the cause. The
+labels `no-replicate` and `no-ablation` say which step is missing; the
+`writeup` skill (`harness/skills/docs/writeup/SKILL.md`) spells the bar out
+for the agent writing the paper, together with the rule that every number
+cites a file in the run directory.
+
 ## 6. Assumptions
 
 ### 6.1 Verified against external data

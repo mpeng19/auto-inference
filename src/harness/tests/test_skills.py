@@ -43,3 +43,21 @@ def test_lexical_judge_is_the_crude_fallback():
     b = Fact(claim="the KV read runs at about 25 percent of H100 bandwidth", topic="kv")
     c = Fact(claim="prefix cache hit rate is 0.7 under market load", topic="kv")
     assert lexical_judge(a, (b, c)) == (b.id,)
+
+
+def test_hybrid_search_and_the_cosine_contradiction_check(tmp_path):
+    from harness.embeddings import HashEmbedder
+    b = SqliteSkillBank(tmp_path / "skills.db", embedder=HashEmbedder())
+    quant = Fact(claim="int4 kv cache quantisation keeps GSM8K within noise", topic="kv")
+    b.add(quant)
+    b.add(Fact(claim="chunked prefill at 8192 is not binding at N<=24", topic="chunked-prefill"))
+    assert b.search("quantising kv") == (quant,)          # no word in common; FTS5 does not stem
+    old = Fact(claim="KV read runs at 25 percent of H100 bandwidth at bs 8", topic="bw")
+    new = Fact(claim="KV reads run at 25 pct of H100 bandwidth at bs 8", topic="bw")
+    assert lexical_judge(new, (old,)) == ()               # Jaccard 0.33, under the lexical bar
+    b.add(old)
+    assert b.add(new)[1] == (old.id,)                     # cosine 0.63: a restatement, it yields
+    assert b.get(old.id).status == "superseded"
+    plain = SqliteSkillBank(tmp_path / "plain.db", embedder=None)
+    plain.add(old)
+    assert plain.add(new)[1] == ()
