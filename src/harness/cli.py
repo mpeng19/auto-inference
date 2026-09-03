@@ -37,6 +37,7 @@ neither needs the other to exist.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import pathlib
@@ -459,6 +460,48 @@ def cmd_calls(a) -> int:
     return 0
 
 
+def cmd_spend(a) -> int:
+    """Every dollar a fleet's directory can account for: evaluations from
+    their `result.json`, tool calls from their workbench results, and the
+    calls that never got a result. The fleet's own total counted only the
+    first until 2026-09-03; this reads the disk, so it works for old runs."""
+    import json
+
+    from .agent.evaluator import sweep_cost
+
+    root = pathlib.Path(_root_of(a))
+    if not root.is_dir():
+        print(f"no fleet directory at {root}", file=sys.stderr)
+        return 1
+    agents = sorted(p for p in root.glob("a*") if p.is_dir() and p.name[1:].isdigit())
+    tot_ev = tot_wb = 0.0
+    orphans = 0
+    print(f"{'agent':<6} {'evals':>5} {'$ evals':>9} {'tools':>5} {'$ tools':>9} {'no result':>9}")
+    for ag in agents:
+        ev = wb = 0.0
+        n_ev = n_wb = n_or = 0
+        for r in ag.glob("runs/*/sweep.json"):
+            with contextlib.suppress(Exception):
+                ev += sweep_cost(json.loads(r.read_text()))
+                n_ev += 1
+        for r in ag.glob("workbench-*/result.json"):
+            with contextlib.suppress(Exception):
+                wb += float(json.loads(r.read_text()).get("cost_usd") or 0.0)
+                n_wb += 1
+        for c in list(ag.glob("workbench-*/call_id")) + list(ag.glob("runs/*/call_id")):
+            if not (c.parent / "result.json").is_file():
+                n_or += 1
+        tot_ev += ev
+        tot_wb += wb
+        orphans += n_or
+        print(f"{ag.name:<6} {n_ev:>5} {ev:>9.2f} {n_wb:>5} {wb:>9.2f} {n_or:>9}")
+    print(f"{'total':<6} {'':>5} {tot_ev:>9.2f} {'':>5} {tot_wb:>9.2f} {orphans:>9}")
+    print(f"\n${tot_ev + tot_wb:.2f} accounted for on disk. Calls with no result ran "
+          "to completion unwatched (killed tools, killed daemons) and billed "
+          "for their full length; that money is not in this total.")
+    return 0
+
+
 def cmd_paper(a) -> int:
     """List the run's papers, or compile one agent's .tex again."""
     from .paper import compile_tex, find_papers
@@ -665,6 +708,9 @@ def main(argv: list[str] | None = None) -> int:
     cl.add_argument("-v", "--verbose", action="store_true", help="one line per message")
     cl.set_defaults(fn=cmd_calls)
 
+    sp = sub.add_parser("spend", help="every dollar the fleet directory accounts for")
+    sp.add_argument("--root", default="", help="fleet root (default: the session's)")
+    sp.set_defaults(fn=cmd_spend)
     pp = sub.add_parser("paper", help="the write-up PDFs, one per idea")
     pp.add_argument("--root", default="", help="fleet root (default: the session's)")
     pp.add_argument("--compile", default="", help="compile this PAPER.tex again")

@@ -44,3 +44,15 @@ def test_pending_calls_are_the_ones_without_a_result(tmp_path):
     assert (tmp_path / "a00/runs/attempt-001/cancelled").is_file()
     assert not (tmp_path / "a00/workbench-3/cancelled").is_file()
     assert [c for c, _ in pending_call_ids(tmp_path)] == ["fc-3"]
+
+
+def test_a_sweep_is_billed_for_the_whole_call_not_just_load_and_levels():
+    from harness.agent.evaluator import sweep_cost, sweep_seconds
+
+    rec = {"serving": {"gpu": "H100", "n_gpu": 1}, "model_load_s": 300.0,
+           "levels": [{"wall_s": 63.0}, {"wall_s": 63.0}],
+           "started_at": 1000.0, "finished_at": 1700.0}
+    assert sweep_seconds(rec) == 700.0                 # not 426
+    assert sweep_seconds({"model_load_s": 10.0, "levels": [{"wall_s": 5.0}]}) == 15.0
+    assert sweep_cost(rec) > sweep_cost({**rec, "finished_at": None})
+    assert sweep_cost({}) == 0.0

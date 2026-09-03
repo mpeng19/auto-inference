@@ -291,6 +291,18 @@ agents' edit time, which is model latency, not harness.
   with the diff never priced (build-4's a00, 174 minutes of writing). The
   loop now checks and screens whatever the workspace holds when the edit is
   killed; only an untouched workspace is an error. Same restart caveat.
+- **Spend was under-reported by 4-5x.** The fleet total counted evaluations
+  only, and each evaluation for model load plus level time. Not counted:
+  every `gpu-run`, `ncu` and `equivalence` call the agents made from their
+  own shells (build-4: 300 calls, $83), the quality suites, warm-up, canaries
+  and flushes inside each sweep (30-45% of it), and calls that ran on after
+  their reader was killed (12 on build-4). `harness --session S spend`
+  now reads all of it off disk for any run; the fleet total includes tool
+  spend (`<agent>/spend.jsonl`, drained after every model call) and bills
+  the whole sweep; a killed tool cancels its Modal call; `--force` and a
+  daemon exit cancel everything still in flight. Modal's own bill is still
+  the truth: cold starts before the timer and warm idle after it are not
+  on disk.
 - **An API outage churned the bank.** From 09:30 on 2026-09-03 opus
   returned 529 Overloaded for over an hour; every edit call failed after ~4
   min, each failure closed the idea as an error, released the record and

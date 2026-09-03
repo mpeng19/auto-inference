@@ -22,6 +22,36 @@ import pathlib
 from dataclasses import dataclass, field
 
 
+def sweep_seconds(record: dict) -> float:
+    """Container seconds a sweep record accounts for. The whole call when
+    the record has both stamps: model load and the levels were only 55-70%
+    of it on build-4 (quality suites, warm-up, canaries and the flush
+    between levels are the rest), and Modal bills all of it."""
+    if not record:
+        return 0.0
+    parts = float(record.get("model_load_s") or 0.0)
+    parts += sum(float(lv.get("wall_s") or 0.0) for lv in record.get("levels") or ())
+    for m in record.get("mixes") or ():
+        parts += float(m.get("wall_s") or 0.0)
+    t0, t1 = record.get("started_at"), record.get("finished_at")
+    if t0 and t1 and float(t1) > float(t0):
+        return max(parts, float(t1) - float(t0))
+    return parts
+
+
+def sweep_cost(record: dict, *, vcpu: float = 16.0, memory_gib: float = 0.0,
+               gpu_default: str = "H100") -> float:
+    """Modal dollars for one sweep record, at the retail container rate."""
+    from simulator import costs
+
+    if not record:
+        return 0.0
+    n_gpu = max(1, (record.get("serving") or {}).get("n_gpu", 1))
+    gpu = (record.get("serving") or {}).get("gpu", gpu_default)
+    rate = costs.container_rate(gpu, n_gpu, vcpu=vcpu, memory_gib=memory_gib)
+    return round(sweep_seconds(record) * rate / 3600.0, 4)
+
+
 @dataclass
 class SimulatorEvaluator:
     """Runs a real sweep. ~25-60 GPU-minutes and real money per call."""
@@ -61,16 +91,8 @@ class SimulatorEvaluator:
         `serving_basis=False`. And the GPU is not the whole container: the
         16 vCPUs the load generator needs are billed too (`costs.container_rate`).
         """
-        if not record:
-            return 0.0
-        n_gpu = max(1, (record.get("serving") or {}).get("n_gpu", 1))
-        gpu = (record.get("serving") or {}).get("gpu", self.gpu)
-        seconds = float(record.get("model_load_s") or 0.0)
-        seconds += sum(float(lv.get("wall_s") or 0.0)
-                       for lv in record.get("levels") or ())
-        for m in record.get("mixes") or ():
-            seconds += float(m.get("wall_s") or 0.0)
-        return round(seconds * self._rate(gpu, n_gpu) / 3600.0, 4)
+        return sweep_cost(record, vcpu=self.vcpu, memory_gib=self.memory_gib,
+                          gpu_default=self.gpu)
 
     def _ingest_profile(self, record: dict, digest: str, fetch=None) -> str:
         """Bring a captured trace local and load it into a tracedb file.
