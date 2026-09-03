@@ -168,3 +168,56 @@ def test_powerlaw_refuses_data_that_cannot_support_a_fit():
     assert powerlaw([2.0, 2.0, 2.0], [1.0, 2.0, 3.0]) is None  # no x spread
     # Non-positive values cannot be logged, and dropping them can leave too few.
     assert powerlaw([1.0, 2.0, 4.0, 8.0], [1.0, 0.0, -1.0, 2.0]) is None
+
+
+def test_startup_marks_read_the_server_log_timestamps(tmp_path):
+    import datetime as dt
+
+    from simulator.measure.server import startup_marks
+
+    t0 = dt.datetime(2026, 9, 3, 10, 0, 0)
+    def stamp(sec): return (t0 + dt.timedelta(seconds=sec)).strftime("[%Y-%m-%d %H:%M:%S TP0]")
+    log = tmp_path / "sglang.log"
+    log.write_text("\n".join([
+        "some unstamped line",
+        f"{stamp(5)} Load weight begin. avail mem=79.10 GB",
+        f"{stamp(95)} Load weight end. type=Qwen3ForCausalLM",
+        f"{stamp(120)} Capture cuda graph begin. This can take up to several minutes.",
+        f"{stamp(160)} Capture cuda graph end. Time elapsed: 40.00 s.",
+        f"{stamp(170)} The server is fired up and ready to roll!"]))
+    marks = startup_marks(str(log), t0.timestamp() - 2.0)
+    assert marks == {"weights_begin": 7.0, "weights_end": 97.0, "graph_begin": 122.0,
+                     "graph_end": 162.0, "ready": 172.0}
+    assert startup_marks(str(tmp_path / "missing.log"), 0.0) == {}
+
+
+def test_a_level_ends_by_aborting_what_is_still_streaming():
+    """The cancelled streams keep generating until the server notices the
+    disconnect; on build-4 the next level's flush waited its full 90 s at
+    four of five levels because of it. Ask the server, don't wait."""
+    import asyncio
+    import contextlib
+
+    from simulator.measure.loadgen import abort_all
+
+    seen = []
+
+    class Http:
+        def __init__(self, status=200, fail=False):
+            self.status, self.fail = status, fail
+
+        def post(self, url, json=None, timeout=None):
+            seen.append((url, json))
+            status, fail = self.status, self.fail
+
+            @contextlib.asynccontextmanager
+            async def cm():
+                if fail:
+                    raise OSError("connection refused")
+                yield type("R", (), {"status": status})()
+            return cm()
+
+    assert asyncio.run(abort_all("http://s:1", Http())) is True
+    assert asyncio.run(abort_all("http://s:1", Http(status=400))) is False
+    assert asyncio.run(abort_all("http://s:1", Http(fail=True))) is False
+    assert seen[0] == ("http://s:1/abort_request", {"abort_all": True})

@@ -282,6 +282,12 @@ class ClaudeCodeProposer:
         # Put the console scripts first on PATH so `harness tool ...` resolves.
         bindir = os.path.dirname(sys.executable)
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        # Claude Code kills a shell command at 10 minutes by default and
+        # `harness tool gpu-run` takes 5-15 (model load alone is 3-5). On
+        # build-4 that was 21 tool calls cut at exactly 600 s: the Modal call
+        # ran on and billed, the agent never saw the result and ran it again.
+        env.setdefault("BASH_DEFAULT_TIMEOUT_MS", str(30 * 60 * 1000))
+        env.setdefault("BASH_MAX_TIMEOUT_MS", str(60 * 60 * 1000))
         if not self.use_api_key:
             for k in self.AUTH_VARS:
                 env.pop(k, None)
@@ -940,11 +946,14 @@ Your workbench, in order. Run all three before you finish:
       parses everything and checks for undefined names. Free. A NameError
       costs six GPU-minutes to discover on a GPU.
   harness tool gpu-run <script.py>
+      runs your script on an H100 inside this exact stack. ~$1, 5-15 minutes
+      (model load alone is 3-5). Your shell tool allows 30 minutes per
+      command here; keep one gpu-run per command and do not run it in the
+      background -- a killed command still bills the GPU and loses the result.
   harness tool ncu <script.py> --kernel <regex>
       hardware counters per kernel from Nsight Compute: DRAM and SM
       throughput as % of peak, occupancy, L2 hit rate. tracedb says which
       kernel and how long; this says why. Profile a decode step, not a sweep.
-      runs your script on an H100 inside this exact stack. ~$1, 3-8 minutes.
       Write a script that does BOTH: a micro-benchmark of the kernel you
       changed (old path vs new, same shapes, timed properly with warmup), and
       a correctness check against the stock path on random inputs -- shapes

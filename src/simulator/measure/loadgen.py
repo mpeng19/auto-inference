@@ -166,7 +166,25 @@ async def run_concurrent_users(make_session, base_url: str, model: str,
                                                   http, out))
                  for i in range(n_users)]
         await run_until(tasks, duration_s + grace_s)
+        # The cancelled streams are still generating on the server: it aborts
+        # a request when it notices the disconnect, which took long enough
+        # that the next level's flush waited its full 90 s at four of five
+        # levels on every build-4 sweep. Tell it, instead of waiting.
+        await abort_all(base_url, http)
     return sorted(out, key=lambda r: r.dispatched_s)
+
+
+async def abort_all(base_url: str, http) -> bool:
+    """POST /abort_request {abort_all}: SGLang drops every running and
+    queued request. Best effort; the flush after it reports what remained."""
+    import aiohttp
+
+    try:
+        async with http.post(f"{base_url}/abort_request", json={"abort_all": True},
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+            return r.status == 200
+    except Exception:
+        return False
 
 
 async def run_until(tasks: list, timeout_s: float) -> int:

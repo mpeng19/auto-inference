@@ -507,3 +507,11 @@ def test_a_prompt_failure_is_not_retried(tmp_path):
     with pytest.raises(RuntimeError, match="exited 3"):
         prop._run("go", cwd=tmp_path)
     assert len(prop.calls) == 1 and not prop.calls[0].transient
+
+
+def test_agent_shell_commands_get_a_gpu_run_sized_timeout(tmp_path):
+    """build-4: 21 tool calls cut at exactly 600 s, Claude Code's default;
+    each one a gpu-run that billed the GPU and lost the result."""
+    env = ClaudeCodeProposer(binary=_fake_claude(tmp_path, "exit 0\n"))._env()
+    assert int(env["BASH_DEFAULT_TIMEOUT_MS"]) >= 20 * 60 * 1000
+    assert int(env["BASH_MAX_TIMEOUT_MS"]) >= int(env["BASH_DEFAULT_TIMEOUT_MS"])

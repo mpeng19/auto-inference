@@ -226,11 +226,14 @@ def sweep(serving: dict, slo: dict, stack: dict, levels: list[int],
     log_path = "/tmp/sglang.log"
 
     with open(log_path, "wb") as log:
+        t_launch = time.time()
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
                                 env=_server_env(st.env))
         try:
             rec["model_load_s"] = round(asyncio.run(srv.wait_until_ready(
                 SERVER_URL, 2400, proc=proc, log_path=log_path, stall_s=420)), 1)
+            rec["startup"] = srv.startup_marks(log_path, t_launch)
+            print("startup:", rec["startup"], flush=True)
             hf_cache.commit()
             asyncio.run(srv.warmup(SERVER_URL, sc.model, 20))
 

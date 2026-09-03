@@ -455,6 +455,35 @@ async def stop_profile(base_url: str) -> dict:
         return {"status": 0, "body": f"{type(e).__name__}: {e}"}
 
 
+_MARKS = (("weights_begin", "Load weight begin"), ("weights_end", "Load weight end"),
+          ("graph_begin", "graph begin"), ("graph_end", "graph end"),
+          ("ready", "fired up and ready"))
+_STAMP = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+
+
+def startup_marks(log_path: str, t_launch: float) -> dict:
+    """Seconds from launch to each startup milestone, read off the server
+    log's timestamps. `model_load_s` alone was 160-340 s on build-4 and could
+    not say whether that was weights, CUDA graphs or JIT warm-up; this can.
+    Missing marks are simply absent."""
+    import datetime as dt
+
+    out: dict = {}
+    try:
+        text = pathlib.Path(log_path).read_text(errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        m = _STAMP.match(line)
+        if not m:
+            continue
+        for key, needle in _MARKS:
+            if key not in out and needle in line:
+                t = dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+                out[key] = round(t - t_launch, 1)
+    return out
+
+
 async def wait_idle(base_url: str, timeout_s: float = 90.0, poll_s: float = 1.0) -> dict:
     """Wait until the server reports no running and no queued requests.
 
