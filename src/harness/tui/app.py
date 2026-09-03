@@ -39,6 +39,7 @@ carrying on into the main panel, which is what textual does by default.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
 import time
@@ -161,6 +162,7 @@ class FleetApp(App):
     Screen { layout: vertical; overflow: hidden; }
     #summary { height: 4; padding: 0 1; }
     #baseline { height: 1; padding: 0 1; color: $text-muted; }
+    #bill { height: 1; padding: 0 1; color: $text-muted; }
     #main { height: 1fr; }
     #tabs, #fleet_pane, #results_pane, #body, #results_body, #agents { height: auto; }
     DataTable { max-height: 100vh; }
@@ -230,6 +232,7 @@ class FleetApp(App):
         yield Header(show_clock=True)
         yield Static(id="summary")
         yield Static(id="baseline")
+        yield Static(id="bill")
         with VerticalScroll(id="main"), TabbedContent(id="tabs"):
             with TabPane("fleet", id="tab_fleet"), Vertical(id="fleet_pane"), Horizontal(id="body"):
                 with Vertical(id="agents"):
@@ -258,6 +261,14 @@ class FleetApp(App):
                        ("share", 7), ("N*", 4), ("agent", 6), ("hypothesis", 40)):
             r.add_column(col, width=w)
         self.set_interval(REFRESH_S, self.refresh_view)
+        # Modal's own bill, so the dollars on this screen can be read against
+        # the one Modal will charge. Fetched in the background every five
+        # minutes; the line shows a dash until the first reading lands.
+        from ..billing import Cached
+
+        self._bill = Cached()
+        self._show_bill()
+        self.set_interval(30.0, self._show_bill)
         self.refresh_view()
 
     # ── data ─────────────────────────────────────────────────────────────
@@ -751,7 +762,10 @@ class FleetApp(App):
                 subprocess.Popen([ide, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
         if kind == "browser":
-            webbrowser.open(f"file://{path}")
+            # An absolute file URI. `file://agents/build-4/timeline.html` is a
+            # host named "agents", which is the ERR_INVALID_URL the browser
+            # showed for every relative fleet root.
+            webbrowser.open(pathlib.Path(path).resolve().as_uri())
             return
         opener = shutil.which("open") or shutil.which("xdg-open")
         if opener:
@@ -775,6 +789,12 @@ class FleetApp(App):
         """Enter on a result row does what `b` does."""
         if getattr(event.data_table, "id", "") == "results":
             self.action_open_report()
+
+    def _show_bill(self) -> None:
+        b = self._bill.get()
+        text = b.line() if b else "modal this cycle  -  (bill not fetched yet, or no Modal token)"
+        with contextlib.suppress(Exception):
+            self.query_one("#bill", Static).update(Text(text))
 
     def action_open_timeline(self) -> None:
         from ..timeline import render_html

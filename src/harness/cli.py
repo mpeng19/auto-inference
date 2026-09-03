@@ -187,6 +187,10 @@ def cmd_status(a) -> int:
           f"   {v.tokens.total:,} tokens   updated {age:.0f}s ago")
     if v.note:
         print(f"note:  {v.note}")
+    from .billing import fetch as fetch_bill
+
+    b = fetch_bill(timeout_s=8.0)
+    print(b.line() if b else "modal this cycle  -  (Modal not reachable)")
     print(f"evals: {v.evals_running} running, {v.evals_queued} queued, "
           f"{v.evals_completed} done, {v.evals_deduped} deduped, "
           f"{v.gpu_utilisation:.0%} eval-slot utilisation")
