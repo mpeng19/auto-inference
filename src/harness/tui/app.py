@@ -22,7 +22,7 @@ from typing import ClassVar
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     DataTable,
     Footer,
@@ -74,7 +74,8 @@ class FleetApp(App):
     #results { width: 2fr; }
     #result_detail { width: 1fr; padding: 0 1; border-left: solid $panel; }
     #ask { dock: bottom; }
-    #answer { height: auto; max-height: 12; padding: 0 1; border-top: solid $panel; }
+    #answer_box { height: 12; padding: 0 1; border-top: solid $panel; }
+    #answer { height: auto; }
     """
 
     BINDINGS: ClassVar = [
@@ -85,6 +86,8 @@ class FleetApp(App):
         ("-", "scale_down", "Remove agent"),
         ("s", "stop_fleet", "Stop fleet"),
         ("a", "ask", "Ask about the run"),
+        ("ctrl+up", "answer_grow", "Bigger answer box"),
+        ("ctrl+down", "answer_shrink", "Smaller answer box"),
         ("tab", "next_tab", "Fleet / results"),
         ("q", "quit", "Quit (fleet keeps running)"),
     ]
@@ -119,8 +122,9 @@ class FleetApp(App):
                 with Horizontal(id="results_body"):
                     yield DataTable(id="results", cursor_type="row", zebra_stripes=True)
                     yield Static(id="result_detail")
-                yield Static(id="answer")
-                yield Input(placeholder="ask about this run (Enter to send)", id="ask")
+                with VerticalScroll(id="answer_box"):
+                    yield Static(id="answer")
+                yield Input(placeholder="ask about this run (Enter to send; ctrl+up/down resizes)", id="ask")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -347,6 +351,19 @@ class FleetApp(App):
     def _set_answer(self, text: str, style: str = "") -> None:
         self.answer_text = text
         self.query_one("#answer", Static).update(Text(text, style=style))
+        box = self.query_one("#answer_box", VerticalScroll)
+        box.scroll_end(animate=False)
+
+    def _resize_answer(self, delta: int) -> None:
+        box = self.query_one("#answer_box", VerticalScroll)
+        cur = int(getattr(box.styles.height, "value", 12) or 12)
+        box.styles.height = max(4, min(40, cur + delta))
+
+    def action_answer_grow(self) -> None:
+        self._resize_answer(4)
+
+    def action_answer_shrink(self) -> None:
+        self._resize_answer(-4)
 
     def _settle_pending(self) -> None:
         """Drop a pending mark once the fleet's view reflects the command.

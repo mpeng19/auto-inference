@@ -172,3 +172,12 @@ async def test_results_tab_lists_experiments_and_answers_questions(tmp_path, mon
             if "about demo: why" in app.answer_text:
                 break
         assert "about demo: why" in app.answer_text
+        from textual.containers import VerticalScroll
+        box = app.query_one("#answer_box", VerticalScroll)
+        h0 = int(box.styles.height.value)
+        await pilot.press("ctrl+up")
+        await pilot.pause()
+        assert int(box.styles.height.value) == h0 + 4
+        await pilot.press("ctrl+down")
+        await pilot.pause()
+        assert int(box.styles.height.value) == h0
