@@ -2,29 +2,174 @@
   "ok": true,
   "reason": "",
   "n_star": 12,
+  "interpolated": {
+    "n_star": 12.21,
+    "bill_per_1k": 8.231,
+    "gpu_s_per_request": 4.939,
+    "binding": "mean TPOT",
+    "between": [
+      12,
+      16
+    ]
+  },
+  "quality": [
+    {
+      "suite": "gsm8k",
+      "n": 100,
+      "correct": 64.0,
+      "errors": 0,
+      "accuracy": 0.64,
+      "examples": [
+        {
+          "id": "gsm8k-0",
+          "ok": 1.0,
+          "gold": "16",
+          "got": "es.\n\nTotal miles run by Amber and Micah:\n8 + 28 = 36 miles.\n\nAhito ran the remaining miles:\n52 \u2212 36 = 16 miles.\n\n#### 16"
+        },
+        {
+          "id": "gsm8k-1",
+          "ok": 1.0,
+          "gold": "240",
+          "got": "s 4 weeks:\n\n2 pads/week \u00d7 4 weeks = 8 pads per month\n\nEach pad has 30 sheets:\n\n8 pads \u00d7 30 sheets = 240 sheets\n\n#### 240"
+        },
+        {
+          "id": "gsm8k-2",
+          "ok": 1.0,
+          "gold": "80",
+          "got": "ers, then:\n\n\\[\n\\frac{1}{4} \\times \\text{total students} = 20\n\\]\n\n\\[\n\\text{total students} = 20 \\times 4 = 80\n\\]\n\n#### 80"
+        },
+        {
+          "id": "gsm8k-3",
+          "ok": 0.0,
+          "gold": "15",
+          "got": "Dad saw comet when 30. Could be that Bill's first sighting coincided with dad's sighting? If Bill was 15 and dad 30, dad"
+        },
+        {
+          "id": "gsm8k-4",
+          "ok": 0.0,
+          "gold": "91",
+          "got": " years, that adds:\n\n10 \u00d7 8 = 80 trees\n\nSo before any trees die, he has:\n\n50 + 80 = 130 trees\n\nThen 30% of the trees die,"
+        }
+      ],
+      "baseline_accuracy": null,
+      "delta_pct": null,
+      "regressed": false,
+      "why": "",
+      "cached": true
+    },
+    {
+      "suite": "longbench",
+      "n": 100,
+      "correct": 53.05296288323135,
+      "errors": 0,
+      "accuracy": 0.5305,
+      "examples": [
+        {
+          "id": "longbench-0",
+          "ok": 0.6666666666666666,
+          "gold": "French",
+          "got": "s maybe. Ensure no other words on that line. Could be \"French forces\". Let's craft concise.\n</think>\n\n#### French forces"
+        },
+        {
+          "id": "longbench-1",
+          "ok": 0.0,
+          "gold": "Italy",
+          "got": "e Forl\u00ec? Let's inspect. Passage 8: \"Giorgio Ordelaffi (died 1423) was lord of Forl\u00ec and Papal vicar in Romagna (northern"
+        },
+        {
+          "id": "longbench-2",
+          "ok": 0.020618556701030924,
+          "gold": "Tharangambadi",
+          "got": "answer likely Tranquebar (Tharangambadi). The question: \"Thirukkalacherry is a village in which Indian town?\" Maybe from"
+        },
+        {
+          "id": "longbench-3",
+          "ok": 0.4,
+          "gold": "erotic thriller film",
+          "got": "ction Cruel and Tender in 2012, but biggest commercial success is film Chloe. So answer: on film.\n</think>\n\n#### on film"
+        },
+        {
+          "id": "longbench-4",
+          "ok": 0.02580645161290323,
+          "gold": "Vernon Smith",
+          "got": "mics and law at Chapman University.\" Passage 5 notable faculty: Vernon L. Smith \u2013 Nobel Laureate in Economic Science (20"
+        }
+      ],
+      "baseline_accuracy": null,
+      "delta_pct": null,
+      "regressed": false,
+      "why": "",
+      "cached": true
+    },
+    {
+      "suite": "mmlu",
+      "n": 100,
+      "correct": 64.0,
+      "errors": 0,
+      "accuracy": 0.64,
+      "examples": [
+        {
+          "id": "mmlu-0",
+          "ok": 1.0,
+          "gold": "C",
+          "got": "n sky is Cassiopeia. Cygnus is cross/swan, Centaurus southern, Cepheus house-shaped. Final answer C.\n</think>\n\nC\n\n#### C"
+        },
+        {
+          "id": "mmlu-1",
+          "ok": 1.0,
+          "gold": "B",
+          "got": "\\sqrt{2})\\) over \\(\\mathbb{Q}\\) is 2, since \\(\\sqrt{2}\\) has minimal polynomial \\(x^2 - 2\\) over \\(\\mathbb{Q}\\).\n\n#### B"
+        },
+        {
+          "id": "mmlu-2",
+          "ok": 1.0,
+          "gold": "A",
+          "got": "ght, religious right, stagflation, Carter failures, backlash to social changes. Need final with #### A.\n</think>\n\n#### A"
+        },
+        {
+          "id": "mmlu-3",
+          "ok": 0.0,
+          "gold": "B",
+          "got": " self: adaptive immune system has self-tolerance, T/B cell receptors recognize nonself antigens; special feature? Yes.\nC"
+        },
+        {
+          "id": "mmlu-4",
+          "ok": 1.0,
+          "gold": "C",
+          "got": "ookiee. Need final answer on last line '#### C'. Ensure no extra? Can include brief. Final line format.\n</think>\n\n#### C"
+        }
+      ],
+      "baseline_accuracy": null,
+      "delta_pct": null,
+      "regressed": false,
+      "why": "",
+      "cached": true
+    }
+  ],
+  "quality_regressed": false,
   "stack_digest": "d5158b2d1dd6",
   "curve": [
     {
       "n_users": 4,
       "meets_slo": true,
       "binding": null,
-      "n_requests": 12,
-      "goodput_rps": 0.037317976500471854,
-      "batch": 2.44,
-      "hit_rate": 0.6784,
-      "output_tps_per_gpu": 174.15366839976892,
-      "gpu_s_per_request": 12.196922110399555,
-      "effective_in_per_m": 0.04240673663422779,
-      "out_per_m": 9.372371686770613,
-      "bill_per_1k": 20.328203517332597,
-      "share_per_node": 0.002532671327344582,
-      "capacity_per_day": 3541.8771726980244,
+      "n_requests": 10,
+      "goodput_rps": 0.10452240058092699,
+      "batch": 3.65,
+      "hit_rate": 0.5872,
+      "output_tps_per_gpu": 193.83739837398375,
+      "gpu_s_per_request": 10.801696940081161,
+      "effective_in_per_m": 0.05182851587164631,
+      "out_per_m": 8.15872967118198,
+      "bill_per_1k": 18.002828233468602,
+      "share_per_node": 0.002859809443110706,
+      "capacity_per_day": 3999.371602410038,
       "checks": [
         {
           "label": "p90 TTFT",
           "stat": "p90",
           "metric": "ttft",
-          "value": 494.8585271835327,
+          "value": 461.78855895996094,
           "limit": 2818.0,
           "ok": true,
           "note": "median provider's published p90 latency"
@@ -33,7 +178,7 @@
           "label": "p90 TPOT",
           "stat": "p90",
           "metric": "tpot",
-          "value": 14.670363401042746,
+          "value": 14.6086586999482,
           "limit": 25.0,
           "ok": true,
           "note": "interactive-serving guidance -- our choice"
@@ -42,38 +187,38 @@
           "label": "mean TPOT",
           "stat": "mean",
           "metric": "tpot",
-          "value": 14.280277664427873,
+          "value": 14.268515448477013,
           "limit": 20.0,
           "ok": true,
           "note": "median provider's published p50 throughput"
         }
       ],
       "warnings": [
-        "p90 TTFT estimated from 12 completions; ~30 needed before it is a percentile rather than a maximum",
-        "p90 TPOT estimated from 12 completions; ~30 needed before it is a percentile rather than a maximum"
+        "p90 TTFT estimated from 10 completions; ~30 needed before it is a percentile rather than a maximum",
+        "p90 TPOT estimated from 10 completions; ~30 needed before it is a percentile rather than a maximum"
       ]
     },
     {
       "n_users": 8,
       "meets_slo": true,
       "binding": null,
-      "n_requests": 37,
-      "goodput_rps": 0.11100194019657128,
-      "batch": 3.59,
-      "hit_rate": 0.7892,
-      "output_tps_per_gpu": 231.58779053486415,
-      "gpu_s_per_request": 9.033529063952622,
-      "effective_in_per_m": 0.02554327688221529,
-      "out_per_m": 6.9997068714200985,
-      "bill_per_1k": 15.055881773254372,
-      "share_per_node": 0.003419571099198728,
-      "capacity_per_day": 4782.184204441784,
+      "n_requests": 29,
+      "goodput_rps": 0.29818551480214156,
+      "batch": 8.29,
+      "hit_rate": 0.7647,
+      "output_tps_per_gpu": 365.0243902439024,
+      "gpu_s_per_request": 5.679701661366172,
+      "effective_in_per_m": 0.03122482784788052,
+      "out_per_m": 4.250597849007951,
+      "bill_per_1k": 9.466169435610286,
+      "share_per_node": 0.0054388059008426476,
+      "capacity_per_day": 7606.033305208649,
       "checks": [
         {
           "label": "p90 TTFT",
           "stat": "p90",
           "metric": "ttft",
-          "value": 523.2263088226317,
+          "value": 520.2624320983887,
           "limit": 2818.0,
           "ok": true,
           "note": "median provider's published p90 latency"
@@ -82,7 +227,7 @@
           "label": "p90 TPOT",
           "stat": "p90",
           "metric": "tpot",
-          "value": 17.869928962916227,
+          "value": 18.323003647605237,
           "limit": 25.0,
           "ok": true,
           "note": "interactive-serving guidance -- our choice"
@@ -91,35 +236,38 @@
           "label": "mean TPOT",
           "stat": "mean",
           "metric": "tpot",
-          "value": 16.88535024245544,
+          "value": 17.342261079574655,
           "limit": 20.0,
           "ok": true,
           "note": "median provider's published p50 throughput"
         }
       ],
-      "warnings": []
+      "warnings": [
+        "p90 TTFT estimated from 29 completions; ~30 needed before it is a percentile rather than a maximum",
+        "p90 TPOT estimated from 29 completions; ~30 needed before it is a percentile rather than a maximum"
+      ]
     },
     {
       "n_users": 12,
       "meets_slo": true,
       "binding": null,
-      "n_requests": 45,
-      "goodput_rps": 0.12506185319123558,
-      "batch": 5.02,
-      "hit_rate": 0.7484,
-      "output_tps_per_gpu": 287.2574283460426,
-      "gpu_s_per_request": 7.340911623685717,
-      "effective_in_per_m": 0.029437268380616763,
-      "out_per_m": 5.602100721792951,
-      "bill_per_1k": 12.234852706142862,
-      "share_per_node": 0.004208032529801047,
-      "capacity_per_day": 5884.827690966015,
+      "n_requests": 34,
+      "goodput_rps": 0.3360841811141662,
+      "batch": 11.97,
+      "hit_rate": 0.7297,
+      "output_tps_per_gpu": 416.2113821138211,
+      "gpu_s_per_request": 4.989977245014241,
+      "effective_in_per_m": 0.039952747960727855,
+      "out_per_m": 3.6102793109310096,
+      "bill_per_1k": 8.316628741690401,
+      "share_per_node": 0.006190568292015521,
+      "capacity_per_day": 8657.354107809506,
       "checks": [
         {
           "label": "p90 TTFT",
           "stat": "p90",
           "metric": "ttft",
-          "value": 571.3999748229982,
+          "value": 423.58224391937256,
           "limit": 2818.0,
           "ok": true,
           "note": "median provider's published p90 latency"
@@ -128,7 +276,7 @@
           "label": "p90 TPOT",
           "stat": "p90",
           "metric": "tpot",
-          "value": 20.75354290232898,
+          "value": 21.172682403698175,
           "limit": 25.0,
           "ok": true,
           "note": "interactive-serving guidance -- our choice"
@@ -137,7 +285,7 @@
           "label": "mean TPOT",
           "stat": "mean",
           "metric": "tpot",
-          "value": 19.32753626156518,
+          "value": 19.839279877032396,
           "limit": 20.0,
           "ok": true,
           "note": "median provider's published p50 throughput"
@@ -149,23 +297,23 @@
       "n_users": 16,
       "meets_slo": false,
       "binding": "mean TPOT",
-      "n_requests": 59,
-      "goodput_rps": 0.1667624621333983,
-      "batch": 5.79,
-      "hit_rate": 0.6818,
-      "output_tps_per_gpu": 293.65436062065277,
-      "gpu_s_per_request": 7.145187102512668,
-      "effective_in_per_m": 0.035374316575331355,
-      "out_per_m": 5.386085486405113,
-      "bill_per_1k": 11.908645170854445,
-      "share_per_node": 0.00432330105113708,
-      "capacity_per_day": 6046.027819874492,
+      "n_requests": 47,
+      "goodput_rps": 0.428399098701889,
+      "batch": 16.49,
+      "hit_rate": 0.6578,
+      "output_tps_per_gpu": 511.3333333333333,
+      "gpu_s_per_request": 4.025789135782274,
+      "effective_in_per_m": 0.04475261127919465,
+      "out_per_m": 2.788543745827415,
+      "bill_per_1k": 6.709648559637125,
+      "share_per_node": 0.007673227252838109,
+      "capacity_per_day": 10730.815386237453,
       "checks": [
         {
           "label": "p90 TTFT",
           "stat": "p90",
           "metric": "ttft",
-          "value": 562.4392509460449,
+          "value": 496.92778587341303,
           "limit": 2818.0,
           "ok": true,
           "note": "median provider's published p90 latency"
@@ -174,7 +322,7 @@
           "label": "p90 TPOT",
           "stat": "p90",
           "metric": "tpot",
-          "value": 23.52148231221826,
+          "value": 24.342087877746785,
           "limit": 25.0,
           "ok": true,
           "note": "interactive-serving guidance -- our choice"
@@ -183,7 +331,7 @@
           "label": "mean TPOT",
           "stat": "mean",
           "metric": "tpot",
-          "value": 21.996934012260095,
+          "value": 22.85706909205174,
           "limit": 20.0,
           "ok": false,
           "note": "median provider's published p50 throughput"
@@ -195,23 +343,23 @@
       "n_users": 24,
       "meets_slo": false,
       "binding": "mean TPOT",
-      "n_requests": 78,
-      "goodput_rps": 0.20243387036704674,
-      "batch": 8.37,
-      "hit_rate": 0.5733,
-      "output_tps_per_gpu": 356.34600856207504,
-      "gpu_s_per_request": 5.929637544585851,
-      "effective_in_per_m": 0.04626582990295721,
-      "out_per_m": 4.302131081074598,
-      "bill_per_1k": 9.882729240976419,
-      "share_per_node": 0.005209558708874112,
-      "capacity_per_day": 7285.43687117005,
+      "n_requests": 50,
+      "goodput_rps": 0.07943293709218927,
+      "batch": 22.36,
+      "hit_rate": 0.4414,
+      "output_tps_per_gpu": 514.4227642276422,
+      "gpu_s_per_request": 3.8303388895092834,
+      "effective_in_per_m": 0.07864177502012303,
+      "out_per_m": 2.2955892368405766,
+      "bill_per_1k": 6.38389814918214,
+      "share_per_node": 0.008064768105889878,
+      "capacity_per_day": 11278.375424774618,
       "checks": [
         {
           "label": "p90 TTFT",
           "stat": "p90",
           "metric": "ttft",
-          "value": 1157.6087951660154,
+          "value": 2703.1878471374516,
           "limit": 2818.0,
           "ok": true,
           "note": "median provider's published p90 latency"
@@ -220,7 +368,7 @@
           "label": "p90 TPOT",
           "stat": "p90",
           "metric": "tpot",
-          "value": 29.05201464755125,
+          "value": 34.83282609034921,
           "limit": 25.0,
           "ok": false,
           "note": "interactive-serving guidance -- our choice"
@@ -229,7 +377,7 @@
           "label": "mean TPOT",
           "stat": "mean",
           "metric": "tpot",
-          "value": 26.72924612349225,
+          "value": 29.610419044808417,
           "limit": 20.0,
           "ok": false,
           "note": "median provider's published p50 throughput"
@@ -238,8 +386,8 @@
           "label": "good_frac",
           "stat": "frac",
           "metric": "slo",
-          "value": 0.9743589743589743,
-          "limit": 0.99,
+          "value": 0.16,
+          "limit": 0.9,
           "ok": false,
           "note": "share of requests meeting every bound"
         }
@@ -251,23 +399,23 @@
     "n_users": 12,
     "meets_slo": true,
     "binding": null,
-    "n_requests": 45,
-    "goodput_rps": 0.12506185319123558,
-    "batch": 5.02,
-    "hit_rate": 0.7484,
-    "output_tps_per_gpu": 287.2574283460426,
-    "gpu_s_per_request": 7.340911623685717,
-    "effective_in_per_m": 0.029437268380616763,
-    "out_per_m": 5.602100721792951,
-    "bill_per_1k": 12.234852706142862,
-    "share_per_node": 0.004208032529801047,
-    "capacity_per_day": 5884.827690966015,
+    "n_requests": 34,
+    "goodput_rps": 0.3360841811141662,
+    "batch": 11.97,
+    "hit_rate": 0.7297,
+    "output_tps_per_gpu": 416.2113821138211,
+    "gpu_s_per_request": 4.989977245014241,
+    "effective_in_per_m": 0.039952747960727855,
+    "out_per_m": 3.6102793109310096,
+    "bill_per_1k": 8.316628741690401,
+    "share_per_node": 0.006190568292015521,
+    "capacity_per_day": 8657.354107809506,
     "checks": [
       {
         "label": "p90 TTFT",
         "stat": "p90",
         "metric": "ttft",
-        "value": 571.3999748229982,
+        "value": 423.58224391937256,
         "limit": 2818.0,
         "ok": true,
         "note": "median provider's published p90 latency"
@@ -276,7 +424,7 @@
         "label": "p90 TPOT",
         "stat": "p90",
         "metric": "tpot",
-        "value": 20.75354290232898,
+        "value": 21.172682403698175,
         "limit": 25.0,
         "ok": true,
         "note": "interactive-serving guidance -- our choice"
@@ -285,7 +433,7 @@
         "label": "mean TPOT",
         "stat": "mean",
         "metric": "tpot",
-        "value": 19.32753626156518,
+        "value": 19.839279877032396,
         "limit": 20.0,
         "ok": true,
         "note": "median provider's published p50 throughput"
@@ -294,7 +442,7 @@
     "warnings": []
   },
   "rank": {
-    "rank_bill": 9,
+    "rank_bill": 1,
     "rank_eff_in": 1,
     "of": 12
   },

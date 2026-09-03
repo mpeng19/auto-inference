@@ -1,0 +1,49 @@
+{
+ "session_id": "build-4",
+ "root": "agents/build-4",
+ "agents": 5,
+ "eval_capacity": 3,
+ "budget_usd": 300.0,
+ "max_wall_s": 86400,
+ "agent_max_attempts": 6,
+ "agent_max_usd": 80.0,
+ "patience": 3,
+ "screen_first": true,
+ "model": "opus",
+ "seed_model": "",
+ "gpu": "H100",
+ "n_gpu": 1,
+ "sim_model": "Qwen/Qwen3.8-27B-FP8",
+ "levels": [
+  4,
+  8,
+  12,
+  16,
+  24
+ ],
+ "screen_levels": [
+  8,
+  12
+ ],
+ "seconds_per_level": 120.0,
+ "screen_seconds": 60.0,
+ "baseline": {
+  "bill_per_1k": 8.32,
+  "quality": {
+   "gsm8k": 0.66,
+   "longbench": 0.53,
+   "mmlu": 0.64
+  },
+  "screen": {
+   "bill_per_1k": 9.03
+  }
+ },
+ "seeds": [],
+ "bank": "~/.auto-inference/ideas.db",
+ "mode": "build",
+ "manager": true,
+ "profile_level": 12,
+ "dry_run": false,
+ "fake_agents": false,
+ "note": "five agents until the money runs out; runner v3 baselines: stock full $8.32 (N*=12, rank 1/12; $9.77 when N=12 misses), screen $9.03; build-3 restarted after the second stock sweep"
+}

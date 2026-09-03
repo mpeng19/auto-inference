@@ -4,7 +4,9 @@ What a fleet writes while its agents work, and the contract a downstream
 profile database can rely on. This is for **debugging what an agent did** —
 which tools it called, in what order, how long it waited, where its tokens
 went. It is not the cost/experiment record; that lives in the harness's own
-memory store and is a separate concern.
+memory store and is a separate concern. Nor is it what `tracedb` ingests:
+that is the GPU kineto trace a sweep captures, a different file with a
+different schema (`src/tracedb/store.py`).
 
 ## Where the files are
 
@@ -73,8 +75,9 @@ debugging database exists to answer.
 | `error` | something failed | — |
 
 `eval_submit.data.diff` holds the unified diff of the candidate, truncated at
-20,000 characters. It is the most useful single field for reconstructing what
-an agent actually changed.
+400,000 characters (`agent/loop.py`; it was 20,000 until a kernel rewrite
+did not fit). It is the most useful single field for reconstructing what an
+agent actually changed.
 
 ### Timing (v1, from 2026-09-02)
 

@@ -43,9 +43,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/simulator", "src/harness", "src/tracedb"]
-# The market snapshot is package data, not repo data (see price.market), and the
-# tests ship with it so an installed copy can be verified: `pytest --pyargs simulator`.
-artifacts = ["src/simulator/data/*.json", "src/simulator/tests/data/*.json"]
+# Non-Python files the wheel must carry, named so a build from an untracked
+# checkout still ships them: the market snapshot (see price.market) and the
+# test sweep it is verified against (`pytest --pyargs simulator`), the skill
+# docs an agent workspace installs (harness/skills/docs/**/SKILL.md) and the
+# packaged idea seed set (harness/ideas/seeds/*.jsonl).
+artifacts = ["src/simulator/data/*.json", "src/simulator/tests/data/*.json",
+             "src/**/*.md", "src/**/*.jsonl"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -56,7 +60,7 @@ testpaths = ["src/simulator", "src/harness", "src/tracedb"]
 
 [tool.ruff]
 src = ["src"]
-include = ["src/**/*.py", "src/**/*.md", "monitor/**/*.py"]
+include = ["src/**/*.py"]
 line-length = 90
 target-version = "py312"
 

@@ -18,6 +18,16 @@ from typing import Literal, Protocol, runtime_checkable
 from .agent import Idea
 from .common import new_id, now
 
+
+def content_id(title: str, mechanism: str = "") -> str:
+    """A record's id is a hash of what it says, so the same idea imported
+    twice, from a re-run harvest or a second machine, is one record. The
+    first 12 hex digits of SHA-1 over the normalised title and mechanism."""
+    import hashlib
+
+    norm = " ".join((title or "").split()).lower() + "\n" + " ".join((mechanism or "").split()).lower()
+    return "idea_" + hashlib.sha1(norm.encode()).hexdigest()[:12]
+
 Scale = Literal["kernel", "architecture", "memory", "scheduler",
                 "parallelism", "numerics", "other"]
 BankStatus = Literal["available", "claimed", "tried", "retired"]
@@ -76,10 +86,25 @@ class IdeaBankService(Protocol):
     def search(self, text: str, k: int = 8) -> tuple[IdeaRecord, ...]: ...
 
     def claim(self, agent_id: str, avoid: tuple[str, ...] = (),
-              live_scales: tuple[str, ...] = ()) -> IdeaRecord | None:
-        """The available record least like `avoid` (the texts of ideas
+              live_scales: tuple[str, ...] = (), seed: str = "") -> IdeaRecord | None:
+        """Hand `agent_id` one available record and mark it claimed.
+
+        Without `seed`: the record least like `avoid` (the texts of ideas
         already live or tried), ties broken toward a `scale` not in
-        `live_scales`. None when the bank is empty."""
+        `live_scales` -- diversity across a fleet. With `seed`: the record
+        most like the seed text among those not close to `avoid` -- an
+        operator or an agent steering toward a direction. None when nothing
+        is available."""
+        ...
+
+    def related(self, rec_id: str, k: int = 5) -> tuple[IdeaRecord, ...]:
+        """The k records nearest to `rec_id` by text, any status: what has
+        been tried near this idea, and what could follow it."""
+        ...
+
+    def seed(self, source: str = "book") -> int:
+        """Load a built-in seed set into the bank; returns how many records
+        it added or refreshed. Content-addressed ids make this idempotent."""
         ...
 
     def release(self, rec_id: str, status: BankStatus = "available") -> None: ...

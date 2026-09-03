@@ -24,7 +24,9 @@ import sqlite3
 import threading
 from dataclasses import asdict
 
-from ..contracts.ideas import BankStatus, IdeaRecord, Scale
+from ..contracts.ideas import BankStatus, IdeaRecord, Scale, content_id
+
+SEEDS = pathlib.Path(__file__).parent / "seeds"
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -39,6 +41,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS ideas_fts USING fts5(
 """
 
 _LIST_FIELDS = ("targets", "tags", "experiment_ids")
+# Jaccard above which a record counts as "the same idea" as a live one.
+# Two records about the same mechanism share most of their words (0.6-0.9);
+# records that merely share the field's vocabulary sit at 0.1-0.3.
+AVOID_CLOSENESS = 0.35
 
 
 def default_bank_path() -> pathlib.Path:
@@ -79,6 +85,22 @@ class SqliteIdeaBank:
 
     # ── writes ───────────────────────────────────────────────────────────
     def add(self, rec: IdeaRecord) -> str:
+        """Insert or replace by id. A record with the same title under a
+        different id (the random ids of banks filled before ids were
+        content-addressed) is folded into this one: its status, claimant and
+        experiment history carry over and the old row goes, so re-seeding an
+        old bank is a migration rather than a duplication."""
+        with self._lock, self._conn() as c:
+            twin = c.execute("SELECT * FROM ideas WHERE lower(trim(title))=lower(trim(?)) AND id<>?",
+                             (rec.title, rec.id)).fetchone()
+            if twin is not None:
+                old = _row(twin)
+                rec = IdeaRecord(**{**asdict(rec), "status": old.status,
+                                    "claimed_by": old.claimed_by,
+                                    "experiment_ids": old.experiment_ids,
+                                    "created_at": old.created_at})
+                c.execute("DELETE FROM ideas WHERE id=?", (old.id,))
+                c.execute("DELETE FROM ideas_fts WHERE id=?", (old.id,))
         d = asdict(rec)
         for k in _LIST_FIELDS:
             d[k] = json.dumps(list(d[k]))
@@ -152,10 +174,20 @@ class SqliteIdeaBank:
                                  (status,)).fetchone()[0]
             return c.execute("SELECT COUNT(*) FROM ideas").fetchone()[0]
 
+    def related(self, rec_id: str, k: int = 5) -> tuple[IdeaRecord, ...]:
+        me = self.get(rec_id)
+        if me is None:
+            return ()
+        mine = _tokens(me.text)
+        scored = [(_jaccard(mine, _tokens(r.text)), r) for r in self.list() if r.id != rec_id]
+        scored.sort(key=lambda t: (-t[0], t[1].created_at))
+        return tuple(r for score, r in scored[:k] if score > 0.0)
+
     # ── the claim ────────────────────────────────────────────────────────
     def claim(self, agent_id: str, avoid: tuple[str, ...] = (),
-              live_scales: tuple[str, ...] = ()) -> IdeaRecord | None:
-        """Hand `agent_id` the available record least like `avoid`."""
+              live_scales: tuple[str, ...] = (), seed: str = "") -> IdeaRecord | None:
+        """Hand `agent_id` the available record least like `avoid`, or with
+        a `seed`, the one most like the seed that is not close to `avoid`."""
         with self._lock:
             pool = self.list(status="available")
             if not pool:
@@ -163,18 +195,39 @@ class SqliteIdeaBank:
             avoid_sets = [_tokens(t) for t in avoid if t]
             live = set(live_scales)
 
-            def key(r: IdeaRecord):
-                closest = max((_jaccard(_tokens(r.text), a) for a in avoid_sets),
-                              default=0.0)
-                return (closest, r.scale in live, r.created_at)
+            def closest(r: IdeaRecord) -> float:
+                return max((_jaccard(_tokens(r.text), a) for a in avoid_sets), default=0.0)
 
-            best = min(pool, key=key)
+            if seed.strip():
+                want = _tokens(seed)
+                # "not close to avoid": a seed can steer, but never hand back
+                # the idea already running or its twin. Records near what is
+                # live are out; if that empties the pool, the seed is asking
+                # for exactly what is live and the fallback is diversity.
+                far = [r for r in pool if closest(r) < AVOID_CLOSENESS]
+                if not far:
+                    best = min(pool, key=lambda r: (closest(r), r.created_at))
+                else:
+                    best = max(far, key=lambda r: (_jaccard(want, _tokens(r.text)),
+                                                   -closest(r), -r.created_at))
+            else:
+                best = min(pool, key=lambda r: (closest(r), r.scale in live, r.created_at))
             with self._conn() as c:
                 c.execute("UPDATE ideas SET status='claimed', claimed_by=? WHERE id=?",
                           (agent_id, best.id))
             return self.get(best.id)
 
     # ── bulk ─────────────────────────────────────────────────────────────
+    def seed(self, source: str = "book") -> int:
+        """The packaged seed set (`seeds/<source>.jsonl`): the inference
+        engineering book's 27 mechanisms, extracted once and committed, so a
+        fresh machine has a bank before any model call."""
+        p = SEEDS / f"{source}.jsonl"
+        if not p.is_file():
+            raise FileNotFoundError(f"no seed set {source!r}; have "
+                                    + ", ".join(sorted(q.stem for q in SEEDS.glob("*.jsonl"))))
+        return self.import_jsonl(p, source_default=source)
+
     def import_jsonl(self, path: str | pathlib.Path, source_default: str = "") -> int:
         """Load records written by an extractor. Unknown keys are ignored,
         missing ones default, so an extractor's schema can drift a little
@@ -209,6 +262,8 @@ def record_from_dict(d: dict, source_default: str = "") -> IdeaRecord:
             clean[k] = "; ".join(f"{a}: {b}" for a, b in v.items())
     if not clean.get("source") and source_default:
         clean["source"] = source_default
+    if not clean.get("id"):
+        clean["id"] = content_id(clean.get("title", ""), clean.get("mechanism", ""))
     scale = clean.get("scale", "kernel")
     if scale not in ("kernel", "architecture", "memory", "scheduler",
                      "parallelism", "numerics", "other"):

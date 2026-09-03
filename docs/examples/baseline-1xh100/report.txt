@@ -2,48 +2,54 @@
   Qwen/Qwen3.8-27B-FP8   1xH100   stack: stock SGLang
   $3.00/GPU-hr (H100, agreed default basis), utilisation 50%, break-even
   SLO: p90 TTFT <= 2818 ms  and  p90 TPOT <= 25 ms  and  mean TPOT <= 20 ms
-  eval digest 748b37ed4124   stack digest d5158b2d1dd6
-  note: stock SGLang on 1xH100 -- the baseline every diff is measured against
+  eval digest cc6b3767f098   stack digest d5158b2d1dd6
+  note: stock, second full sweep on the flushed runner
 ========================================================================
 
     N  reqs  goodput  batch    hit  GPU-s/req  eff-in $/M  out $/M    $/1k   share  SLO
 ------------------------------------------------------------------------------------------------
-    4    12     0.04    2.4  0.678      12.20      0.0424    9.372   20.33   0.25%  ok
-    8    37     0.11    3.6  0.789       9.03      0.0255    7.000   15.06   0.34%  ok
-   12    45     0.13    5.0  0.748       7.34      0.0294    5.602   12.23   0.42%  ok
-   16    59     0.17    5.8  0.682       7.15      0.0354    5.386   11.91   0.43%  MISS <- mean TPOT
-   24    78     0.20    8.4  0.573       5.93      0.0463    4.302    9.88   0.52%  MISS <- mean TPOT
+    4    10     0.10    3.6  0.587      10.80      0.0518    8.159   18.00   0.29%  ok
+    8    29     0.30    8.3  0.765       5.68      0.0312    4.251    9.47   0.54%  ok
+   12    34     0.34   12.0  0.730       4.99      0.0400    3.610    8.32   0.62%  ok
+   16    47     0.43   16.5  0.658       4.03      0.0448    2.789    6.71   0.77%  MISS <- mean TPOT
+   24    50     0.08   22.4  0.441       3.83      0.0786    2.296    6.38   0.81%  MISS <- mean TPOT
 
-N* = 12 users   batch 5.0   hit 0.748   7.34 GPU-s per market request
-  effective input  $0.0294/M
-  output           $5.6021/M
-  whole bill       $12.23 per 1k requests   rank 9/12
-  one node serves  0.42% of the market  (5,885 req/day)
+N* = 12 users   batch 12.0   hit 0.730   4.99 GPU-s per market request
+  effective input  $0.0400/M
+  output           $3.6103/M
+  whole bill       $8.32 per 1k requests   rank 1/12
+  one node serves  0.62% of the market  (8,657 req/day)
   on effective input alone: rank 1/12  -- the metric OpenRouter sorts on, not what a buyer pays
+  quality gsm8k: 64.0%
+  quality longbench: 53.0%
+  quality mmlu: 64.0%
+  frontier by interpolation: N*~12.2  $8.23/1k  (mean TPOT crosses between N=12 and 16)
 
 sampling:
-  ! p90 TPOT estimated from 12 completions; ~30 needed before it is a percentile rather than a maximum
-  ! p90 TTFT estimated from 12 completions; ~30 needed before it is a percentile rather than a maximum
+  ! p90 TPOT estimated from 10 completions; ~30 needed before it is a percentile rather than a maximum
+  ! p90 TPOT estimated from 29 completions; ~30 needed before it is a percentile rather than a maximum
+  ! p90 TTFT estimated from 10 completions; ~30 needed before it is a percentile rather than a maximum
+  ! p90 TTFT estimated from 29 completions; ~30 needed before it is a percentile rather than a maximum
 
 whole bill at 20,583 in / 2,076 out   (OpenRouter 2026-08-31)
     #  provider        eff-in $/M  out $/M  $/1k req
-    1  Chutes              0.1439    2.750      8.67
-    2  Novita              0.1272    3.000      8.85
-    3  Alibaba             0.2160    2.550      9.74
-    4  Reka                0.2257    2.550      9.94
-    5  Parasail            0.1773    3.200     10.29
-    6  CoreWeave           0.1988    3.000     10.32
-    7  AkashML             0.2725    2.550     10.90
-    8  Phala               0.2526    3.000     11.43
-    9  us                  0.0294    5.602     12.23  <--
+    1  us                  0.0400    3.610      8.32  <--
+    2  Chutes              0.1439    2.750      8.67
+    3  Novita              0.1272    3.000      8.85
+    4  Alibaba             0.2160    2.550      9.74
+    5  Reka                0.2257    2.550      9.94
+    6  Parasail            0.1773    3.200     10.29
+    7  CoreWeave           0.1988    3.000     10.32
+    8  AkashML             0.2725    2.550     10.90
+    9  Phala               0.2526    3.000     11.43
    10  Venice              0.4499    3.200     15.90
    11  Cloudflare          0.4499    3.200     15.90
    12  Io Net              0.4645    3.400     16.62
 
-capacity: one 1xH100 node serves 5,885 requests/day = 0.42% of the market at 50% utilisation.
-     1% share needs   2.4 nodes ($171/day)
-     5% share needs  11.9 nodes ($856/day)
-    10% share needs  23.8 nodes ($1,711/day)
+capacity: one 1xH100 node serves 8,657 requests/day = 0.62% of the market at 50% utilisation.
+     1% share needs   1.6 nodes ($116/day)
+     5% share needs   8.1 nodes ($582/day)
+    10% share needs  16.2 nodes ($1,163/day)
 
 Price below saturation is a hyperbola in share that the serving stack
 does not enter: the stack sets only where the curve stops falling.

@@ -161,3 +161,68 @@ def test_record_from_dict_flattens_lists_in_text_fields(bank):
     assert r.risks == "numerics; accuracy" and r.prerequisites == "needs: triton 3"
     bank.add(r)
     assert bank.get(r.id).risks == "numerics; accuracy"
+
+
+def test_ids_are_content_addressed_so_reimport_is_one_record(bank, tmp_path):
+    from harness.contracts.ideas import content_id
+    from harness.ideas import record_from_dict
+
+    a = record_from_dict({"title": "Paged  attention", "mechanism": "read pages"})
+    b = record_from_dict({"title": "paged attention", "mechanism": "read  pages"})
+    assert a.id == b.id == content_id("Paged attention", "read pages")
+    assert a.id.startswith("idea_") and len(a.id) == 17
+    p = tmp_path / "x.jsonl"
+    p.write_text('{"title": "T", "mechanism": "M"}\n')
+    bank.import_jsonl(p)
+    bank.import_jsonl(p)
+    assert bank.count() == 1
+
+
+def test_the_packaged_seed_set_loads_idempotently(bank):
+    n = bank.seed("book")
+    assert n == 27 and bank.count() == 27
+    assert bank.seed("book") == 27 and bank.count() == 27
+    assert all(r.source.startswith("book") for r in bank.list())
+    import pytest
+    with pytest.raises(FileNotFoundError, match="no seed set"):
+        bank.seed("nope")
+
+
+def test_related_are_the_nearest_by_text(bank):
+    from harness.contracts.ideas import IdeaRecord
+    a = bank.add(IdeaRecord(title="paged attention kernel", mechanism="reads kv pages by block table"))
+    b = bank.add(IdeaRecord(title="sparse kv pages", mechanism="reads a subset of kv pages by score"))
+    c = bank.add(IdeaRecord(title="speculative decoding", mechanism="draft model proposes tokens"))
+    rel = bank.related(a, k=2)
+    assert rel[0].id == b
+    assert c not in [r.id for r in rel]
+    assert bank.related("missing") == ()
+
+
+def test_a_seeded_claim_steers_toward_the_seed_but_not_into_what_is_live(bank):
+    from harness.contracts.ideas import IdeaRecord
+    live = "sparse kv pages: reads a subset of kv pages by attention score bounds"
+    bank.add(IdeaRecord(title="sparse kv pages twin", mechanism="reads a subset of kv pages by attention score bounds"))
+    kv4 = bank.add(IdeaRecord(title="int4 kv cache", mechanism="store kv values in four bits with per-block scales"))
+    bank.add(IdeaRecord(title="speculative decoding", mechanism="draft model proposes tokens verified in one step"))
+    got = bank.claim("a01", avoid=(live,), seed="quantise the kv cache to fewer bits")
+    assert got.id == kv4
+    assert got.status == "claimed" and got.claimed_by == "a01"
+    # the twin of what is live is never handed back, however well the seed matches it
+    got2 = bank.claim("a02", avoid=(live,), seed="sparse kv pages by attention score")
+    assert got2 is not None and "twin" not in got2.title
+
+
+def test_reseeding_an_old_bank_migrates_ids_instead_of_duplicating(bank):
+    """Banks filled before ids were content hashes hold random `bank_` ids;
+    seeding them again must not double every record."""
+    from harness.contracts.ideas import IdeaRecord
+    old = IdeaRecord(id="bank_deadbeef0000", title="Pre-RoPE key storage for position-independent KV reuse",
+                     mechanism="old text", status="tried", experiment_ids=("exp_1",))
+    bank.add(old)
+    n = bank.seed("book")
+    assert n == 27 and bank.count() == 27
+    assert bank.get("bank_deadbeef0000") is None
+    same = [r for r in bank.list() if r.title == old.title]
+    assert len(same) == 1 and same[0].status == "tried" and same[0].experiment_ids == ("exp_1",)
+    assert same[0].id.startswith("idea_")

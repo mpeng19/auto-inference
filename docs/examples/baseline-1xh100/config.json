@@ -1,5 +1,5 @@
 {
-  "digest": "748b37ed4124",
+  "digest": "cc6b3767f098",
   "stack": "stock SGLang",
   "stack_digest": "d5158b2d1dd6",
   "serving": {
@@ -52,7 +52,7 @@
         "note": "median provider's published p50 throughput"
       }
     ],
-    "min_good_frac": 0.99,
+    "min_good_frac": 0.9,
     "max_failed": 0
   },
   "assumptions": {
@@ -66,5 +66,5 @@
     "in_per_request": 20582.81134427046,
     "out_per_request": 2075.819686592876
   },
-  "note": "stock SGLang on 1xH100 -- the baseline every diff is measured against"
+  "note": "stock, second full sweep on the flushed runner"
 }

@@ -34,3 +34,9 @@ docs/*.pdf
 # Overlaid modules keep a pristine copy alongside them at runtime
 *.py.stock
 agents/
+
+# Run-specific planning notes: yours, not the repo's
+docs/NEXT.md
+
+# Synthetic traces written by tracedb.synth / modal_trace
+fixtures/

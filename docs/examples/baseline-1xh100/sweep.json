@@ -1,5 +1,6 @@
 {
   "status": "ok",
+  "note": "stock, second full sweep on the flushed runner",
   "serving": {
     "model": "Qwen/Qwen3.8-27B-FP8",
     "gpu": "H100",
@@ -19,288 +20,937 @@
     "extra_args": []
   },
   "serving_digest": "8371e982a0f5",
+  "slo": {
+    "bounds": [
+      {
+        "metric": "ttft",
+        "stat": "p90",
+        "limit_ms": 2818.0,
+        "note": "median provider's published p90 latency"
+      },
+      {
+        "metric": "tpot",
+        "stat": "p90",
+        "limit_ms": 25.0,
+        "note": "interactive-serving guidance -- our choice"
+      },
+      {
+        "metric": "tpot",
+        "stat": "mean",
+        "limit_ms": 20.0,
+        "note": "median provider's published p50 throughput"
+      }
+    ],
+    "min_good_frac": 0.9,
+    "max_failed": 0
+  },
   "stack_digest": "d5158b2d1dd6",
-  "note": "1xH100 baseline, run 1788287578 -- trimmed fixture",
   "levels": [
     {
       "n_users": 4,
       "repeat": 0,
-      "wall_s": 346.2,
-      "goodput_rps": 0.037317976500471854,
-      "throughput_rps": 0.037317976500471854,
+      "wall_s": 123.0,
+      "flush": {
+        "clean": true,
+        "waited_s": 0.0,
+        "running": 0,
+        "queued": 0
+      },
+      "goodput_rps": 0.10452240058092699,
+      "throughput_rps": 0.10452240058092699,
       "good_frac": 1.0,
       "n_failed": 0,
       "ttft_ms": {
-        "n": 12,
-        "mean": 307.76429176330566,
-        "p50": 255.58876991271973,
-        "p90": 494.8585271835327,
-        "p95": 512.1345281600952,
-        "p99": 519.6248960494995,
-        "max": 521.4974880218506
+        "n": 10,
+        "mean": 294.7267770767212,
+        "p50": 288.1361246109009,
+        "p90": 461.78855895996094,
+        "p95": 478.5358428955078,
+        "p99": 491.9336700439453,
+        "max": 495.2831268310547
       },
       "tpot_ms": {
-        "n": 12,
-        "mean": 14.280277664427873,
-        "p50": 14.298073038763597,
-        "p90": 14.670363401042746,
-        "p95": 14.770592726605082,
-        "p99": 14.850900930252077,
-        "max": 14.870977981163827
+        "n": 10,
+        "mean": 14.268515448477013,
+        "p50": 14.223134929948934,
+        "p90": 14.6086586999482,
+        "p95": 14.680684056951687,
+        "p99": 14.738304342554478,
+        "max": 14.752709413955175
       },
-      "prompt_tokens": 204016.0,
-      "cached_tokens": 138400.0,
-      "uncached_tokens": 65616.0,
-      "output_tokens": 60292.0,
-      "cache_hit_rate": 0.6784,
+      "e2e_ms": {
+        "n": 10,
+        "mean": 20524.4704246521,
+        "p50": 15801.872372627258,
+        "p90": 46883.50062370299,
+        "p95": 59209.83376502988,
+        "p99": 69070.90027809143,
+        "max": 71536.16690635681
+      },
+      "prompt_tokens": 171127.0,
+      "cached_tokens": 100481.0,
+      "uncached_tokens": 70646.0,
+      "output_tokens": 23842.0,
+      "cache_hit_rate": 0.5872,
       "batch": {
         "running": {
-          "n": 171,
-          "mean": 2.44,
-          "p50": 3.0,
+          "n": 62,
+          "mean": 3.65,
+          "p50": 4.0,
           "max": 4.0,
-          "frac_idle": 0.006
+          "frac_idle": 0.016
         },
         "queued": {
-          "n": 171,
+          "n": 62,
           "mean": 0.0,
           "p50": 0.0,
           "max": 0.0,
           "frac_idle": 1.0
         }
       },
+      "collapse": {
+        "available": false,
+        "reason": "too few requests to bucket"
+      },
+      "client_health": {
+        "verdict": "OK",
+        "lag_p50_ms": 0.0,
+        "lag_p99_ms": 0.0,
+        "lag_max_ms": 0.0,
+        "lag_early_mean_ms": 0.0,
+        "lag_late_mean_ms": 0.0,
+        "drifting": false
+      },
       "server_counters": {
-        "sglang:generation_tokens_total": 60292.0,
-        "sglang:forward_execution_seconds_total[decode]": 339.04742024326424,
-        "sglang:prompt_tokens_total": 204016.0,
-        "sglang:cached_tokens_total": 138400.0,
-        "sglang:forward_execution_seconds_total[extend]": 5.1909916687011695,
-        "sglang:forward_execution_seconds_total": 344.2384119119654
-      }
+        "sglang:generation_tokens_total": 23842.0,
+        "sglang:inter_token_latency_seconds_count": 31730.0,
+        "sglang:e2e_request_latency_seconds_sum": 351.04241966600006,
+        "sglang:forward_execution_seconds_total[extend]": 5.32155506134033,
+        "sglang:e2e_request_latency_seconds_count": 18.0,
+        "sglang:time_to_first_token_seconds_count": 21.0,
+        "sglang:forward_execution_seconds_total": 122.03381475353278,
+        "sglang:queue_time_seconds_count": 21.0,
+        "sglang:cached_tokens_total": 100481.0,
+        "sglang:forward_execution_seconds_total[decode]": 116.71225969219246,
+        "sglang:inter_token_latency_seconds_sum": 454.3676044240009,
+        "sglang:queue_time_seconds_sum": 0.01513987000026873,
+        "sglang:num_requests_total": 18.0,
+        "sglang:prompt_tokens_total": 171127.0,
+        "sglang:time_to_first_token_seconds_sum": 10.700973758000089
+      },
+      "meets_slo": true,
+      "slo_checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 461.78855895996094,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 14.6086586999482,
+          "limit": 25.0,
+          "ok": true,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 14.268515448477013,
+          "limit": 20.0,
+          "ok": true,
+          "note": "median provider's published p50 throughput"
+        }
+      ],
+      "slo_warnings": [
+        "p90 TTFT estimated from 10 completions; ~30 needed before it is a percentile rather than a maximum",
+        "p90 TPOT estimated from 10 completions; ~30 needed before it is a percentile rather than a maximum"
+      ]
     },
     {
       "n_users": 8,
       "repeat": 0,
-      "wall_s": 357.1,
-      "goodput_rps": 0.11100194019657128,
-      "throughput_rps": 0.11100194019657128,
+      "wall_s": 123.0,
+      "flush": {
+        "clean": false,
+        "waited_s": 90.1,
+        "running": 2.0,
+        "queued": 0
+      },
+      "goodput_rps": 0.29818551480214156,
+      "throughput_rps": 0.29818551480214156,
       "good_frac": 1.0,
       "n_failed": 0,
       "ttft_ms": {
-        "n": 37,
-        "mean": 319.37070795007656,
-        "p50": 276.84593200683594,
-        "p90": 523.2263088226317,
-        "p95": 655.5012226104724,
-        "p99": 907.0902729034424,
-        "max": 912.1263027191162
+        "n": 29,
+        "mean": 283.4036432463547,
+        "p50": 228.97815704345703,
+        "p90": 520.2624320983887,
+        "p95": 538.6167049407959,
+        "p99": 721.8356418609617,
+        "max": 791.6467189788818
       },
       "tpot_ms": {
-        "n": 37,
-        "mean": 16.88535024245544,
-        "p50": 16.722679138183594,
-        "p90": 17.869928962916227,
-        "p95": 18.203072622973195,
-        "p99": 24.021080056081644,
-        "max": 27.182579040527344
+        "n": 29,
+        "mean": 17.342261079574655,
+        "p50": 17.367808024088543,
+        "p90": 18.323003647605237,
+        "p95": 18.510028219738793,
+        "p99": 18.85590888607039,
+        "max": 18.961896037441907
       },
-      "prompt_tokens": 574247.0,
-      "cached_tokens": 453208.0,
-      "uncached_tokens": 121039.0,
-      "output_tokens": 82700.0,
-      "cache_hit_rate": 0.7892,
+      "e2e_ms": {
+        "n": 29,
+        "mean": 17813.399619069594,
+        "p50": 12457.515478134155,
+        "p90": 33001.40023231504,
+        "p95": 55503.74069213866,
+        "p99": 80292.83769607541,
+        "max": 89393.13650131226
+      },
+      "prompt_tokens": 438797.0,
+      "cached_tokens": 335534.0,
+      "uncached_tokens": 103263.0,
+      "output_tokens": 44898.0,
+      "cache_hit_rate": 0.7647,
       "batch": {
         "running": {
-          "n": 177,
-          "mean": 3.59,
-          "p50": 2.0,
-          "max": 8.0,
-          "frac_idle": 0.006
+          "n": 62,
+          "mean": 8.29,
+          "p50": 9.0,
+          "max": 10.0,
+          "frac_idle": 0.0
         },
         "queued": {
-          "n": 177,
+          "n": 62,
           "mean": 0.0,
           "p50": 0.0,
           "max": 0.0,
           "frac_idle": 1.0
         }
       },
+      "collapse": {
+        "available": false,
+        "reason": "too few requests to bucket"
+      },
+      "client_health": {
+        "verdict": "OK",
+        "lag_p50_ms": 0.0,
+        "lag_p99_ms": 0.0,
+        "lag_max_ms": 0.0,
+        "lag_early_mean_ms": 0.0,
+        "lag_late_mean_ms": 0.0,
+        "drifting": false
+      },
       "server_counters": {
-        "sglang:generation_tokens_total": 82700.0,
-        "sglang:forward_execution_seconds_total[decode]": 347.3254549598653,
-        "sglang:prompt_tokens_total": 574247.0,
-        "sglang:cached_tokens_total": 453208.0,
-        "sglang:forward_execution_seconds_total[extend]": 8.80089007186889,
-        "sglang:forward_execution_seconds_total": 356.1263450317342
-      }
+        "sglang:generation_tokens_total": 44898.0,
+        "sglang:inter_token_latency_seconds_count": 51774.0,
+        "sglang:e2e_request_latency_seconds_sum": 784.8255131699998,
+        "sglang:forward_execution_seconds_total[extend]": 8.220816471099857,
+        "sglang:e2e_request_latency_seconds_count": 43.0,
+        "sglang:time_to_first_token_seconds_count": 49.0,
+        "sglang:forward_execution_seconds_total": 122.72682180595524,
+        "sglang:queue_time_seconds_count": 49.0,
+        "sglang:cached_tokens_total": 335534.0,
+        "sglang:forward_execution_seconds_total[decode]": 114.50600533485539,
+        "sglang:inter_token_latency_seconds_sum": 896.2353607670028,
+        "sglang:queue_time_seconds_sum": 0.03859500099952129,
+        "sglang:num_requests_total": 43.0,
+        "sglang:prompt_tokens_total": 438797.0,
+        "sglang:time_to_first_token_seconds_sum": 16.046844375000262
+      },
+      "meets_slo": true,
+      "slo_checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 520.2624320983887,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 18.323003647605237,
+          "limit": 25.0,
+          "ok": true,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 17.342261079574655,
+          "limit": 20.0,
+          "ok": true,
+          "note": "median provider's published p50 throughput"
+        }
+      ],
+      "slo_warnings": [
+        "p90 TTFT estimated from 29 completions; ~30 needed before it is a percentile rather than a maximum",
+        "p90 TPOT estimated from 29 completions; ~30 needed before it is a percentile rather than a maximum"
+      ]
     },
     {
       "n_users": 12,
       "repeat": 0,
-      "wall_s": 380.3,
-      "goodput_rps": 0.12506185319123558,
-      "throughput_rps": 0.12506185319123558,
+      "wall_s": 123.0,
+      "flush": {
+        "clean": false,
+        "waited_s": 90.2,
+        "running": 1.0,
+        "queued": 0
+      },
+      "goodput_rps": 0.3360841811141662,
+      "throughput_rps": 0.3360841811141662,
       "good_frac": 1.0,
       "n_failed": 0,
       "ttft_ms": {
-        "n": 45,
-        "mean": 357.9585075378418,
-        "p50": 296.9045639038086,
-        "p90": 571.3999748229982,
-        "p95": 854.6881198883048,
-        "p99": 1017.8726768493653,
-        "max": 1030.6525230407715
+        "n": 34,
+        "mean": 272.5014055476469,
+        "p50": 244.17805671691895,
+        "p90": 423.58224391937256,
+        "p95": 465.1175022125242,
+        "p99": 742.3173952102667,
+        "max": 848.717451095581
       },
       "tpot_ms": {
-        "n": 45,
-        "mean": 19.32753626156518,
-        "p50": 19.547894355650328,
-        "p90": 20.75354290232898,
-        "p95": 21.04437629335682,
-        "p99": 21.798834503769545,
-        "max": 22.012588100955117
+        "n": 34,
+        "mean": 19.839279877032396,
+        "p50": 19.72824232211193,
+        "p90": 21.172682403698175,
+        "p95": 21.29513691998105,
+        "p99": 21.75891594890459,
+        "max": 21.953652772916346
       },
-      "prompt_tokens": 683084.0,
-      "cached_tokens": 511241.0,
-      "uncached_tokens": 171843.0,
-      "output_tokens": 109244.0,
-      "cache_hit_rate": 0.7484,
+      "e2e_ms": {
+        "n": 34,
+        "mean": 17249.814243877634,
+        "p50": 16637.76683807373,
+        "p90": 31420.76644897461,
+        "p95": 32825.22369623184,
+        "p99": 59804.723548889226,
+        "max": 72883.54349136353
+      },
+      "prompt_tokens": 493496.0,
+      "cached_tokens": 360110.0,
+      "uncached_tokens": 133386.0,
+      "output_tokens": 51194.0,
+      "cache_hit_rate": 0.7297,
       "batch": {
         "running": {
-          "n": 188,
-          "mean": 5.02,
-          "p50": 2.0,
-          "max": 12.0,
+          "n": 61,
+          "mean": 11.97,
+          "p50": 12.0,
+          "max": 13.0,
           "frac_idle": 0.0
         },
         "queued": {
-          "n": 188,
+          "n": 61,
           "mean": 0.0,
           "p50": 0.0,
           "max": 0.0,
           "frac_idle": 1.0
         }
       },
+      "collapse": {
+        "available": true,
+        "collapsed": false,
+        "ttft_first_bucket_ms": 1289.8,
+        "ttft_last_bucket_ms": 416.7,
+        "escalation_ratio": 0.32,
+        "early_third_ms": 468.3,
+        "late_third_ms": 297.3,
+        "monotonic_frac": 0.73,
+        "ends_near_peak": false,
+        "onset_s": null,
+        "bucket_medians_ms": [
+          1289.8,
+          167.6,
+          192.6,
+          223.0,
+          315.4,
+          168.7,
+          226.8,
+          219.4,
+          224.5,
+          274.0,
+          274.0,
+          416.7
+        ],
+        "note": "A collapsed run is not a slower run: throughput is typically unchanged. It has entered a backlog it cannot drain, so goodput from it measures the basin, not the configuration."
+      },
+      "client_health": {
+        "verdict": "OK",
+        "lag_p50_ms": 0.0,
+        "lag_p99_ms": 0.0,
+        "lag_max_ms": 0.0,
+        "lag_early_mean_ms": 0.0,
+        "lag_late_mean_ms": 0.0,
+        "drifting": false
+      },
       "server_counters": {
-        "sglang:generation_tokens_total": 109244.0,
-        "sglang:forward_execution_seconds_total[decode]": 367.19753475092944,
-        "sglang:prompt_tokens_total": 683084.0,
-        "sglang:cached_tokens_total": 511241.0,
-        "sglang:forward_execution_seconds_total[extend]": 12.06487622070313,
-        "sglang:forward_execution_seconds_total": 379.26241097163256
-      }
+        "sglang:generation_tokens_total": 51194.0,
+        "sglang:inter_token_latency_seconds_count": 69299.0,
+        "sglang:e2e_request_latency_seconds_sum": 999.6465144329991,
+        "sglang:forward_execution_seconds_total[extend]": 11.829912784576411,
+        "sglang:e2e_request_latency_seconds_count": 54.0,
+        "sglang:time_to_first_token_seconds_count": 65.0,
+        "sglang:forward_execution_seconds_total": 122.72469621085764,
+        "sglang:queue_time_seconds_count": 65.0,
+        "sglang:cached_tokens_total": 360110.0,
+        "sglang:forward_execution_seconds_total[decode]": 110.89478342628126,
+        "sglang:inter_token_latency_seconds_sum": 1358.0855566990135,
+        "sglang:queue_time_seconds_sum": 0.06324047899988727,
+        "sglang:num_requests_total": 54.0,
+        "sglang:prompt_tokens_total": 493496.0,
+        "sglang:time_to_first_token_seconds_sum": 25.840591423999967
+      },
+      "meets_slo": true,
+      "slo_checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 423.58224391937256,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 21.172682403698175,
+          "limit": 25.0,
+          "ok": true,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 19.839279877032396,
+          "limit": 20.0,
+          "ok": true,
+          "note": "median provider's published p50 throughput"
+        }
+      ],
+      "slo_warnings": []
     },
     {
       "n_users": 16,
       "repeat": 0,
-      "wall_s": 373.8,
-      "goodput_rps": 0.1667624621333983,
-      "throughput_rps": 0.1667624621333983,
-      "good_frac": 1.0,
+      "wall_s": 123.0,
+      "flush": {
+        "clean": false,
+        "waited_s": 90.2,
+        "running": 2.0,
+        "queued": 0
+      },
+      "goodput_rps": 0.428399098701889,
+      "throughput_rps": 0.457608128158836,
+      "good_frac": 0.9361702127659575,
       "n_failed": 0,
       "ttft_ms": {
-        "n": 59,
-        "mean": 393.08731030609647,
-        "p50": 303.1482696533203,
-        "p90": 562.4392509460449,
-        "p95": 884.256577491758,
-        "p99": 1564.236650466919,
-        "max": 1610.94331741333
+        "n": 47,
+        "mean": 305.71055919566055,
+        "p50": 257.60793685913086,
+        "p90": 496.92778587341303,
+        "p95": 733.6796998977654,
+        "p99": 872.8306484222411,
+        "max": 946.1963176727295
       },
       "tpot_ms": {
-        "n": 59,
-        "mean": 21.996934012260095,
-        "p50": 21.624188036843684,
-        "p90": 23.52148231221826,
-        "p95": 24.53146058772113,
-        "p99": 37.981799132555864,
-        "max": 56.389182806015015
+        "n": 47,
+        "mean": 22.85706909205174,
+        "p50": 22.832178260905156,
+        "p90": 24.342087877746785,
+        "p95": 24.96105783155648,
+        "p99": 29.736968272362795,
+        "max": 32.369279861450195
       },
-      "prompt_tokens": 847078.0,
-      "cached_tokens": 577507.0,
-      "uncached_tokens": 269571.0,
-      "output_tokens": 109768.0,
-      "cache_hit_rate": 0.6818,
+      "e2e_ms": {
+        "n": 47,
+        "mean": 20943.78890889756,
+        "p50": 18770.461082458496,
+        "p90": 38402.65326499939,
+        "p95": 39694.8723077774,
+        "p99": 97565.2801322937,
+        "max": 102262.02535629272
+      },
+      "prompt_tokens": 651318.0,
+      "cached_tokens": 428434.0,
+      "uncached_tokens": 222884.0,
+      "output_tokens": 62894.0,
+      "cache_hit_rate": 0.6578,
       "batch": {
         "running": {
-          "n": 184,
-          "mean": 5.79,
-          "p50": 1.0,
-          "max": 16.0,
-          "frac_idle": 0.005
+          "n": 61,
+          "mean": 16.49,
+          "p50": 17.0,
+          "max": 18.0,
+          "frac_idle": 0.0
         },
         "queued": {
-          "n": 184,
-          "mean": 0.02,
+          "n": 61,
+          "mean": 0.11,
           "p50": 0.0,
-          "max": 4.0,
-          "frac_idle": 0.995
+          "max": 7.0,
+          "frac_idle": 0.984
         }
       },
+      "collapse": {
+        "available": true,
+        "collapsed": false,
+        "ttft_first_bucket_ms": 2203.6,
+        "ttft_last_bucket_ms": 311.3,
+        "escalation_ratio": 0.14,
+        "early_third_ms": 708.1,
+        "late_third_ms": 259.1,
+        "monotonic_frac": 0.55,
+        "ends_near_peak": false,
+        "onset_s": null,
+        "bucket_medians_ms": [
+          2203.6,
+          124.5,
+          246.5,
+          257.6,
+          274.8,
+          258.1,
+          200.4,
+          279.2,
+          284.2,
+          236.8,
+          204.1,
+          311.3
+        ],
+        "note": "A collapsed run is not a slower run: throughput is typically unchanged. It has entered a backlog it cannot drain, so goodput from it measures the basin, not the configuration."
+      },
+      "client_health": {
+        "verdict": "OK",
+        "lag_p50_ms": 0.0,
+        "lag_p99_ms": 0.0,
+        "lag_max_ms": 0.0,
+        "lag_early_mean_ms": 0.0,
+        "lag_late_mean_ms": 0.0,
+        "drifting": false
+      },
       "server_counters": {
-        "sglang:generation_tokens_total": 109768.0,
-        "sglang:forward_execution_seconds_total[decode]": 354.73189900302987,
-        "sglang:prompt_tokens_total": 847078.0,
-        "sglang:cached_tokens_total": 577507.0,
-        "sglang:forward_execution_seconds_total[extend]": 17.978883201599118,
-        "sglang:forward_execution_seconds_total": 372.7107822046289
-      }
+        "sglang:generation_tokens_total": 62894.0,
+        "sglang:inter_token_latency_seconds_count": 79313.0,
+        "sglang:e2e_request_latency_seconds_sum": 1464.2876556839997,
+        "sglang:forward_execution_seconds_total[extend]": 17.4889087638855,
+        "sglang:e2e_request_latency_seconds_count": 67.0,
+        "sglang:time_to_first_token_seconds_count": 78.0,
+        "sglang:forward_execution_seconds_total": 122.71851097392721,
+        "sglang:queue_time_seconds_count": 78.0,
+        "sglang:cached_tokens_total": 428434.0,
+        "sglang:forward_execution_seconds_total[decode]": 105.22960221004166,
+        "sglang:inter_token_latency_seconds_sum": 1796.436200632012,
+        "sglang:queue_time_seconds_sum": 18.879086137998797,
+        "sglang:num_requests_total": 67.0,
+        "sglang:prompt_tokens_total": 651318.0,
+        "sglang:time_to_first_token_seconds_sum": 57.83938894799928
+      },
+      "meets_slo": false,
+      "slo_checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 496.92778587341303,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 24.342087877746785,
+          "limit": 25.0,
+          "ok": true,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 22.85706909205174,
+          "limit": 20.0,
+          "ok": false,
+          "note": "median provider's published p50 throughput"
+        }
+      ],
+      "slo_warnings": []
     },
     {
       "n_users": 24,
       "repeat": 0,
-      "wall_s": 397.1,
-      "goodput_rps": 0.20243387036704674,
-      "throughput_rps": 0.207761077481969,
-      "good_frac": 0.9743589743589743,
+      "wall_s": 123.0,
+      "flush": {
+        "clean": false,
+        "waited_s": 90.3,
+        "running": 2.0,
+        "queued": 0
+      },
+      "goodput_rps": 0.07943293709218927,
+      "throughput_rps": 0.49645585682618293,
+      "good_frac": 0.16,
       "n_failed": 0,
       "ttft_ms": {
-        "n": 78,
-        "mean": 553.2675492457854,
-        "p50": 364.3970489501953,
-        "p90": 1157.6087951660154,
-        "p95": 1373.6362457275359,
-        "p99": 2827.517156600968,
-        "max": 5908.1244468688965
+        "n": 50,
+        "mean": 1188.804407119751,
+        "p50": 941.185474395752,
+        "p90": 2703.1878471374516,
+        "p95": 3360.856997966763,
+        "p99": 4796.230344772336,
+        "max": 5539.624929428101
       },
       "tpot_ms": {
-        "n": 78,
-        "mean": 26.72924612349225,
-        "p50": 26.398528106670838,
-        "p90": 29.05201464755125,
-        "p95": 30.122378968199982,
-        "p99": 44.92848714549915,
-        "max": 92.53053665161133
+        "n": 50,
+        "mean": 29.610419044808417,
+        "p50": 29.492532520061207,
+        "p90": 34.83282609034921,
+        "p95": 36.797048168013205,
+        "p99": 39.5790643479884,
+        "max": 40.52919529853983
       },
-      "prompt_tokens": 1102561.0,
-      "cached_tokens": 632101.0,
-      "uncached_tokens": 470460.0,
-      "output_tokens": 141505.0,
-      "cache_hit_rate": 0.5733,
+      "e2e_ms": {
+        "n": 50,
+        "mean": 22529.73138809204,
+        "p50": 17762.724995613098,
+        "p90": 47056.79504871369,
+        "p95": 50282.058346271515,
+        "p99": 63654.88650321958,
+        "max": 68523.59700202942
+      },
+      "prompt_tokens": 752702.0,
+      "cached_tokens": 332239.0,
+      "uncached_tokens": 420463.0,
+      "output_tokens": 63274.0,
+      "cache_hit_rate": 0.4414,
       "batch": {
         "running": {
-          "n": 196,
-          "mean": 8.37,
-          "p50": 1.0,
+          "n": 61,
+          "mean": 22.36,
+          "p50": 23.0,
           "max": 24.0,
-          "frac_idle": 0.005
+          "frac_idle": 0.0
         },
         "queued": {
-          "n": 196,
-          "mean": 0.21,
+          "n": 61,
+          "mean": 0.92,
           "p50": 0.0,
-          "max": 19.0,
-          "frac_idle": 0.974
+          "max": 18.0,
+          "frac_idle": 0.623
         }
       },
+      "collapse": {
+        "available": true,
+        "collapsed": false,
+        "ttft_first_bucket_ms": 4544.6,
+        "ttft_last_bucket_ms": 320.7,
+        "escalation_ratio": 0.07,
+        "early_third_ms": 1903.1,
+        "late_third_ms": 1407.2,
+        "monotonic_frac": 0.45,
+        "ends_near_peak": false,
+        "onset_s": null,
+        "bucket_medians_ms": [
+          4544.6,
+          704.4,
+          1212.7,
+          1150.8,
+          1351.4,
+          643.7,
+          638.0,
+          854.0,
+          1440.2,
+          3446.7,
+          421.3,
+          320.7
+        ],
+        "note": "A collapsed run is not a slower run: throughput is typically unchanged. It has entered a backlog it cannot drain, so goodput from it measures the basin, not the configuration."
+      },
+      "client_health": {
+        "verdict": "OK",
+        "lag_p50_ms": 0.0,
+        "lag_p99_ms": 0.0,
+        "lag_max_ms": 0.0,
+        "lag_early_mean_ms": 0.0,
+        "lag_late_mean_ms": 0.0,
+        "drifting": false
+      },
       "server_counters": {
-        "sglang:generation_tokens_total": 141505.0,
-        "sglang:forward_execution_seconds_total[decode]": 365.2638351764765,
-        "sglang:prompt_tokens_total": 1102561.0,
-        "sglang:cached_tokens_total": 632101.0,
-        "sglang:forward_execution_seconds_total[extend]": 30.606539810180642,
-        "sglang:forward_execution_seconds_total": 395.8703749866572
-      }
+        "sglang:generation_tokens_total": 63274.0,
+        "sglang:inter_token_latency_seconds_count": 90168.0,
+        "sglang:e2e_request_latency_seconds_sum": 2006.1286840639968,
+        "sglang:forward_execution_seconds_total[extend]": 35.516292804717985,
+        "sglang:e2e_request_latency_seconds_count": 81.0,
+        "sglang:time_to_first_token_seconds_count": 101.0,
+        "sglang:forward_execution_seconds_total": 122.66696082782835,
+        "sglang:queue_time_seconds_count": 101.0,
+        "sglang:cached_tokens_total": 332239.0,
+        "sglang:forward_execution_seconds_total[decode]": 87.15066802311037,
+        "sglang:inter_token_latency_seconds_sum": 2593.364354572852,
+        "sglang:queue_time_seconds_sum": 131.14569815000164,
+        "sglang:num_requests_total": 81.0,
+        "sglang:prompt_tokens_total": 752702.0,
+        "sglang:time_to_first_token_seconds_sum": 203.4040249120012
+      },
+      "meets_slo": false,
+      "slo_checks": [
+        {
+          "label": "p90 TTFT",
+          "stat": "p90",
+          "metric": "ttft",
+          "value": 2703.1878471374516,
+          "limit": 2818.0,
+          "ok": true,
+          "note": "median provider's published p90 latency"
+        },
+        {
+          "label": "p90 TPOT",
+          "stat": "p90",
+          "metric": "tpot",
+          "value": 34.83282609034921,
+          "limit": 25.0,
+          "ok": false,
+          "note": "interactive-serving guidance -- our choice"
+        },
+        {
+          "label": "mean TPOT",
+          "stat": "mean",
+          "metric": "tpot",
+          "value": 29.610419044808417,
+          "limit": 20.0,
+          "ok": false,
+          "note": "median provider's published p50 throughput"
+        },
+        {
+          "label": "good_frac",
+          "stat": "frac",
+          "metric": "slo",
+          "value": 0.16,
+          "limit": 0.9,
+          "ok": false,
+          "note": "share of requests meeting every bound"
+        }
+      ],
+      "slo_warnings": []
     }
-  ]
+  ],
+  "serving_overrides": {},
+  "server_env": {},
+  "seconds_per_level": 120.0,
+  "repeats": 1,
+  "provenance": {
+    "sglang_version": "0.5.18",
+    "cuda_tag": "12.8.1-devel-ubuntu22.04",
+    "gpus": [
+      "NVIDIA H100 80GB HBM3, 81559 MiB, 580.95.05"
+    ],
+    "torch": "2.13.0+cu130"
+  },
+  "started_at": 1788410827.9479184,
+  "stack": {
+    "sglang_version": "0.5.18",
+    "digest": "d5158b2d1dd6",
+    "label": "stock",
+    "stock": true,
+    "applied": [],
+    "stale": [],
+    "restored": []
+  },
+  "model_load_s": 265.2,
+  "market_scaling": {
+    "scaled": true,
+    "in_factor": 0.41606,
+    "out_factor": 3.30388,
+    "source_in": 49472,
+    "source_out": 628,
+    "target_in": 20583,
+    "target_out": 2076
+  },
+  "traffic": {
+    "source": "TraceLab (SyFI Lab, University of Washington), https://tracelab.cs.washington.edu/ , CC-BY-4.0",
+    "n_sessions": 300,
+    "n_rounds": 4648,
+    "rounds_per_session_p50": 13,
+    "input_tokens_p50": 18838,
+    "input_tokens_p90": 36476,
+    "new_tokens_p50": 781,
+    "output_tokens_p50": 829,
+    "aggregate_hit_rate": 0.8872,
+    "input_output_ratio": 9.9,
+    "total_input_tokens": 95668093,
+    "total_output_tokens": 9646999
+  },
+  "canary": {
+    "outputs": {
+      "arith": "We need to answer user: \"What is 17 * 24",
+      "recall": "We need answer user's request: \"List the first 8 prime numbers, comma separated, nothing else.\" Need final only primes comma separated. First 8",
+      "instruct": "We need to reply with exactly the word",
+      "short_gen": "We need to answer user: \"Write one sentence about scheduling latency.\" Need final one sentence. Keep concise.\n</think>\n\nScheduling latency is the delay between when a task becomes ready and when the scheduler actually assigns it to a processor for",
+      "long_gen": "We need to respond to user: \"Count from 1 to 40, separated by spaces. Only the numbers.\" Need final only numbers 1..40 separated by spaces. Ensure no extra.\n</think>\n\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31",
+      "long_ctx": "We need answer user's request. User: \"Remember this token: ZEBRA7. filler text... What token"
+    },
+    "digests": {
+      "arith": "288e470aaf8413d1",
+      "recall": "f9bcb7a59a4c1d34",
+      "instruct": "06a8226912ecac91",
+      "short_gen": "1559e30d4a1fe0fa",
+      "long_gen": "f089d6472350b76c",
+      "long_ctx": "0dd30c90ee964460"
+    },
+    "summary": "6/6 returned"
+  },
+  "quality": [
+    {
+      "suite": "gsm8k",
+      "n": 100,
+      "correct": 64.0,
+      "errors": 0,
+      "accuracy": 0.64,
+      "examples": [
+        {
+          "id": "gsm8k-0",
+          "ok": 1.0,
+          "gold": "16",
+          "got": "es.\n\nTotal miles run by Amber and Micah:\n8 + 28 = 36 miles.\n\nAhito ran the remaining miles:\n52 \u2212 36 = 16 miles.\n\n#### 16"
+        },
+        {
+          "id": "gsm8k-1",
+          "ok": 1.0,
+          "gold": "240",
+          "got": "s 4 weeks:\n\n2 pads/week \u00d7 4 weeks = 8 pads per month\n\nEach pad has 30 sheets:\n\n8 pads \u00d7 30 sheets = 240 sheets\n\n#### 240"
+        },
+        {
+          "id": "gsm8k-2",
+          "ok": 1.0,
+          "gold": "80",
+          "got": "ers, then:\n\n\\[\n\\frac{1}{4} \\times \\text{total students} = 20\n\\]\n\n\\[\n\\text{total students} = 20 \\times 4 = 80\n\\]\n\n#### 80"
+        },
+        {
+          "id": "gsm8k-3",
+          "ok": 0.0,
+          "gold": "15",
+          "got": "Dad saw comet when 30. Could be that Bill's first sighting coincided with dad's sighting? If Bill was 15 and dad 30, dad"
+        },
+        {
+          "id": "gsm8k-4",
+          "ok": 0.0,
+          "gold": "91",
+          "got": " years, that adds:\n\n10 \u00d7 8 = 80 trees\n\nSo before any trees die, he has:\n\n50 + 80 = 130 trees\n\nThen 30% of the trees die,"
+        }
+      ],
+      "baseline_accuracy": null,
+      "delta_pct": null,
+      "regressed": false,
+      "why": "",
+      "cached": true
+    },
+    {
+      "suite": "longbench",
+      "n": 100,
+      "correct": 53.05296288323135,
+      "errors": 0,
+      "accuracy": 0.5305,
+      "examples": [
+        {
+          "id": "longbench-0",
+          "ok": 0.6666666666666666,
+          "gold": "French",
+          "got": "s maybe. Ensure no other words on that line. Could be \"French forces\". Let's craft concise.\n</think>\n\n#### French forces"
+        },
+        {
+          "id": "longbench-1",
+          "ok": 0.0,
+          "gold": "Italy",
+          "got": "e Forl\u00ec? Let's inspect. Passage 8: \"Giorgio Ordelaffi (died 1423) was lord of Forl\u00ec and Papal vicar in Romagna (northern"
+        },
+        {
+          "id": "longbench-2",
+          "ok": 0.020618556701030924,
+          "gold": "Tharangambadi",
+          "got": "answer likely Tranquebar (Tharangambadi). The question: \"Thirukkalacherry is a village in which Indian town?\" Maybe from"
+        },
+        {
+          "id": "longbench-3",
+          "ok": 0.4,
+          "gold": "erotic thriller film",
+          "got": "ction Cruel and Tender in 2012, but biggest commercial success is film Chloe. So answer: on film.\n</think>\n\n#### on film"
+        },
+        {
+          "id": "longbench-4",
+          "ok": 0.02580645161290323,
+          "gold": "Vernon Smith",
+          "got": "mics and law at Chapman University.\" Passage 5 notable faculty: Vernon L. Smith \u2013 Nobel Laureate in Economic Science (20"
+        }
+      ],
+      "baseline_accuracy": null,
+      "delta_pct": null,
+      "regressed": false,
+      "why": "",
+      "cached": true
+    },
+    {
+      "suite": "mmlu",
+      "n": 100,
+      "correct": 64.0,
+      "errors": 0,
+      "accuracy": 0.64,
+      "examples": [
+        {
+          "id": "mmlu-0",
+          "ok": 1.0,
+          "gold": "C",
+          "got": "n sky is Cassiopeia. Cygnus is cross/swan, Centaurus southern, Cepheus house-shaped. Final answer C.\n</think>\n\nC\n\n#### C"
+        },
+        {
+          "id": "mmlu-1",
+          "ok": 1.0,
+          "gold": "B",
+          "got": "\\sqrt{2})\\) over \\(\\mathbb{Q}\\) is 2, since \\(\\sqrt{2}\\) has minimal polynomial \\(x^2 - 2\\) over \\(\\mathbb{Q}\\).\n\n#### B"
+        },
+        {
+          "id": "mmlu-2",
+          "ok": 1.0,
+          "gold": "A",
+          "got": "ght, religious right, stagflation, Carter failures, backlash to social changes. Need final with #### A.\n</think>\n\n#### A"
+        },
+        {
+          "id": "mmlu-3",
+          "ok": 0.0,
+          "gold": "B",
+          "got": " self: adaptive immune system has self-tolerance, T/B cell receptors recognize nonself antigens; special feature? Yes.\nC"
+        },
+        {
+          "id": "mmlu-4",
+          "ok": 1.0,
+          "gold": "C",
+          "got": "ookiee. Need final answer on last line '#### C'. Ensure no extra? Can include brief. Final line format.\n</think>\n\n#### C"
+        }
+      ],
+      "baseline_accuracy": null,
+      "delta_pct": null,
+      "regressed": false,
+      "why": "",
+      "cached": true
+    }
+  ],
+  "server_log_tail": "446bde2473a90280cc958ec12e9' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='64df8d87dfaa441387828e5c488e3ea0' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='a62ada098e9b4b3bab60c51d452953d6' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='b487e3f4d67e48428d97ef708e58ef6f' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='f1033ec29cb44b71b30481f54384232a' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='d877efbfedbf40f1aabf71069df1fe20' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='35754d6836494afab1071c188834ea52' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='febab91826e9426f8e3bba73c8113b91' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='36deb2dbc0264898bc2e3a4d37662fe4' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='884c4c0e694247eaa4df6aefe88803d4' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='eb7b8295016c491182ac36e06b74a501' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='86a36013e6e04e5d9e2c6394f2aea316' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='1c92a80b59f14b92aa5e33d930f56651' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='acf08a30878a40deb2fb829c1524e91b' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='5c70d365f65b4d89a944903fa3511665' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='f5515edeac3a45868ffbd2b42efca122' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='e55013ac530c403e89f42d9817ba3cb3' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='aa9c0446bde2473a90280cc958ec12e9' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='64df8d87dfaa441387828e5c488e3ea0' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='a62ada098e9b4b3bab60c51d452953d6' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='b487e3f4d67e48428d97ef708e58ef6f' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='f1033ec29cb44b71b30481f54384232a' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='d877efbfedbf40f1aabf71069df1fe20' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='35754d6836494afab1071c188834ea52' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='febab91826e9426f8e3bba73c8113b91' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='36deb2dbc0264898bc2e3a4d37662fe4' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='884c4c0e694247eaa4df6aefe88803d4' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='eb7b8295016c491182ac36e06b74a501' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='86a36013e6e04e5d9e2c6394f2aea316' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='1c92a80b59f14b92aa5e33d930f56651' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='acf08a30878a40deb2fb829c1524e91b' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='5c70d365f65b4d89a944903fa3511665' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='f5515edeac3a45868ffbd2b42efca122' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='e55013ac530c403e89f42d9817ba3cb3' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='aa9c0446bde2473a90280cc958ec12e9' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='64df8d87dfaa441387828e5c488e3ea0' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='a62ada098e9b4b3bab60c51d452953d6' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='b487e3f4d67e48428d97ef708e58ef6f' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='f1033ec29cb44b71b30481f54384232a' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='d877efbfedbf40f1aabf71069df1fe20' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='35754d6836494afab1071c188834ea52' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='febab91826e9426f8e3bba73c8113b91' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Received output for rid='36deb2dbc0264898bc2e3a4d37662fe4' but the state was deleted in TokenizerManager.\n[2026-09-03 05:08:20] Gracefully exiting... Remaining number of requests 0. Remaining requests remaining_rids=[].\nWarning: please use at least NVCC 12.9 for the best DeepGEMM performance\n[rank0]:[W903 05:08:21.439842758 ProcessGroupNCCL.cpp:1624] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())\n[2026-09-03 05:08:21] kill_process_tree called: parent_pid=38, include_parent=True, pid=38\n",
+  "finished_at": 1788412101.9447298,
+  "result_path": "/results/runs/1788412101-sweep-8371e982a0f5.json"
 }

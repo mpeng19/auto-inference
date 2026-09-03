@@ -31,7 +31,7 @@ flowchart TB
   end
   subgraph modal["Modal, 1×H100 per evaluation"]
     APPLY["apply stack: restore stock, write diff, launch line"]
-    GATES["gates: GSM8K · LongBench F1"]
+    GATES["gates: GSM8K · LongBench F1 · MMLU"]
     SWEEP["closed-loop sweep N ∈ {4,8,12,16,24}<br/>TraceLab-shaped users, device-timer GPU-s"]
     PROF["profile at one level → tracedb"]
     WB["workbench: run a script inside the stack"]
@@ -69,24 +69,24 @@ uv run simulate run --root runs/baseline-screen --levels 8,12         --seconds 
 # 2. the token-equivalence reference for this model (~5 min, ~$0.40)
 uv run simulate equivalence --root runs/equiv-ref --mkdir
 
-# 3. fill the idea bank
-uv run harness ideas import docs/ideas/book.jsonl --source book
+# 3. fill the bank: the packaged seed set, then the arXiv feed
+uv run harness ideas seed
 uv run harness ideas arxiv -k 15 --model opus
 
-# 4. a build-mode fleet
+# 4. a fleet
 uv run harness --session build-1 start --agents 3 --evals 2 --model opus \
-  --mode build --bank --manager --budget 200 --agent-budget 70 --max-attempts 4 \
-  --baseline '{"bill_per_1k": <full>, "quality": {"gsm8k": <acc>, "longbench": <f1>}, "screen": {"bill_per_1k": <screen>}}'
+  --bank --manager --budget 200 --agent-budget 70 --max-attempts 4 \
+  --baseline '{"bill_per_1k": <full>, "quality": {"gsm8k": <acc>, "longbench": <f1>, "mmlu": <acc>}, "screen": {"bill_per_1k": <screen>}}'
 uv run harness --session build-1 tui
 ```
 
 The baseline numbers come from step 1's reports. `harness start` refuses a
-baseline it cannot score against, and refuses build mode without a bank:
+baseline it cannot score against, and refuses to start without a bank:
 either one missing is a way the fleet runs all night and learns nothing. Step
 2 is not checked, because the reference is built on first use -- running it
 once up front just means no agent pays the five minutes for it.
-`docs/NEXT.md` has the current plan and the findings that shaped these
-defaults.
+`docs/methodology.md` has the findings that shaped these defaults and
+`docs/examples/README.md` what a run leaves behind.
 
 ## How a stack is priced
 
@@ -104,9 +104,10 @@ defaults.
    against every OpenRouter provider for the model, and the share of daily
    demand one node serves at that price.
 
-Stock SGLang 0.5.18 serving Qwen3.8-27B-FP8 on one H100 prices at $12.2 to
-$15.0 per 1k requests depending on which side of the line N=12 lands, rank 9
-of 12, about 0.4% of the market per GPU.
+Stock SGLang 0.5.18 serving Qwen3.8-27B-FP8 on one H100 prices at $8.32 per
+1k requests at N\*=12, rank 1 of 12 on the board, about 0.6% of the market
+per GPU. The first fleet's best replicated change, an SLO-budgeted chunked
+prefill sizer, took that to $6.94 with the model's outputs unchanged.
 
 ## The harness
 
@@ -115,7 +116,7 @@ These six shape a run:
 
 | service | question it answers |
 |---|---|
-| `IdeaBankService` | where ideas of the right size come from; claimed one per agent, least similar first |
+| `IdeaBankService` | where ideas of the right size come from; content-addressed records, claimed one per agent, least similar first or steered by a seed |
 | `AgentService` | one idea, iterated: recall → edit → check → screen → confirm → replicate |
 | `EvalService` | the queue in front of the GPUs: dedup, screen slots, spend per attempt |
 | `MemoryService` | every experiment with typed edges; a synthesised brief on recall |
@@ -127,7 +128,7 @@ the live snapshot a watcher reads; neither is something an agent calls.
 
 **Agents are Claude Code processes.** Each runs `claude -p` in its own copy
 of the `sglang` package with the tools it needs allowed, and the harness reads
-the diff back. In build mode an agent starts from a bank record that names the
+the diff back. An agent starts from a bank record that names the
 mechanism, target files, expected gain and risks; it is asked to write a design
 note, run a correctness check and micro-benchmark on an H100 (`harness tool
 gpu-run`) and score token equivalence against stock (`harness tool
@@ -136,8 +137,8 @@ equivalence`) before it spends a sweep. The launch line is the agent's too:
 policy, extra flags or environment, hashed into the experiment; only model, GPU
 count and the metrics switch are locked.
 
-**What guards the number.** Every evaluation scores GSM8K exact match and
-LongBench token F1 before load, so a change gated on sequence length is
+**What guards the number.** Every evaluation scores GSM8K exact match,
+LongBench token F1 and MMLU before load, so a change gated on sequence length
 exercised, and a stack that answers worse is rejected whatever it priced at. A
 claimed win is measured twice and the worse run kept; verdicts are recorded as
 win, loss or neutral against a 3% noise floor; screens are judged against stock
@@ -166,7 +167,10 @@ uv run harness --session S timeline       # ideas, phases, results, cost per age
 uv run harness --session S paper          # write-ups, one per idea that reached a full sweep
 uv run harness --session S calls -v       # every model call, per-message tokens and tools
 uv run harness traces show <id> --root agents/S --kind eval_submit --full
+uv run harness --session S spend          # Modal dollars: evaluations, the agents' own GPU tools, orphans
 uv run harness skills list                # the facts
+uv run harness ideas claim --seed "..."   # one record, steered; `ideas related <id>` for its neighbours
+uv run harness delete --session S         # wipe a finished fleet's directory and rows
 ```
 
 Pause is `p`, resume is `r`; an agent never resumes on its own. The daemon
@@ -180,10 +184,9 @@ src/simulator/    the pricing: stack, sweep runner (Modal), SLO, market, quality
 src/harness/      the loop: contracts, agent, orchestration, ideas, skills, manager, tui
 src/tracedb/      GPU profiles as a queryable database, with an MCP server
 docs/methodology.md   how the method was arrived at, with every negative result
-docs/NEXT.md          the current plan and what the last runs found
-docs/ideas/           the committed idea-bank seed from the book
-docs/examples/        what a run leaves behind
-runs/, agents/        your artifacts; ignored by git
+src/harness/ideas/seeds/   the packaged idea-bank seed set (the book's 27 mechanisms)
+docs/examples/        what a run leaves behind, one tree per kind of run
+runs/, agents/        your artifacts; ignored by git, as is docs/NEXT.md (your planning notes)
 ```
 
 ## Assumed, not measured
