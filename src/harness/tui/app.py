@@ -192,7 +192,7 @@ class FleetApp(App):
         ("ctrl+up", "answer_grow", "Bigger answer box"),
         ("ctrl+down", "answer_shrink", "Smaller answer box"),
         # priority: the screen otherwise takes Tab for focus-cycling first
-        Binding("tab", "next_tab", "Fleet / results", priority=True),
+        Binding("tab", "next_tab", "Fleet / results", priority=True, show=False),
         ("q", "quit", "Quit (fleet keeps running)"),
     ]
 
