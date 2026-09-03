@@ -112,6 +112,7 @@ def promptset_digest(n: int = N_PROMPTS, max_new_tokens: int = MAX_NEW_TOKENS,
                             "revision": quality.LONGBENCH_REV,
                             "sets": list(quality.LONGBENCH_SETS),
                             "max_chars": quality.LONGBENCH_MAX_CHARS,
+                            "truncation": "middle",
                             "prompt": quality.LONGBENCH_PROMPT,
                             "n": n, "seed": seed,
                             "max_new_tokens": max_new_tokens}, sort_keys=True))
@@ -156,7 +157,13 @@ def load_prompts():
     # ~15k-token contexts: the market's shape, and long enough that anything
     # gated on sequence length (page selection, sparse attention, KV
     # compression) is actually running while it is scored.
-    return [PROMPT.format(context=r["context"][:MAX_CHARS], input=r["input"])
+    def trunc(t):
+        if len(t) <= MAX_CHARS:
+            return t
+        h = MAX_CHARS // 2
+        return t[:h] + "\\n...\\n" + t[-h:]
+
+    return [PROMPT.format(context=trunc(r["context"]), input=r["input"])
             for r in rows[:N_PROMPTS]]
 
 

@@ -335,7 +335,7 @@ def test_equivalence_prompts_are_long_context_and_the_reference_name_moved():
 
     src = eq.build_script("Qwen/Qwen3.8-27B-FP8", mode="reference", out_path="/results/x.json")
     assert 'SETS = ["hotpotqa", "2wikimqa"]' in src and "MAX_CHARS" in src
-    assert "zipfile" in src and "r[\"context\"][:MAX_CHARS]" in src
+    assert "zipfile" in src and "context=trunc(r[\"context\"])" in src
     compile(src, "script.py", "exec")
     name = eq.reference_name("Qwen/Qwen3.8-27B-FP8")
     assert "a50ba120b271" not in name                 # the GSM8K-era reference is retired

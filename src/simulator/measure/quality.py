@@ -92,6 +92,11 @@ class QualityResult:
     def as_dict(self) -> dict:
         return {"suite": self.suite, "n": self.n, "correct": self.correct,
                 "errors": self.errors, "accuracy": round(self.accuracy, 4),
+                # A few examples travel with the number: a score nobody can
+                # look behind is a score nobody can debug (stock's first
+                # LongBench run said 6% and the record could not say why).
+                "examples": [{k: (str(v)[:160] if isinstance(v, str) else v)
+                              for k, v in it.items()} for it in self.items[:5]],
                 "baseline_accuracy": self.baseline_accuracy,
                 "delta_pct": self.delta_pct}
 
@@ -122,7 +127,7 @@ def load(suite: str = "gsm8k", n: int = 100, seed: int = 0) -> list[Item]:
         rows = load_longbench_rows()
         random.Random(seed).shuffle(rows)
         return [Item(f"longbench-{i}",
-                     LONGBENCH_PROMPT.format(context=r["context"][:LONGBENCH_MAX_CHARS],
+                     LONGBENCH_PROMPT.format(context=_truncate_middle(r["context"], LONGBENCH_MAX_CHARS),
                                              input=r["input"]),
                      "\x1f".join(_answers(r)), max_tokens=32)
                 for i, r in enumerate(rows[:n])]
@@ -157,6 +162,15 @@ def load_longbench_rows(sets: tuple[str, ...] = LONGBENCH_SETS) -> list[dict]:
             rows += [json.loads(line) for line in
                      z.read(f"data/{name}.jsonl").decode("utf-8").splitlines() if line.strip()]
     return rows
+
+
+def _truncate_middle(text: str, max_chars: int) -> str:
+    """LongBench's own truncation: keep the head and the tail, drop the
+    middle. Head-only truncation drops the passages nearest the question."""
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return text[:half] + "\n...\n" + text[-half:]
 
 
 def _answers(r: dict) -> list[str]:
