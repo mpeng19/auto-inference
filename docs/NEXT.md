@@ -52,68 +52,64 @@ works. Its numbers are claims.
   prompt and `harness.tools` say to export the variable inside the script, or
   to make the change default-on with a kill switch.
 
-## Step 1 -- baselines (once per grid; done for 2026-09-02)
+## Step 1 -- baselines (once per grid and runner; done for runner v3 on 2026-09-03)
 
 ```bash
 mkdir -p runs/baseline runs/baseline-screen
-uv run simulate run --root runs/baseline --levels 4,8,12,16,24 --seconds 120 --n-gpu 1
-uv run simulate run --root runs/baseline-screen --levels 8,12 --seconds 60 --n-gpu 1
+uv run simulate run --root runs/baseline        --levels 4,8,12,16,24 --seconds 120 --n-gpu 1
+uv run simulate run --root runs/baseline-screen --levels 8,12         --seconds 60  --n-gpu 1
 ```
 
-Read the interpolated frontier line as well as N*. The stock numbers on this
-grid are $12.23/1k full (stock on its good days; see below), $17.30 screen,
-GSM8K 0.69.
+Two runs, because a screen is not a small full sweep, and both again
+whenever the runner's measurement changes. Runner v3 ends each level at its
+deadline and waits for the server to go idle before the next, which made a
+full sweep ~25 minutes and moved stock's numbers down (drained levels had
+been charging the tail of every reply to the price):
 
-## Step 2 -- the equivalence reference and its noise floor (once per model)
+| stock, runner v3 | N* | $/1k | interpolated |
+|---|---|---|---|
+| full, 5 x 120 s | 8 | 9.77 | N*~11.7, $8.54 |
+| screen, 2 x 60 s | 12 | 9.03 | |
+| quality | gsm8k 0.64-0.70, longbench 0.53, mmlu 0.64 | | |
+
+Old numbers ($12.23 / $14.96 full, $17.30 screen) are from drained levels
+and are not comparable with anything measured now.
+
+## Step 2 -- the equivalence reference (built on first use)
 
 ```bash
-mkdir -p runs/equiv-ref runs/equiv-noise
-uv run simulate equivalence --root runs/equiv-ref       # stock: writes the cached reference
-uv run simulate equivalence --root runs/equiv-noise     # stock again: the noise floor
+uv run simulate equivalence --root runs/equiv-ref --mkdir      # stock; ~5 min, ~$0.40
 ```
 
-Done for Qwen3.8-27B-FP8 on 2026-09-02: stock against its own reference
-scores **agreement 1.0000, |dlogprob| mean 0.0000** over 1,512 positions.
-Teacher-forced single-sequence scoring is deterministic, unlike GSM8K under
-batched load (62% vs 70% on the same items). So the thresholds in
-`measure/equivalence.py` (0.97 agreement, 0.05 mean |dlogprob|) are not a
-noise allowance; they are how much a numerics-changing kernel (FP8 KV,
-int8 KV, a different softmax order) is allowed to move the model before it
-counts as a different model. A lossless kernel should score exactly 1.0 / 0.0.
-Each candidate check costs ~5 min and ~$0.36 (engine load dominates).
+The reference is long-context (LongBench, ~15k tokens) so anything gated on
+sequence length is scored while it is running. Stock against itself is
+1.0000 / 0.0000 exactly. Note that `--stack` must point at a *saved* stack: a
+run directory (it now holds `stack.json`) or a mirrored tree. Pointing it at
+an agent's `candidate/sglang` after the agent moved on measures stock, which
+is how build-2's -27% win went unverified and then unrecoverable.
 
 ## Step 3 -- fill the bank (once; grows over time)
 
 ```bash
-uv run harness ideas import docs/ideas/book.jsonl --source book   # 27 records, committed
-uv run harness ideas arxiv -k 15 --model opus                       # ~30 min of model calls
+uv run harness ideas import docs/ideas/book.jsonl --source book
+uv run harness ideas arxiv -k 15 --model opus
 uv run harness ideas list
 ```
 
-Records carry mechanism, targets, expected gain and risks. `harness ideas
-show <id>` before believing one.
-
-## Step 4 -- three build-mode agents, overnight
+## Step 4 -- five build-mode agents, until the money runs out
 
 ```bash
 uv run harness --session build-3 start \
-  --agents 3 --evals 2 --model opus --mode build --bank --manager \
-  --budget 200 --agent-budget 70 --max-attempts 4 \
+  --agents 5 --evals 3 --model opus --mode build --bank --manager \
+  --budget 300 --agent-budget 80 --max-attempts 6 \
   --root agents/build-3 \
-  --baseline '{"bill_per_1k": 12.23, "quality": {"gsm8k": 0.69}, "screen": {"bill_per_1k": 17.30}}'
+  --baseline '{"bill_per_1k": 9.77, "quality": {"gsm8k": 0.66, "longbench": 0.53, "mmlu": 0.64}, "screen": {"bill_per_1k": 9.03}}'
 ```
 
-No `--seed`: agents claim from the bank, least-similar first, one mechanism
-each. Opus, because a kernel is not a knob. Four attempts, because an attempt
-is now hours: design note, workbench correctness and micro-benchmark,
-equivalence, then the sweep. The manager reviews every third outcome and
-stashes a tool under `agents/build-3/tools/` only when it can name the hours
-it saves; agents see the index in their prompt. A fresh session id each time:
-`start` refuses a root a daemon is already on, and two daemons sharing agent
-directories reset each other's workspaces.
-
-**Leave the lid open.** The daemon runs under `caffeinate`, which does not
-survive clamshell sleep; the status line prints `host slept` if it happens.
+Five agents on three GPUs: with screens at ~10 minutes and full sweeps at
+~25, three slots keep five opus agents fed. `--budget` is the Modal cap;
+`--agent-budget` stops one agent monopolising it; six attempts because an
+attempt is hours. Leave the lid open.
 
 ## In the morning
 
