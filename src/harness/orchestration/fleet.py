@@ -288,14 +288,16 @@ class Fleet:
             return None
         with self._lock:
             live = tuple(i.hypothesis + " " + i.title for i in self._live_ideas)
-            scales = tuple(getattr(i, "scale", "") for i in self._live_ideas)
             tried = tuple(o.idea.hypothesis for o in self._completed[-20:])
-        rec = self.bank.claim(agent_id, avoid=live + tried, live_scales=scales)
+        # No `live_scales`: an `Idea` does not carry the record's `scale`, so
+        # what used to be passed here was a tuple of empty strings and the
+        # bank's scale tie-break never fired. Diversity is the text distance
+        # above. Making the tie-break live means tracking claimed scales, which
+        # changes which record an agent gets -- a decision, not a cleanup.
+        rec = self.bank.claim(agent_id, avoid=live + tried)
         if rec is None:
             return None
-        idea = rec.as_idea()
-        if hasattr(idea, "design"):
-            idea = replace(idea, design=_design_note(rec))
+        idea = replace(rec.as_idea(), design=_design_note(rec))
         with self._lock:
             self._live_ideas.append(idea)
         return idea
@@ -314,6 +316,11 @@ class Fleet:
                 self.bank.record_outcome(out.idea.seeded_by, exp, status="tried")
 
     def claim_idea(self, agent_id: str, proposed: Idea) -> Idea | None:
+        """Register a self-seeded idea, or None if it duplicates a live one.
+
+        `agent_id` names the caller for symmetry with `claim_from_bank`; the
+        answer is a property of the ideas in flight, not of who is asking.
+        """
         with self._lock:
             for other in self._live_ideas:
                 if self._too_similar(proposed, other):

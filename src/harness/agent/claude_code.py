@@ -234,12 +234,12 @@ class ClaudeCodeProposer:
     # for the same reason as `session_tools`.
     session_skills: object | None = None
     last_usage: TokenUse = field(default_factory=TokenUse)
-    # Every call this proposer has made, newest last. The loop stamps
-    # `last_call` onto the turn it appends, so a trace can be read for where
-    # the hours went without keeping the proposer alive.
     # Where per-call event logs go (`<agent>/calls/<phase>-<ts>.jsonl`);
     # set by the loop's workspace before a call. Empty: no log.
     calls_dir: str = ""
+    # Every call this proposer has made, newest last. The loop stamps
+    # `last_call` onto the turn it appends, so a trace can be read for where
+    # the hours went without keeping the proposer alive.
     last_call: CallStats = field(default_factory=CallStats)
     calls: list[CallStats] = field(default_factory=list)
 
@@ -925,6 +925,14 @@ change how the server is started for your evaluation:
 Any ServingConfig field except model, gpu, n_gpu and enable_metrics. Stock's
 launch line is the baseline, so a win must beat stock's deployment, not just
 its code. `harness tool preflight` validates the file.
+
+**`env` reaches the sweep's server, not the workbench.** `gpu-run` and
+`equivalence` run in a container with its own environment, so a change gated on
+an environment variable is measured *inert* there: on 2026-09-02 an env-gated
+numerics change scored top-1 agreement exactly 1.0000 with |dlogprob| exactly
+0.0000, which is the tell that the candidate ran stock, and cost a workbench
+run to learn. Export the variable inside your script, or make the change
+default-on with an env kill switch.
 
 When done, reply with 4-8 sentences: the mechanism you implemented, and the
 numbers off your workbench -- micro-benchmark speedup, the correctness error

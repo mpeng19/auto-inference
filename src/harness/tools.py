@@ -230,6 +230,13 @@ def gpu_run(script_path: str | pathlib.Path,
     directory to itself, and `files` (path -> text) beside it for helpers.
     Whatever it printed comes back, along with what it cost.
 
+    **The candidate's files travel; its `serving.json` `env` does not.** The
+    runner applies `stack.env` to a sweep's server and the workbench script
+    gets the container's own environment, so a change hidden behind an
+    environment variable runs here as stock -- on 2026-09-02 that cost an agent
+    a workbench run and an equivalence run to discover. Export the variable in
+    the script itself.
+
     Returns a report rather than raising, like `preflight`: an agent in a loop
     needs the reason as data, and a missing script or an unparseable workspace
     should not cost a GPU to discover.
@@ -269,6 +276,11 @@ def equivalence(workspace: str | pathlib.Path | None = None,
     reports how far the distribution moved. See
     `simulator.measure.equivalence` -- including why the thresholds are
     provisional, and why the first run of a model pays for the reference.
+
+    Same caveat as `gpu_run`: this runs on the workbench, so a candidate whose
+    new path is gated on an environment variable is scored with the path off.
+    Agreement of exactly 1.0000 with |dlogprob| exactly 0.0000 from a change
+    that touches numerics is that, not a lossless kernel.
     """
     import asyncio
 

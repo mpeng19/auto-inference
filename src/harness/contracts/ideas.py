@@ -75,9 +75,11 @@ class IdeaBankService(Protocol):
 
     def search(self, text: str, k: int = 8) -> tuple[IdeaRecord, ...]: ...
 
-    def claim(self, agent_id: str, avoid: tuple[str, ...] = ()) -> IdeaRecord | None:
+    def claim(self, agent_id: str, avoid: tuple[str, ...] = (),
+              live_scales: tuple[str, ...] = ()) -> IdeaRecord | None:
         """The available record least like `avoid` (the texts of ideas
-        already live or tried). None when the bank is empty."""
+        already live or tried), ties broken toward a `scale` not in
+        `live_scales`. None when the bank is empty."""
         ...
 
     def release(self, rec_id: str, status: BankStatus = "available") -> None: ...

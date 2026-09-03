@@ -1,14 +1,18 @@
 """Auto-research harness: a fleet of agents improving an inference stack.
 
-Ten agents, each iterating on one idea, each proposing diffs to SGLang's `srt/`
-and pricing them with `simulator`. Four services with strict contracts, so any
-one can be replaced without the others noticing:
+A handful of agents (three or four is a night's worth on one GPU budget), each
+iterating on one idea, each proposing diffs to SGLang's `srt/` and pricing them
+with `simulator`. Every service has a strict contract, so any one can be
+replaced without the others noticing:
 
+    IdeaBankService        where ideas of the right size come from
+    AgentService           one idea, iterated, with divergence and retry policy
+    EvalService            the queue in front of the GPUs
     MemoryService          what the fleet has already tried, and what it learned
     ContextService         the full transcript behind any one of those claims
-    EvalService            the queue in front of the GPUs
-    AgentService           one idea, iterated, with divergence and retry policy
+    SkillBankService       what earlier runs established, shared across sessions
     OrchestrationService   N of those in parallel, kept diverse and in budget
+    SessionStore           what a TUI or a status command reads while it runs
 
 The scarce thing is **GPU concurrency and money**, not CPU: every attempt rents
 an H100 for 25-60 minutes. Agents themselves only write text and wait on an

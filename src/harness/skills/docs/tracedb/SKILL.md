@@ -5,13 +5,13 @@ description: Query the GPU profile of your candidate stack (and stock) instead o
 
 # tracedb: the GPU profile as a database
 
-Every full sweep of a promoted candidate captures a kineto trace at the
-priced concurrency level (N*): ~20 decode steps of every CUDA kernel, its
-duration, its stream and the CPU launch that issued it. The harness ingests
-it into a SQLite file under your agent directory (`../profiles/<stack
-digest>.sqlite`) and exposes it to you as MCP tools named `trace_*`. Stock's
-profile, when present, is exposed under the same tools on the server
-`tracedb_stock`.
+Every full sweep captures a kineto trace at one fixed concurrency (the fleet's
+`--profile-level`, 12 by default -- the level stock prices at, not necessarily
+your N*): ~20 decode steps of every CUDA kernel, its duration, its stream and
+the CPU launch that issued it. The harness ingests it into a SQLite file under
+the run's `profiles/<stack digest>.sqlite` and exposes it to you as MCP tools
+named `trace_*`. Stock's profile, when present, is exposed under the same tools
+on the server `tracedb_stock`.
 
 ## Why this exists
 

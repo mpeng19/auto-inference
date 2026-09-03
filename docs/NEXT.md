@@ -1,17 +1,56 @@
 # Next: a small real run
 
-Written 2026-09-02. Scope: what to run first and what to check. This is a
-next-steps note, not a running log — findings go in docstrings and
-`docs/methodology.md`.
+Written 2026-09-02, updated 2026-09-03. Scope: what to run first and what to
+check. This is a next-steps note, not a running log — findings go in
+docstrings and `docs/methodology.md`.
 
 ## The honest state
 
-The tune-mode loop (nights 1-5, 2026-09-02) runs end to end: fifty-odd
+The tune-mode loop (nights 1-5, 2026-09-02) ran end to end: fifty-odd
 evaluations, honest verdicts, no wins. It produced one-line scheduler tweaks
-because that is what it asked for. The build-mode loop -- idea bank, GPU
-workbench, token-level gate, build prompt, manager -- is written and tested
-but **no build-mode agent has run yet**, and the workbench has run one smoke
-script. Treat the first build run as a systems test that may produce a kernel.
+because that is what it asked for.
+
+Build mode has now run twice. `build-1` recorded no experiments: a workspace
+fault drained six bank records in a minute, which is why an unmeasured error
+now returns its idea to the bank. Its manager still stashed three tools.
+`build-2` recorded nine experiments, stashed one more tool, and produced one
+replicated **-27.3%**; read the section below before believing it. The loop
+works. Its numbers are claims.
+
+## What build-2 found (2026-09-02)
+
+- **One replicated win, and the gate that cannot see it.** `a01`, stack
+  `b0027aa57534`: "read a P-greedy-selected nested subset of KV pages instead
+  of the full KV cache". Screen $16.76/1k (N\*=12), then two full sweeps at
+  **$8.887** and **$8.879**/1k, both N\*=16, interpolated N\* 17.98 and 18.69.
+  The worse is kept: **-27.3%** against $12.23, rank 3 of 12, one node 0.58% of
+  the market. ~$8.3 of GPU across the three. Two sweeps agreeing to 0.1%, and
+  an interpolated frontier well past the last grid point, means this is not the
+  grid flip that manufactured the earlier 18%.
+
+  What is *not* established is that it is the same model. Reading a subset of
+  KV pages is an approximation, and GSM8K scored 68% and 67% against a 69%
+  baseline — inside a 10-point gate that cannot resolve a numerics change at
+  n=100. No `harness tool equivalence` score for this digest is in the run.
+  **Run equivalence against `b0027aa57534` before this leaves the repository**;
+  a 27% price cut that answers differently is a different product, not a win.
+
+- **The manager writes tools but has not yet written a fact.** All twelve
+  facts in the skill bank are `source=human`; nothing is attributed to a
+  session, so the review's fact path has never landed one. It is the half of
+  the manager that carries across runs, so check `harness skills list` for a
+  fact sourced to the session before assuming it works.
+
+- **`serving.json`'s `env` reaches the sweep, not the workbench.** The runner
+  applies `stack.env` to the served process; `workbench` builds the script's
+  environment from the container's own. So a change behind an environment flag
+  is measured with the flag off: an agent's env-gated numerics change scored
+  top-1 agreement exactly 1.0000 with |dlogprob| exactly 0.0000, which is
+  impossible for a change that re-rounds every weight and is the tell that the
+  candidate ran stock. It cost that agent a workbench run and an equivalence
+  run to find. The fix belongs in `simulator/runner`; until it lands, the build
+  prompt and `harness.tools` say to export the variable inside the script, or
+  to make the change default-on with a kill switch.
 
 ## Step 1 -- baselines (once per grid; done for 2026-09-02)
 
@@ -57,10 +96,10 @@ show <id>` before believing one.
 ## Step 4 -- three build-mode agents, overnight
 
 ```bash
-uv run harness --session build-1 start \
+uv run harness --session build-3 start \
   --agents 3 --evals 2 --model opus --mode build --bank --manager \
   --budget 200 --agent-budget 70 --max-attempts 4 \
-  --root agents/build-1 \
+  --root agents/build-3 \
   --baseline '{"bill_per_1k": 12.23, "quality": {"gsm8k": 0.69}, "screen": {"bill_per_1k": 17.30}}'
 ```
 
@@ -68,8 +107,10 @@ No `--seed`: agents claim from the bank, least-similar first, one mechanism
 each. Opus, because a kernel is not a knob. Four attempts, because an attempt
 is now hours: design note, workbench correctness and micro-benchmark,
 equivalence, then the sweep. The manager reviews every third outcome and
-stashes a tool under `agents/build-1/tools/` only when it can name the hours
-it saves; agents see the index in their prompt.
+stashes a tool under `agents/build-3/tools/` only when it can name the hours
+it saves; agents see the index in their prompt. A fresh session id each time:
+`start` refuses a root a daemon is already on, and two daemons sharing agent
+directories reset each other's workspaces.
 
 **Leave the lid open.** The daemon runs under `caffeinate`, which does not
 survive clamshell sleep; the status line prints `host slept` if it happens.
@@ -77,13 +118,16 @@ survive clamshell sleep; the status line prints `host slept` if it happens.
 ## In the morning
 
 ```bash
-uv run harness --session build-1 status
-uv run harness traces list --root agents/build-1
+uv run harness --session build-3 status
+uv run harness --session build-3 results --diff              # experiments, best first
+uv run harness traces list --root agents/build-3
 uv run harness traces show <id> --kind eval_submit --full     # the diffs
 uv run harness ideas list --status tried
 uv run harness skills list                                   # facts the manager wrote
-ls agents/build-1/tools/ agents/build-1/profiles/            # stashed tools; ingested profiles
-uv run harness --session build-1 timeline                    # who did what, when
+ls agents/build-3/tools/ agents/build-3/profiles/            # stashed tools; ingested profiles
+uv run harness --session build-3 timeline                    # who did what, when
+uv run harness --session build-3 calls -v                    # where the agent-hours went
+uv run harness --session build-3 paper                       # the write-ups
 ```
 
 Judge: did each agent write a DESIGN.md and run the workbench before the
@@ -118,10 +162,14 @@ noise and replicated.
   and every other number matched stock to the cent. August's $12.23 and
   September's $14.96 for stock are the same flip. The harness now replicates
   a claimed win and keeps the worse run, which halves the false-win rate but
-  does not remove it. The real fix is in the simulator: interpolate N* where
-  the fitted SLO curve crosses the limit and price there, instead of taking
-  the last passing level. `simulate rescore` could then re-judge every sweep
-  from the night without a GPU. Decide this before believing any win.
+  does not remove it. The simulator now also **interpolates**: every report
+  and every experiment's metrics carry where the binding metric crosses its
+  limit between the last passing and first failing level, with the bill
+  interpolated to match. It does not yet *price* there -- the priced point is
+  still the last passing level -- so the interpolated line is a second opinion
+  on a win rather than the verdict. Read both; build-2's -27.3% is the first
+  claim where they agree. `simulate rescore` re-judges a stored sweep without
+  a GPU if that rule changes.
 - **A screen is not a small full sweep.** Stock prices ~15% higher at screen
   tier; screens must be judged against stock measured the same way.
 - **GSM8K is noisy at n=50** (62% and 70% on stock, same items); at n=100 it
@@ -142,9 +190,13 @@ display. The status line and TUI print `host slept ~N min` when it happens.
 
 ## Known gaps, worth fixing before scaling to ten
 
-- **No profile is captured by default.** `--profile-level` exists and is
-  untested. Until it runs, agents reason about where decode time goes instead
-  of looking (`src/tracedb/`).
+- **No profile has ever been captured.** `--profile-level` now defaults to 12
+  and the ingest and MCP wiring are tested offline, but both build runs were
+  launched from daemons started before that landed, and no sweep record
+  carries a `profiles` key. Until one does, agents reason about where decode
+  time goes instead of looking (`src/tracedb/`). First check next run:
+  `ls agents/<session>/profiles/`, and grep the daemon log for
+  `profile ingest skipped`.
 - **`bench_serving` cross-check has never run.** One invocation at N* would
   tell us whether our load generator agrees with SGLang's own.
 - **Seeding costs a full `claude -p` call** (~30–60 s). `--seed-model` exists

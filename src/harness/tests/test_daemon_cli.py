@@ -154,6 +154,39 @@ def test_cli_status_renders_a_snapshot(tmp_path, capsys):
     assert "s1" in out and "lfu eviction" in out and "writing a diff" in out
 
 
+def test_cli_calls_summarises_a_call_log(tmp_path, capsys):
+    """`harness calls` reads the per-call JSONL an agent's proposer wrote.
+
+    The only view of where an agent-hour went, and it is parsed rather than
+    stored: a row shape that drifts shows up here first.
+    """
+    root = tmp_path / "run"
+    d = root / "a01" / "calls"
+    d.mkdir(parents=True)
+    rows = [
+        {"ts": 100.0, "since_prev_s": 1.0, "type": "assistant", "input": 10,
+         "output": 5, "cache_read": 700, "cache_write": 0, "tools": ["Bash"]},
+        {"ts": 400.0, "since_prev_s": 300.0, "type": "assistant", "input": 3,
+         "output": 7, "cache_read": 300, "cache_write": 0,
+         "tools": ["Edit", "Bash"]},
+        {"ts": 460.0, "since_prev_s": 60.0, "type": "result", "num_turns": 9},
+    ]
+    (d / "edit-1700000000.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n")
+
+    assert cli_main(["--store", str(tmp_path / "s.db"), "calls",
+                     "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "a01" in out and "edit-1700000000" in out
+    assert "2 msgs" in out and "6.0 min" in out      # 100s -> 460s
+    assert "1,000" in out                            # cache reads, both messages
+    assert "turns 9" in out and "Bashx2" in out and "Editx1" in out
+
+    assert cli_main(["--store", str(tmp_path / "s.db"), "calls",
+                     "--root", str(root), "-v"]) == 0
+    assert "300.0s" in capsys.readouterr().out       # the per-message rows
+
+
 def test_cli_status_json_is_machine_readable(tmp_path, capsys):
     from harness.contracts.session import SessionView
 

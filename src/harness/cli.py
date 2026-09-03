@@ -1,6 +1,8 @@
-"""`harness` -- launch and steer a fleet from the terminal.
+"""Launch and steer a fleet of coding agents from the terminal.
 
-    harness start --agents 10          # detached; prints a session id and returns
+Running a fleet:
+
+    harness start --agents 3           # detached; prints a session id and returns
     harness tui                        # watch and control it
     harness status                     # one-shot, scriptable
     harness scale 6                    # add or remove agents in flight
@@ -8,12 +10,24 @@
     harness stop                       # graceful: finish paid work, then wind up
     harness kill                       # flat: everything, now
 
-    harness tool recall "raise chunked prefill"   # what the fleet already knows
-    harness tool preflight --workspace agents/a01 # cheap checks before a GPU
-    harness tool roofline --batch 12              # predicted step time and cost
-    harness tool gpu-run bench.py                 # one script on an H100, minutes
-    harness tool equivalence                      # same model, token by token?
+Reading one, during or after:
+
+    harness results --diff              # experiments, best first, with the diff
+    harness timeline                    # who did what, when, and for how long
+    harness calls -v                    # every model call, tokens and tools
+    harness paper                       # the write-up per idea
+    harness ask "which attempt touched the attention backend?"
     harness traces list | show <id> | export      # the debugging record
+
+Filling the banks, and the tools an agent calls from its own shell:
+
+    harness ideas import docs/ideas/book.jsonl --source book
+    harness skills list                                    # facts across runs
+    harness tool recall "raise chunked prefill"             # what is known
+    harness tool preflight --workspace agents/S/a01         # free checks
+    harness tool roofline --batch 12                        # step time and cost
+    harness tool gpu-run bench.py                           # H100, minutes, ~$1
+    harness tool equivalence                                # still the same model?
 
 `start` is asynchronous by default because a fleet runs for hours and must
 outlive the terminal that launched it. Everything after it talks to the session
@@ -498,42 +512,53 @@ def cmd_tui(a) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="harness", description=__doc__.split("\n")[0])
-    ap.add_argument("--store", default="", help="session database (default ~/.auto-inference)")
+    ap.add_argument("--store", default="",
+                    help="session database (default ~/.auto-inference/sessions.db; "
+                         "HARNESS_HOME moves it)")
     ap.add_argument("--session", default="", help="session id (default: most recent)")
     ap.add_argument("--wait", type=float, default=5.0,
-                    help="seconds to wait for a command to be acknowledged")
+                    help="seconds to wait for stop/scale/agent to be acknowledged")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("start", help="launch a fleet, detached")
-    s.add_argument("--agents", type=int, default=4)
-    s.add_argument("--evals", type=int, default=2, help="concurrent GPU evaluations")
-    s.add_argument("--budget", type=float, default=200.0, help="$ ceiling for the fleet")
-    s.add_argument("--agent-budget", dest="agent_budget", type=float, default=40.0)
-    s.add_argument("--max-attempts", dest="max_attempts", type=int, default=6)
-    s.add_argument("--model", default="sonnet", help="claude model: sonnet | opus")
-    s.add_argument("--seed-model", dest="seed_model", default="")
-    s.add_argument("--gpu", default="H100")
-    s.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
-    s.add_argument("--root", default="")
+    s.add_argument("--agents", type=int, default=4, help="agents running at once (default 4)")
+    s.add_argument("--evals", type=int, default=2, help="concurrent GPU evaluations (default 2)")
+    s.add_argument("--budget", type=float, default=200.0, help="$ ceiling for the fleet (default 200)")
+    s.add_argument("--agent-budget", dest="agent_budget", type=float, default=40.0,
+                   help="$ ceiling for one agent on one idea (default 40)")
+    s.add_argument("--max-attempts", dest="max_attempts", type=int, default=6,
+                   help="diffs one agent may evaluate on one idea (default 6)")
+    s.add_argument("--model", default="sonnet", help="claude model: sonnet | opus (default sonnet)")
+    s.add_argument("--seed-model", dest="seed_model", default="",
+                   help="cheaper model for seeding an idea (default: --model)")
+    s.add_argument("--gpu", default="H100", help="GPU every evaluation rents (default H100)")
+    s.add_argument("--n-gpu", dest="n_gpu", type=int, default=1,
+                   help="GPUs per evaluation")
+    s.add_argument("--root", default="",
+                   help="where agent workspaces go (default: agents/<session>)")
     s.add_argument("--force", action="store_true",
                    help="start even if a daemon for this root is alive")
     s.add_argument("--bank", nargs="?", const="__default__", default="",
                    help="claim ideas from the bank (default path when given no value)")
     s.add_argument("--profile-level", dest="profile_level", type=int, default=12,
-                   help="capture a GPU profile at this level on full sweeps (0 = none)")
+                   help="capture a GPU profile at this concurrency on full sweeps "
+                        "and serve it to agents over MCP (default 12; 0 = none)")
     s.add_argument("--manager", action="store_true",
                    help="review outcomes and stash reusable tools under <root>/tools/")
     s.add_argument("--mode", choices=["tune", "build"], default="tune",
                    help="build: kernel-scale ideas with a design note and workbench checks")
     s.add_argument("--seed", action="append", help="a starting hypothesis; repeatable")
-    s.add_argument("--baseline", default="", help='JSON from stock sweeps: {"bill_per_1k": 14.96, "quality": {"gsm8k": 0.66}, "screen": {"bill_per_1k": 17.3}}')
+    s.add_argument("--baseline", default="",
+                   help='stock, measured on this grid; required. JSON: '
+                        '{"bill_per_1k": 12.23, "quality": {"gsm8k": 0.69}, '
+                        '"screen": {"bill_per_1k": 17.30}}')
     s.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="fake the GPU evaluations (saves dollars, still runs "
                         "real Claude Code agents)")
     s.add_argument("--fake-agents", dest="fake_agents", action="store_true",
                    help="fake the agents too (saves subscription usage); "
                         "with --dry-run this exercises the whole fleet for free")
-    s.add_argument("--note", default="")
+    s.add_argument("--note", default="", help="free text, recorded with the session")
     s.set_defaults(fn=cmd_start)
 
     st = sub.add_parser("status", help="one-shot snapshot")
@@ -549,7 +574,7 @@ def main(argv: list[str] | None = None) -> int:
     tl = sub.add_parser("tool", help="tools for agents (and for reading runs)")
     tl.add_argument("action", choices=["recall", "preflight", "roofline",
                                        "gpu-run", "equivalence"])
-    tl.add_argument("intent", nargs="?", default="",
+    tl.add_argument("intent", nargs="?", default="", metavar="ARG",
                     help="recall: what you are about to do; "
                          "gpu-run: the script to run")
     tl.add_argument("--workspace", default=".",
@@ -558,20 +583,26 @@ def main(argv: list[str] | None = None) -> int:
                     help="gpu-run/equivalence: seconds the script itself gets; "
                          "0 takes the tool's own default (600s, 1800s), which "
                          "already allows for a 3-5 minute engine load")
-    tl.add_argument("--context", type=int, default=20583)
-    tl.add_argument("--batch", type=int, default=12)
-    tl.add_argument("--model", default="Qwen/Qwen3.8-27B-FP8")
-    tl.add_argument("--gpu", default="H100")
-    tl.add_argument("--n-gpu", dest="n_gpu", type=int, default=1)
+    tl.add_argument("--context", type=int, default=20583,
+                    help="roofline: input tokens per sequence")
+    tl.add_argument("--batch", type=int, default=12,
+                    help="roofline: sequences decoding together")
+    tl.add_argument("--model", default="Qwen/Qwen3.8-27B-FP8",
+                    help="roofline: the model being served")
+    tl.add_argument("--gpu", default="H100", help="roofline: the GPU")
+    tl.add_argument("--n-gpu", dest="n_gpu", type=int, default=1,
+                    help="roofline: GPUs it is served on")
     tl.add_argument("--root", default="", help="fleet root, for recall")
-    tl.add_argument("-k", type=int, default=8)
+    tl.add_argument("-k", type=int, default=8, help="recall: hits to retrieve")
     tl.add_argument("--json", action="store_true")
     tl.set_defaults(fn=cmd_tool)
 
     sk = sub.add_parser("skills", help="the skill bank: facts earlier runs established")
     sk.add_argument("action", choices=["list", "show", "add", "retract", "render"])
     sk.add_argument("arg", nargs="?", default="", help="id | claim | query")
-    sk.add_argument("--bank", default="", help="database path (default: shared)")
+    sk.add_argument("--bank", default="",
+                    help="database path (default: ~/.auto-inference/skills.db, "
+                         "shared by every run on this machine)")
     sk.add_argument("--topic", default="")
     sk.add_argument("--evidence", default="")
     sk.add_argument("--confidence", type=float, default=0.7)
@@ -614,9 +645,14 @@ def main(argv: list[str] | None = None) -> int:
                                           "extract-pdf", "arxiv"])
     ideas.add_argument("arg", nargs="?", default="",
                        help="id | query | jsonl path | pdf path")
-    ideas.add_argument("--bank", default="", help="database path (default: shared)")
-    ideas.add_argument("--status", default="", help="list: filter")
-    ideas.add_argument("--scale", default="", help="list: filter")
+    ideas.add_argument("--bank", default="",
+                       help="database path (default: ~/.auto-inference/ideas.db, "
+                            "shared by every run on this machine)")
+    ideas.add_argument("--status", default="",
+                       help="list: available | claimed | tried | retired")
+    ideas.add_argument("--scale", default="",
+                       help="list: kernel | architecture | memory | scheduler | "
+                            "parallelism | numerics | other")
     ideas.add_argument("--source", default="", help="import/extract-pdf: source label")
     ideas.add_argument("--model", default="opus", help="extract-pdf/arxiv: claude model")
     ideas.add_argument("--pages", type=int, default=20, help="extract-pdf: window size")

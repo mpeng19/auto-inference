@@ -81,8 +81,11 @@ class EvalRecord:
     status: EvalStatus
     ok: bool = False
     metrics: dict = field(default_factory=dict)
-    failure: Literal["", "infra", "hypothesis", "slo", "invalid_diff", "timeout",
-                     "cancelled"] = ""
+    # "quality" is one of these, not a footnote: an accuracy gate rejects a
+    # stack that priced well and answered worse, and a reader of this field has
+    # to be able to tell that from the infrastructure failure it would retry.
+    failure: Literal["", "infra", "hypothesis", "slo", "invalid_diff", "quality",
+                     "timeout", "cancelled"] = ""
     started_at: float = 0.0
     ended_at: float = 0.0
     queued_s: float = 0.0

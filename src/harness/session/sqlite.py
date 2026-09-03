@@ -169,8 +169,7 @@ class SqliteSessionStore:
 # ── (de)serialisation, kept dumb on purpose ──────────────────────────────
 
 def _dump(v: SessionView) -> dict:
-    d = asdict(v)
-    return d
+    return asdict(v)
 
 
 def _load(d: dict) -> SessionView:

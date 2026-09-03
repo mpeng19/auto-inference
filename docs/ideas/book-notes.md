@@ -1,6 +1,8 @@
 # Notes on mining `Inference Engineering` (Kiely, Baseten Books, 2026) for the idea bank
 
-Source PDF: `docs/Inference Engineering.pdf`, 259 pages, read in full.
+Source PDF: `docs/Inference Engineering.pdf`, 259 pages, read in full. The PDF
+itself is not in git (`.gitignore` excludes `docs/*.pdf`); a fresh clone has
+these notes and the 27 extracted records in `book.jsonl`, not the book.
 
 **Page convention.** `source` fields cite **PDF page numbers** (the unit the extraction and the
 reading pass used). The book's printed page numbers run 2 lower — PDF p.138 is printed p.136.

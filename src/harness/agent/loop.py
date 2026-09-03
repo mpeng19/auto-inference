@@ -485,6 +485,10 @@ class IterativeAgent:
 
         Crude on purpose. It is meant to catch "started on the radix cache,
         now rewriting the scheduler", not to judge research taste.
+
+        `attempt` goes unread: the workspace still holds the diff that attempt
+        measured, and reading it there means a diff is judged even when the
+        evaluation that would have carried it never produced metrics.
         """
         touched = set(self.workspace.touched())
         if not touched:

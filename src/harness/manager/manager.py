@@ -1,3 +1,11 @@
+"""Reference manager: batch the outcomes, ask one question, write the answer down.
+
+Everything that decides anything is in the two prompts below. The code around
+them only enforces the bars those prompts state -- an hours-saved figure before
+a script is stashed, an existing fact to contradict before one is superseded --
+and makes sure a malformed reply can never take an agent down with it, because
+this runs on an agent's own thread as its idea finishes.
+"""
 from __future__ import annotations
 
 import contextlib
@@ -181,7 +189,6 @@ class Manager:
                               tool["code"], hours)
         self.log.append(f"review: stashed {path.name} ({hours}h: {note})")
         return d
-
 
     # ── the skill bank ──────────────────────────────────────────────────
     def _record_facts(self, facts: list) -> None:

@@ -13,7 +13,7 @@ one with the simulator, gates it on accuracy, and remembers what happened.
 ```mermaid
 flowchart TB
   subgraph you["operator"]
-    CLI["harness start · tui · results · ask · timeline"]
+    CLI["harness start · tui · results · ask · timeline · paper"]
   end
   subgraph shared["~/.auto-inference (shared across runs)"]
     BANK[("ideas.db<br/>idea bank: book + arXiv")]
@@ -31,9 +31,9 @@ flowchart TB
   end
   subgraph modal["Modal, 1×H100 per evaluation"]
     APPLY["apply stack: restore stock, write diff, launch line"]
-    GATES["gates: GSM8K · LongBench F1 · token equivalence"]
+    GATES["gates: GSM8K · LongBench F1"]
     SWEEP["closed-loop sweep N ∈ {4,8,12,16,24}<br/>TraceLab-shaped users, device-timer GPU-s"]
-    PROF["profile at N* → tracedb"]
+    PROF["profile at one level → tracedb"]
     WB["workbench: run a script inside the stack"]
   end
   CLI --> STORE --> FLEET
@@ -56,7 +56,7 @@ flowchart TB
 uv sync                          # everything, no GPU
 uv run modal token new           # your own Modal account; nothing here is shared
 make deploy                      # push the runner
-make test                        # ~360 tests, offline
+make test                        # ~390 tests, offline
 ```
 
 Then, in order, each once:
@@ -80,10 +80,13 @@ uv run harness --session build-1 start --agents 3 --evals 2 --model opus \
 uv run harness --session build-1 tui
 ```
 
-The baseline numbers come from step 1's reports. `harness start` refuses to
-run without all three, because each missing one is a way the fleet runs all
-night and learns nothing. `docs/NEXT.md` has the current plan and the
-findings that shaped these defaults.
+The baseline numbers come from step 1's reports. `harness start` refuses a
+baseline it cannot score against, and refuses build mode without a bank:
+either one missing is a way the fleet runs all night and learns nothing. Step
+2 is not checked, because the reference is built on first use -- running it
+once up front just means no agent pays the five minutes for it.
+`docs/NEXT.md` has the current plan and the findings that shaped these
+defaults.
 
 ## How a stack is priced
 
@@ -107,7 +110,8 @@ of 12, about 0.4% of the market per GPU.
 
 ## The harness
 
-Six services, each a Protocol in `harness.contracts`, each replaceable alone:
+Every service is a Protocol in `harness.contracts` and replaceable alone.
+These six shape a run:
 
 | service | question it answers |
 |---|---|
@@ -118,30 +122,36 @@ Six services, each a Protocol in `harness.contracts`, each replaceable alone:
 | `SkillBankService` | facts earlier runs established; manager-written, agent-read, contradictions supersede |
 | `OrchestrationService` | N agents kept diverse and inside a budget; the manager |
 
+`ContextService` holds the transcripts behind those claims and `SessionStore`
+the live snapshot a watcher reads; neither is something an agent calls.
+
 **Agents are Claude Code processes.** Each runs `claude -p` in its own copy
 of the `sglang` package with the tools it needs allowed, and the harness reads
 the diff back. In build mode an agent starts from a bank record that names the
-mechanism, target files, expected gain and risks; it must write a design note,
-run a correctness check and micro-benchmark on an H100 (`harness tool
-gpu-run`), pass the token-equivalence gate (`harness tool equivalence`), and
-only then spend a sweep. The launch line is the agent's too: `serving.json`
-beside its code sets chunk size, memory fraction, scheduler policy, extra flags
-or environment, hashed into the experiment; only model, GPU count and the
-metrics switch are locked.
+mechanism, target files, expected gain and risks; it is asked to write a design
+note, run a correctness check and micro-benchmark on an H100 (`harness tool
+gpu-run`) and score token equivalence against stock (`harness tool
+equivalence`) before it spends a sweep. The launch line is the agent's too:
+`serving.json` beside its code sets chunk size, memory fraction, scheduler
+policy, extra flags or environment, hashed into the experiment; only model, GPU
+count and the metrics switch are locked.
 
-**What guards the number.** GSM8K exact match and LongBench token F1 before
-load, so a change gated on sequence length is exercised; a teacher-forced
-token-equivalence check against stock (agreement 1.0000 on stock itself); a
-claimed win measured twice with the worse run kept; verdicts recorded as
-win, loss or neutral against a 3% noise floor; screens judged against stock
-at screen tier.
+**What guards the number.** Every evaluation scores GSM8K exact match and
+LongBench token F1 before load, so a change gated on sequence length is
+exercised, and a stack that answers worse is rejected whatever it priced at. A
+claimed win is measured twice and the worse run kept; verdicts are recorded as
+win, loss or neutral against a 3% noise floor; screens are judged against stock
+at screen tier. The teacher-forced token-equivalence check (agreement 1.0000 on
+stock itself) is one an agent runs from its own shell, not a gate the pipeline
+applies -- the trace says whether it did.
 
 **What agents know.** Two skills are written into each agent's directory
-before every edit: `tracedb`, the GPU profile as a database (captured at N\*
-on full sweeps, queried through MCP tools next to stock's profile), and
-`serving-facts`, the skill bank. The manager reviews every few outcomes,
-stashes a reusable script under the run's `tools/` when it can name the
-hours saved, and writes facts the evidence supports.
+before every edit: `tracedb`, the GPU profile as a database (captured on every
+full sweep at one fixed concurrency, `--profile-level`, and served over MCP
+beside stock's profile once one has been ingested), and `serving-facts`, the
+skill bank. The manager reviews every few outcomes, stashes a reusable script
+under the run's `tools/` when it can name the hours saved, and writes facts the
+evidence supports.
 
 ## Reading a run
 
@@ -151,14 +161,15 @@ uv run harness --session S tui            # fleet tab: agents, $/1k, rank, share
 uv run harness --session S results --diff
 uv run harness --session S ask "which attempt touched the attention backend?"
 uv run harness --session S timeline       # ideas, phases, results, cost per agent; --html for a Gantt
+uv run harness --session S paper          # write-ups, one per idea that reached a full sweep
 uv run harness --session S calls -v       # every model call, per-message tokens and tools
 uv run harness traces show <id> --root agents/S --kind eval_submit --full
 uv run harness skills list                # the facts
 ```
 
 Pause is `p`, resume is `r`; an agent never resumes on its own. The daemon
-runs on this machine under `caffeinate`; a closed lid still freezes it, and
-the status line says so.
+runs on the machine you started it from, under `caffeinate`; a closed lid still
+freezes it, and the status line says so.
 
 ## Layout
 

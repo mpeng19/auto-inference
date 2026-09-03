@@ -11,8 +11,10 @@ rather than a hope about the agents.
 **How a claim is chosen.** Among available records, the one whose text is
 least similar (max Jaccard over word sets) to every text in `avoid` -- the
 ideas live in the fleet and those already tried -- with a tie broken toward a
-`scale` no live idea has. Cheap, explainable, and good enough: the bank is
-tens to hundreds of records, not millions.
+`scale` not in `live_scales`. Cheap, explainable, and good enough: the bank is
+tens to hundreds of records, not millions. The reference fleet passes `avoid`
+and not `live_scales`: an `Idea` does not carry the record's scale, so that
+tie-break only fires for a caller that tracks it.
 """
 from __future__ import annotations
 

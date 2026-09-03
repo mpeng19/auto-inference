@@ -13,6 +13,10 @@ that gets rewritten repeatedly stays coherent.
     IdeaBankService        where ideas of the right size come from, claimed one per agent
     SkillBankService       what earlier runs established, written by the manager, read by all
     OrchestrationService   N of those, kept diverse and inside a budget
+    SessionStore           the seam between a detached fleet and anything watching it
+
+`AgentControl` (in `agent.py`) is the other half of that last one: how a
+running agent asks the fleet whether it may keep going.
 """
 from .agent import (
     AgentBudget,
