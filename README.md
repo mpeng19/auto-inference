@@ -141,9 +141,11 @@ LongBench token F1 before load, so a change gated on sequence length is
 exercised, and a stack that answers worse is rejected whatever it priced at. A
 claimed win is measured twice and the worse run kept; verdicts are recorded as
 win, loss or neutral against a 3% noise floor; screens are judged against stock
-at screen tier. The teacher-forced token-equivalence check (agreement 1.0000 on
-stock itself) is one an agent runs from its own shell, not a gate the pipeline
-applies -- the trace says whether it did.
+at screen tier. The token-equivalence check scores the prefill (teacher-forced top-1 and
+logprob) and the decode path (greedy generation against stock's; 1.0000 on
+stock itself, and the only score a decode kernel cannot fake). It is one an
+agent runs from its own shell, not a gate the pipeline applies -- the trace
+says whether it did.
 
 **What agents know.** Two skills are written into each agent's directory
 before every edit: `tracedb`, the GPU profile as a database (captured on every

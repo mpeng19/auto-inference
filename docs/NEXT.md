@@ -88,7 +88,13 @@ uv run simulate equivalence --root runs/equiv-ref --mkdir      # stock; ~5 min, 
 
 The reference is long-context (LongBench, ~15k tokens) so anything gated on
 sequence length is scored while it is running. Stock against itself is
-1.0000 / 0.0000 exactly. Note that `--stack` must point at a *saved* stack: a
+1.0000 / 0.0000 exactly, and its greedy 64-token continuation matches the
+reference on every prompt (decode agreement 1.0000). That second number is
+the one that matters for a kernel on the decode path: teacher-forced scoring
+takes no decode step, so build-4's a01 sparse-KV kernel scored a perfect
+1.0000 / 0.0000 while its generation diverged from stock's on 38% of prompts
+within 64 tokens (decode agreement 0.7721). The check now reports both and
+calls anything under 0.90 a regression. Note that `--stack` must point at a *saved* stack: a
 run directory (it now holds `stack.json`) or a mirrored tree. Pointing it at
 an agent's `candidate/sglang` after the agent moved on measures stock, which
 is how build-2's -27% win went unverified and then unrecoverable.
@@ -133,7 +139,7 @@ uv run harness --session build-3 paper                       # the write-ups
 
 Judge: did each agent write a DESIGN.md and run the workbench before the
 sweep (`tool_call` turns, `denials` = 0 in the call stats)? Did any kernel
-pass equivalence? Did the manager stash anything, and was it worth it? A
+pass equivalence, on decode agreement and not only the prefill score? Did the manager stash anything, and was it worth it? A
 price move is a result only if it is outside the interpolated frontier's
 noise and replicated.
 
@@ -190,6 +196,16 @@ but **not clamshell sleep** -- leave the lid open, or attach an external
 display. The status line and TUI print `host slept ~N min` when it happens.
 
 ## Known gaps, worth fixing before scaling to ten
+
+- **Equivalence is a tool, not a gate.** build-4's a01 (query-aware sparse KV
+  pages) is a recorded win, $7.70/1k replicated against $8.32, GSM8K,
+  LongBench and MMLU within tolerance, and it changes what the model says:
+  decode agreement 0.7721 against a stock floor of 1.0000. The accuracy suites
+  are 100 items each and did not see it; the pipeline never ran the
+  equivalence check because only agents do. Decide whether a win must also
+  clear decode agreement (a "lossless" board) or whether accuracy gates alone
+  define acceptance (a "task-equivalent" board), then make the chosen check a
+  pipeline gate. Today the board says the second thing without having decided it.
 
 - **No profile has ever been captured.** `--profile-level` now defaults to 12
   and the ingest and MCP wiring are tested offline, but both build runs were

@@ -713,6 +713,7 @@ Recorded because each was stated confidently before being checked.
 | Output coefficient measured at wrong context | Coincidence; the decode mix used a 64-token prompt | checking the mix definition |
 | Decode is not batching (effective batch ~3) | It batches at 96.7 | `BatchSampler` |
 | Roofline predicts cost | 27% out-of-sample error, barely beating a 31% null | `validate_loo` |
+| Token equivalence 1.0000 / 0.0000 means the kernel is exact | Teacher-forced scoring takes no decode step; a sparse-KV decode kernel scored perfect and diverged on 38% of prompts when generating | adding greedy-generation agreement to the check |
 
 **Two methodological lessons.** WebFetch's summariser is not a source for
 config data — it returned invented fields (`has_moe: false`) that read as
