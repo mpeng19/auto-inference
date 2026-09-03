@@ -77,8 +77,8 @@ async def test_keys_issue_commands_the_fleet_will_see(store):
         from dataclasses import replace
         agents = tuple(replace(a, status="paused") if a.agent_id == "a00" else a for a in v.agents)
         store.publish(replace(v, agents=agents))
-        for _ in range(6):
-            await pilot.pause()
+        for _ in range(20):                          # the view refreshes once a second
+            await pilot.pause(0.25)
             if "pending" not in app.detail_text:
                 break
         assert "pending" not in app.detail_text and "paused" in app.detail_text
