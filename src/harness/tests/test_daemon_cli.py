@@ -444,3 +444,23 @@ def test_a_fleet_starts_with_the_shared_stock_profile(tmp_path, monkeypatch):
     assert seed_stock_profile(root) is False          # never overwrites
     (home / "profiles" / "stock.sqlite").unlink()
     assert seed_stock_profile(tmp_path / "agents" / "t") is False
+
+
+def test_start_refuses_a_runner_that_lags_the_checkout(capsys):
+    """The runner Modal executes is whatever was last `make deploy`ed; two
+    fleets ran a day behind the source and nothing said so."""
+    import pytest
+
+    from harness.cli import _require_current_runner, runner_status
+    from simulator.runner.modal_runner import source_digest
+
+    local = source_digest()
+    assert len(local) == 16 and source_digest() == local
+    assert runner_status(remote=lambda: {"digest": local})[2] == ""
+    _require_current_runner(False, remote=lambda: {"digest": local})   # current: silent
+    with pytest.raises(SystemExit, match="make deploy"):
+        _require_current_runner(False, remote=lambda: {"digest": "0000000000000000"})
+    with pytest.raises(SystemExit, match="could not read"):
+        _require_current_runner(False, remote=lambda: (_ for _ in ()).throw(RuntimeError("no app")))
+    _require_current_runner(True, remote=lambda: {"digest": "stale"})   # allowed, warned
+    assert "make deploy" in capsys.readouterr().err

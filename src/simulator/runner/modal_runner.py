@@ -92,6 +92,34 @@ image = (
 app = modal.App(APP_NAME)
 
 
+def source_digest() -> str:
+    """A hash of every `.py` under the `simulator` package, which is what
+    `add_local_python_source` ships. Computed the same way on a laptop and
+    inside the deployed container, so `harness start` can tell whether the
+    runner Modal will execute is the one in this checkout."""
+    import hashlib
+
+    import simulator
+
+    root = pathlib.Path(simulator.__file__).parent
+    h = hashlib.sha256()
+    for f in sorted(root.rglob("*.py")):
+        if "__pycache__" in f.parts:
+            continue
+        h.update(str(f.relative_to(root)).encode())
+        h.update(b"\0")
+        h.update(f.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+@app.function(image=image, timeout=60)
+def version() -> dict:
+    """What is deployed: the source digest and the SGLang the image pins.
+    The cheapest call on the app; `harness start` makes it before spending."""
+    return {"digest": source_digest(), "sglang": SGLANG_VERSION}
+
+
 def _server_env(extra: dict | None = None) -> dict:
     """Environment for the SGLang server process.
 

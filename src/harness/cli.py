@@ -88,6 +88,43 @@ def running_daemon(root: pathlib.Path) -> int:
         return 0
 
 
+def runner_status(remote=None) -> tuple[str, str, str]:
+    """(local digest, deployed digest, problem). The deployed digest comes
+    from the app's `version` function; a deploy older than that function,
+    or no deploy at all, reads as a problem too."""
+    from simulator.runner.modal_runner import source_digest
+
+    local = source_digest()
+    try:
+        if remote is None:
+            import modal
+
+            from simulator.api import APP_NAME
+            remote = modal.Function.from_name(APP_NAME, "version").remote
+        got = remote() or {}
+        deployed = str(got.get("digest", ""))
+    except Exception as e:
+        return local, "", f"could not read the deployed runner ({type(e).__name__}: {e})"
+    if deployed != local:
+        return local, deployed, "the deployed runner is behind this checkout"
+    return local, deployed, ""
+
+
+def _require_current_runner(allow_stale: bool, remote=None) -> None:
+    """Refuse to start a fleet against a runner that lags the source.
+    The abort-at-deadline and startup-mark changes sat undeployed for a
+    day while two fleets ran; nothing said so."""
+    local, deployed, problem = runner_status(remote)
+    if not problem:
+        return
+    msg = (f"{problem}\n  local  {local}\n  deployed  {deployed or '(none)'}\n"
+           "  run `make deploy`, then start again (or --allow-stale-runner to run anyway)")
+    if allow_stale:
+        print("warning: " + msg, file=sys.stderr)
+        return
+    raise SystemExit(msg)
+
+
 def _refuse_second_daemon(root: pathlib.Path, session_id: str, force: bool) -> None:
     pid = running_daemon(root)
     if pid and not force:
@@ -144,6 +181,8 @@ def cmd_start(a) -> int:
     root.mkdir(parents=True, exist_ok=True)
     _refuse_second_daemon(root, session_id, a.force)
     cfg = _config_from_args(a, session_id, str(root))
+    if not (a.fake_agents or getattr(a, "dry_run", False)):
+        _require_current_runner(getattr(a, "allow_stale_runner", False))
     cfg_path = root / "fleet.json"
     cfg.save(cfg_path)
     pid = _spawn_daemon(root, [sys.executable, "-m", "harness.daemon",
@@ -180,6 +219,8 @@ def cmd_campaign(a) -> int:
         _refuse_second_daemon(root, name, a.force)
         (root / cp.STOP_FILE).unlink(missing_ok=True)
         template = _config_from_args(a, name, "")
+        if not a.fake_agents:
+            _require_current_runner(getattr(a, "allow_stale_runner", False))
         # Refused here, in the terminal: the first round's config is what
         # the daemon would check an hour from now.
         from dataclasses import asdict, replace
@@ -890,6 +931,8 @@ def _add_start_options(s) -> None:
     s.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="fake the GPU evaluations (saves dollars, still runs "
                         "real Claude Code agents)")
+    s.add_argument("--allow-stale-runner", dest="allow_stale_runner", action="store_true",
+                   help="start even if the deployed Modal runner is behind this checkout")
     s.add_argument("--fake-agents", dest="fake_agents", action="store_true",
                    help="fake the agents too (saves subscription usage); "
                         "with --dry-run this exercises the whole fleet for free")
