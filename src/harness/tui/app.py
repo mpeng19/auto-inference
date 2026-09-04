@@ -306,7 +306,20 @@ class FleetApp(App):
                     unrep = unreported_by_agent(v.root)
                 except Exception:
                     unrep = {}
-        self.call_from_thread(self._apply, v, pend, acked, unrep)
+        self._ui(self._apply, v, pend, acked, unrep)
+
+    def _ui(self, fn, *args, **kw):
+        """Hand a result from a worker thread to the UI thread, unless the
+        app is already closing: a refresh that lands after quit raised
+        inside the worker and read as a crash (intermittently, under a
+        loaded test suite). Nothing that arrives after the end needs
+        delivering."""
+        if not self.is_running:
+            return None
+        try:
+            return self.call_from_thread(fn, *args, **kw)
+        except Exception:
+            return None
 
     def refresh_view(self) -> None:
         self._load()
@@ -706,9 +719,9 @@ class FleetApp(App):
             u = self._asker.last_usage
             foot = (f"\n\n[{u.get('input', 0):,} in, {u.get('output', 0):,} out, "
                     f"{u.get('cache_read', 0):,} cached]") if u else ""
-            self.call_from_thread(self._set_answer, f"you: {question}\n\n{text}{foot}", "")
+            self._ui(self._set_answer, f"you: {question}\n\n{text}{foot}", "")
         except Exception as e:
-            self.call_from_thread(self._set_answer, f"ask failed: {type(e).__name__}: {e}", "red")
+            self._ui(self._set_answer, f"ask failed: {type(e).__name__}: {e}", "red")
 
     def _set_answer(self, text: str, style: str = "") -> None:
         self.answer_text = text
@@ -824,11 +837,11 @@ class FleetApp(App):
 
         pdf = ensure_pdf(tex)
         if pdf is None:
-            self.call_from_thread(self.notify, f"compile failed; see {pathlib.Path(tex).parent / 'paper.log'}",
+            self._ui(self.notify, f"compile failed; see {pathlib.Path(tex).parent / 'paper.log'}",
                                   severity="error", timeout=5)
             return
-        self.call_from_thread(self._open, str(pdf), "browser")
-        self.call_from_thread(self.notify, f"opened {pdf} in the browser", timeout=2)
+        self._ui(self._open, str(pdf), "browser")
+        self._ui(self.notify, f"opened {pdf} in the browser", timeout=2)
 
     def on_data_table_row_selected(self, event) -> None:
         """Enter on a result row does what `b` does."""
