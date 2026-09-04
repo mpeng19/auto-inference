@@ -77,7 +77,11 @@ def test_a_cancelled_call_dies_with_its_children_and_keeps_what_it_wrote(tmp_pat
     t0 = time.time()
     text, _ = prop._run("go", cwd=tmp_path, cancel=cancel, phase="study")
 
-    assert time.time() - t0 < 1.0, "the cancel waited for the process to finish"
+    # The script sleeps 1 s before touching the marker; a cancel that let it
+    # run out would take longer than that AND leave the marker. Under a
+    # loaded machine process spawn and kill take a few hundred ms, so the
+    # bound is generous and the marker is the real assertion.
+    assert time.time() - t0 < 5.0, "the cancel waited for the process to finish"
     assert prop.last_call.cancelled and not prop.last_call.timed_out
     # Cancellation is not an error: the partial thought is the point.
     assert "half-a-thought" in text

@@ -34,6 +34,13 @@ def stock_dir(tmp_path) -> pathlib.Path:
 
 
 @pytest.fixture(autouse=True)
+def _no_billing(monkeypatch):
+    """No test asks Modal for the bill: the client thread it would start
+    outlives the test and prints at interpreter exit."""
+    monkeypatch.setenv("HARNESS_BILLING", "off")
+
+
+@pytest.fixture(autouse=True)
 def _offline(monkeypatch):
     """No harness test may open a socket.
 

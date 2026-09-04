@@ -131,8 +131,13 @@ async def test_the_results_tab_is_a_viewer_with_its_own_keys(store):
     Its own keys open files, so they need a completed run to open."""
     app = FleetApp(store, "demo")
     async with app.run_test(size=(120, 26)) as pilot:
-        await pilot.pause()
-        await pilot.pause()
+        # The first snapshot arrives from a worker thread; under a loaded
+        # machine two pauses are not always enough for it to land.
+        for _ in range(100):
+            if app.view is not None:
+                break
+            await pilot.pause(0.05)
+        assert app.view is not None, "the snapshot never arrived"
         assert app.check_action("pause", ()) is True
         assert app.check_action("open_artifact", ()) is False
         await pilot.press("tab")

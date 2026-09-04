@@ -42,7 +42,14 @@ def _f(x) -> float:
 
 
 def fetch(timeout_s: float = 15.0) -> Bill | None:
-    """The live summary, or None when Modal cannot be reached."""
+    """The live summary, or None when Modal cannot be reached.
+    `HARNESS_BILLING=off` skips the call entirely (the test suite sets it:
+    a Modal client thread started under blocked sockets complains at
+    interpreter exit)."""
+    import os
+
+    if os.environ.get("HARNESS_BILLING", "").lower() == "off":
+        return None
     out: list = []
 
     def go():
