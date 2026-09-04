@@ -281,7 +281,7 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
         ws = Workspace(root / agent_id, agent_id=agent_id)
         # Every agent's "stock" is the base; None also clears a base.json a
         # previous fleet on this root left behind.
-        ws.set_base(base)
+        ws.set_base(base, path=cfg.base if base is not None else "")
         if cfg.fake_agents:
             prop = _ScriptedProposer(agent_id)
         else:

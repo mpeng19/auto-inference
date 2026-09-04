@@ -171,6 +171,16 @@ equivalence`) before it spends a sweep. The launch line is the agent's too:
 policy, extra flags or environment, hashed into the experiment; only model, GPU
 count and the metrics switch are locked.
 
+**Git is the history, the run directory is the record.** Every agent has
+a shadow repository at `<agent>/repo/`: the full package as the root commit
+(stock, or the fleet's base), the agent's overlay committed at every
+evaluation (tag `eval/<digest>`), on every abandoned attempt, and tagged
+`win/<digest>` when a win replicates. `git diff <root>..HEAD` is the stack;
+each run directory carries the `commit` it was measured from. A fleet started
+`--base` from a run clones that agent's repository at that commit, so a
+campaign reads as one branch of stacked wins. Nothing in pricing or gating
+reads git; the content digest and `stack.json` remain the authority.
+
 **What guards the number.** Every evaluation scores GSM8K exact match,
 LongBench token F1 and MMLU before load, so a change gated on sequence length
 exercised, and a stack that answers worse is rejected whatever it priced at. A
@@ -235,6 +245,7 @@ uv run harness --session S paper          # write-ups, one per idea that reached
 uv run harness --session S calls -v       # every model call, per-message tokens and tools
 uv run harness traces show <id> --root agents/S --kind eval_submit --full
 uv run harness --session S spend          # Modal dollars: evaluations, the agents' own GPU tools, orphans
+git -C agents/S/a02/repo log --oneline    # the agent's history: a commit per evaluation, tags eval/<digest>, win/<digest>
 uv run harness skills list                # the facts
 uv run harness ideas claim --seed "..."   # one record, steered; `ideas related <id>` for its neighbours
 uv run harness delete --session S         # wipe a finished fleet's directory and rows

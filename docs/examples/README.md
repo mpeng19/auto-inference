@@ -28,6 +28,8 @@ except that absolute paths were made relative.
 | `a02/calls/<phase>-<ts>.jsonl` | every model call, one line per message: tokens, tools, timing |
 | `a02/spend.jsonl` | what the agent's own GPU tool calls cost, one line each |
 | `a02/candidate/sglang/` | the agent's working copy of the package it edits (not copied) |
+| `a02/repo/` | the agent's git history: full package at the root commit, a commit per evaluation tagged `eval/<digest>`, `win/<digest>` on replicated wins (not copied) |
+| `a02/runs/attempt-NNN/commit` | the commit that evaluation was measured from |
 | `a02/workbench-N/` | each `gpu-run` / `ncu` / `equivalence` call: script, stdout, result (not copied) |
 | `a02/traces/` | the agent's trace: every turn, phase-timed (not copied) |
 

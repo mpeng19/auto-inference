@@ -71,6 +71,7 @@ class Workspace:
     # that file is the base, so tools run from the agent's shell agree with
     # the daemon that wrote it.
     base: InferenceStack | None = None
+    base_path: str = ""          # the run directory the base was loaded from, for git lineage
 
     BASE_FILE = "base.json"
 
@@ -89,12 +90,13 @@ class Workspace:
         if self.base is not None:
             self._persist_base()
 
-    def set_base(self, base: InferenceStack | None) -> None:
+    def set_base(self, base: InferenceStack | None, path: str = "") -> None:
         """Make `base` the stack this workspace builds on (None: stock), and
         record it in `<root>/base.json` so a later `Workspace(root)` -- the
         agent's own `harness tool` calls -- sees the same base."""
         under = self.source.stock if isinstance(self.source, BaseSource) else self.source
         self.base = base
+        self.base_path = path if base is not None else ""
         self.source = BaseSource(base, under) if base is not None else under
         if base is None:
             (self.root / self.BASE_FILE).unlink(missing_ok=True)

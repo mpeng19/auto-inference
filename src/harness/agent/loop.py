@@ -158,6 +158,32 @@ class IterativeAgent:
         ev = self._cancel_event()
         return ev is not None and ev.is_set() and not self._should_stop()
 
+    # ── git: the shadow repository ───────────────────────────────────
+    def _repo(self):
+        """The agent's repository, opened once. None without git."""
+        if getattr(self, "_repo_obj", None) is None and not getattr(self, "_repo_failed", False):
+            from .repo import Repo
+
+            try:
+                self._repo_obj = Repo.open_or_init(
+                    self.workspace.root, self.workspace.source,
+                    label=self.workspace.base_name,
+                    base_run_dir=getattr(self.workspace, "base_path", "") or None)
+            except Exception:
+                self._repo_obj = None
+            if self._repo_obj is None:
+                self._repo_failed = True
+        return getattr(self, "_repo_obj", None)
+
+    def _checkpoint(self, message: str, tag: str = "") -> str | None:
+        r = self._repo()
+        return r.checkpoint(self.workspace, message, tag) if r is not None else None
+
+    def _tag(self, name: str) -> None:
+        r = self._repo()
+        if r is not None:
+            r.tag(name)
+
     def _drain_ledger(self) -> float:
         """Spend the agent's own tools recorded since the last look
         (`harness.agent.ledger`): into its cost now, its budget next check."""
@@ -313,6 +339,7 @@ class IterativeAgent:
                     data={"waited_s": round(waited, 1)}),
                     since=t_phase, phase="propose", call=True)
                 spent += self._drain_ledger()
+                self._checkpoint(f"abandoned: attempt {n} stalled ({idea.title[:50]})")
                 self.workspace.reset()
                 attempts.append(Attempt(idea_id=idea.id, agent_id=self.agent_id,
                                         n=n, ok=False, failure="stalled"))
@@ -328,7 +355,9 @@ class IterativeAgent:
             spent += self._drain_ledger()
             if not self._may_continue():
                 # The call above was cancelled by the operator (kill, scale
-                # down, stop): nothing it left behind is priced.
+                # down, stop): nothing it left behind is priced, but the
+                # diff is kept in git for whoever reads the run.
+                self._checkpoint(f"abandoned: attempt {n} cancelled by the operator ({idea.title[:50]})")
                 stop = "stopped"
                 break
 
@@ -374,6 +403,8 @@ class IterativeAgent:
                 spent += again.cost_usd
                 attempts.append(att)
                 att = self._worse(att, again)
+                if att.ok and att.delta.get("bill_per_1k_pct", 0.0) <= -self.NOISE_PCT:
+                    self._tag(f"win/{stack.digest}")
                 if (att.ok and budget.auto_ablate
                         and att.delta.get("bill_per_1k_pct", 0.0) <= -self.NOISE_PCT):
                     # A replicated win. Explain it now, while the diff that
@@ -452,6 +483,12 @@ class IterativeAgent:
                           replicate=replicate,
                           run_dir=str(self.workspace.run_dir(n, rep)),
                           label=f"{idea.title} #{n} ({tier}{rep})")
+        # The commit this measurement is taken from, tagged by stack digest;
+        # the run directory points back at it.
+        from . import repo as repo_mod
+        sha = self._checkpoint(f"eval {tier}{rep}: attempt {n} {stack.digest} -> {req.run_dir}",
+                               tag=f"eval/{stack.digest}")
+        repo_mod.stamp(req.run_dir, sha)
         ticket = self.evals.submit(req)         # returns immediately, always
         self._report(status="queued", eval_ticket=ticket.id, attempt=n,
                      activity=f"attempt {n}: submitted a {tier} run")
