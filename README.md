@@ -55,7 +55,7 @@ flowchart TB
 ```bash
 uv sync                          # everything, no GPU
 uv run modal token new           # your own Modal account; nothing here is shared
-make deploy                      # push the runner
+make deploy                      # push the runner; `harness start` refuses a runner behind the checkout
 make test                        # ~390 tests, offline
 ```
 
