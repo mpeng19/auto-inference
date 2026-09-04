@@ -90,7 +90,9 @@ def test_pause_resume_kill_are_acknowledged_and_the_snapshot_agrees(live):
 
     cid = store.send_to("ctl", Command(kind="kill", agent_id="a00"))
     assert _acked(store, cid).result == "stopping"
-    assert store.read("ctl").agents[0].status == "stopping"
+    # Kill cancels the model call at once, so by the next read the agent
+    # may already have wound up: "stopping" or "done", never "evaluating".
+    assert store.read("ctl").agents[0].status in ("stopping", "done")
     for _ in range(200):                                  # the thread winds up
         if store.read("ctl").agents[0].status == "done":
             break
