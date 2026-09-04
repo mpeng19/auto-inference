@@ -428,3 +428,19 @@ def test_tool_ablate_dispatches_or_says_it_is_missing(monkeypatch, capsys):
                     "tier": "full"}
     assert json.loads(capsys.readouterr().out)["delta_pct"] == -3.2
     assert cli_main(["tool", "ablate", "--env", "NOEQUALS"]) == 2
+
+
+def test_a_fleet_starts_with_the_shared_stock_profile(tmp_path, monkeypatch):
+    from harness.daemon import seed_stock_profile
+
+    home = tmp_path / "home"
+    (home / "profiles").mkdir(parents=True)
+    (home / "profiles" / "stock.sqlite").write_bytes(b"sqlite")
+    monkeypatch.setenv("HARNESS_HOME", str(home))
+    root = tmp_path / "agents" / "s"
+    root.mkdir(parents=True)
+    assert seed_stock_profile(root) is True
+    assert (root / "profiles" / "stock.sqlite").read_bytes() == b"sqlite"
+    assert seed_stock_profile(root) is False          # never overwrites
+    (home / "profiles" / "stock.sqlite").unlink()
+    assert seed_stock_profile(tmp_path / "agents" / "t") is False

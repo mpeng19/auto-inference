@@ -228,10 +228,31 @@ def evaluator_for(cfg: FleetConfig, tier: str) -> SimulatorEvaluator:
         extra={"quality_baseline": quality})
 
 
+def seed_stock_profile(root) -> bool:
+    """Give the fleet stock's GPU profile so agents' `tracedb_stock` MCP has
+    something to answer from. Captured once (`simulate run --profile-level
+    12 --profile-steps 300` on stock) and kept at
+    `$HARNESS_HOME/profiles/stock.sqlite`; copied into `<root>/profiles/`
+    when the fleet starts. Without it every profile comparison an agent
+    makes is candidate against candidate."""
+    import os
+    import shutil
+
+    home = pathlib.Path(os.environ.get("HARNESS_HOME") or pathlib.Path.home() / ".auto-inference")
+    src = home / "profiles" / "stock.sqlite"
+    dst = pathlib.Path(root) / "profiles" / "stock.sqlite"
+    if not src.is_file() or dst.is_file():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return True
+
+
 def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
     """Assemble every service. The one place implementations are chosen."""
     root = pathlib.Path(cfg.root or (pathlib.Path.cwd() / "agents"))
     root.mkdir(parents=True, exist_ok=True)
+    seed_stock_profile(root)
     store = store or SqliteSessionStore(default_store_path())
     memory = SqliteMemory(root / "memory.db")
     context = JsonlContext(root / "traces", session_id=cfg.session_id)
