@@ -56,6 +56,10 @@ class FleetSpec:
     # the direction that worked.
     base_digest: str = ""
     base_seed: str = ""
+    # Texts every bank claim is kept away from, on top of what is live and
+    # what this fleet has tried: a campaign passes every idea its earlier
+    # rounds tried, so round three does not re-run round one.
+    avoid: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field, fields
 
 from .agent import ClaudeCodeProposer, IterativeAgent, SimulatorEvaluator, Workspace
 from .context import JsonlContext
-from .contracts import AgentBudget, FleetBudget, FleetSpec, Idea
+from .contracts import AgentBudget, FleetBudget, FleetSpec, Idea, TokenUse
 from .ideas import SqliteIdeaBank
 from .memory import SqliteMemory
 from .orchestration import EvalBroker, Fleet
@@ -41,6 +41,12 @@ class FleetConfig:
     agent_max_usd: float = 40.0
     patience: int = 3
     screen_first: bool = True
+    # A model call in `thinking` that has produced nothing for this long is
+    # cut and the attempt restarted from a clean workspace (0 = never).
+    stall_minutes: float = 40.0
+    # Price a replicated win once more with its `ablation.env` set, so it
+    # can be publishable. One screen (~$2) per replicated win.
+    auto_ablate: bool = True
     model: str = "sonnet"           # `claude --model`; prefer opus/sonnet here
     # simulator settings for a real evaluation
     gpu: str = "H100"
@@ -62,6 +68,9 @@ class FleetConfig:
     base_digest: str = ""
     base_label: str = ""
     base_idea: str = ""
+    # Texts bank claims are kept away from, beyond what is live and tried
+    # here: a campaign passes every idea its earlier rounds tried.
+    avoid: tuple[str, ...] = ()
     # Where ideas come from once the seeds run out: records are claimed from
     # the bank, one per agent, least similar first. Required unless the
     # agents are fake -- a real agent left to seed itself produced one-line
@@ -89,6 +98,7 @@ class FleetConfig:
         d["levels"] = tuple(d.get("levels") or (4, 8, 12, 16, 24))
         d["screen_levels"] = tuple(d.get("screen_levels") or (8, 12))
         d["seeds"] = tuple(d.get("seeds") or ())
+        d["avoid"] = tuple(d.get("avoid") or ())
         return cls(**d)
 
     def save(self, path) -> None:
@@ -235,7 +245,7 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
 
     broker = EvalBroker(runner, capacity=cfg.eval_capacity)
     fleet = Fleet(None, broker, store=store, session_id=cfg.session_id,
-                  root=str(root))
+                  root=str(root), stall_s=float(cfg.stall_minutes or 0) * 60)
     fleet.bank = bank
     skills = SqliteSkillBank(default_skills_path())
     fleet.skills = skills
@@ -262,6 +272,9 @@ def build(cfg: FleetConfig, store=None) -> tuple[Fleet, EvalBroker]:
             # makes the dashboard's per-agent cost real rather than
             # apportioned after the fact.
             prop.on_tokens = lambda use, _a=agent_id: fl.report(_a, tokens=use)
+            # A tool result carries no tokens but is a sign of life; a
+            # zero-token report refreshes the slot's stall clock and nothing else.
+            prop.on_progress = lambda _a=agent_id: fl.report(_a, tokens=TokenUse())
         return IterativeAgent(
             agent_id=agent_id, workspace=ws, memory=memory, context=context,
             proposer=prop, evals=fl.evals, control=fl, baseline=cfg.baseline)
@@ -292,7 +305,11 @@ def check(cfg: FleetConfig) -> None:
                          "with a full sweep and can never be promoted")
 
 
-def run(cfg: FleetConfig) -> None:
+def run(cfg: FleetConfig) -> str:
+    """Run one fleet to its end. Returns why it ended: `operator` (a stop
+    command or a signal) or `finished` (budget, wall clock, or every agent
+    done) -- a campaign driving fleets in sequence reads that to decide
+    whether to start the next one."""
     check(cfg)
     store = SqliteSessionStore(default_store_path())
     fleet, broker = build(cfg, store=store)
@@ -302,15 +319,18 @@ def run(cfg: FleetConfig) -> None:
         agent_budget=AgentBudget(max_attempts=cfg.agent_max_attempts,
                                  max_usd=cfg.agent_max_usd,
                                  patience=cfg.patience,
-                                 screen_first=cfg.screen_first),
+                                 screen_first=cfg.screen_first,
+                                 auto_ablate=cfg.auto_ablate),
         fleet_budget=FleetBudget(max_agents=cfg.agents,
                                  max_concurrent_evals=cfg.eval_capacity,
                                  max_usd_total=cfg.budget_usd,
                                  max_wall_s=cfg.max_wall_s),
         root=cfg.root, note=cfg.note,
-        base_digest=cfg.base_digest, base_seed=cfg.base_seed)
+        base_digest=cfg.base_digest, base_seed=cfg.base_seed,
+        avoid=tuple(cfg.avoid))
 
     stopping = {"flag": False}
+    why = "finished"
 
     def _sig(_s, _f):
         stopping["flag"] = True
@@ -325,7 +345,10 @@ def run(cfg: FleetConfig) -> None:
             time.sleep(1.0)
             snap = store.read(cfg.session_id)
             if snap is not None and snap.phase == "stopping":
+                why = "operator"
                 break
+        if stopping["flag"]:
+            why = "operator"
     finally:
         fleet.stop("finished")
         broker.shutdown(wait=False)
@@ -338,6 +361,7 @@ def run(cfg: FleetConfig) -> None:
                 print(f"cancelled {len(done)} GPU call(s) on exit", flush=True)
         except Exception as e:
             print(f"could not cancel in-flight GPU calls: {e}", flush=True)
+    return why
 
 
 def main(argv: list[str] | None = None) -> int:

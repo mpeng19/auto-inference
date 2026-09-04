@@ -90,6 +90,10 @@ class AgentView:
     eval_ticket: str = ""
     queued_s: float = 0.0
     idle_s: float = 0.0
+    # Model calls the fleet cut for producing nothing (`Fleet.stall_s`) and
+    # restarted. A row that keeps stalling is a model or network problem,
+    # not a slow idea.
+    stalls: int = 0
     updated_at: float = field(default_factory=now)
     note: str = ""
 

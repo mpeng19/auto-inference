@@ -25,7 +25,8 @@ from typing import Literal, Protocol, runtime_checkable
 
 from .common import new_id, now
 
-Stop = Literal["won", "exhausted", "diverged", "no_progress", "budget", "error"]
+Stop = Literal["won", "exhausted", "diverged", "no_progress", "budget", "error",
+              "stopped"]
 
 
 @dataclass(frozen=True)
@@ -59,8 +60,10 @@ class Attempt:
     ok: bool = False
     # Split on purpose: an infrastructure failure is retried unchanged, a
     # rejected hypothesis is not.
+    # `stalled`: the model call produced nothing for the fleet's stall
+    # window and was cut; the attempt is retried from a clean workspace.
     failure: Literal["", "infra", "hypothesis", "invalid_diff", "slo",
-                     "quality"] = ""
+                     "quality", "stalled"] = ""
     tier: str = "full"
     metrics: dict = field(default_factory=dict)
     delta: dict = field(default_factory=dict)     # vs the baseline
@@ -119,6 +122,12 @@ class AgentBudget:
     # question that has been answered -- so this only bounds the other case: a
     # study that outlives a sweep and would otherwise hold the attempt open.
     study_timeout_s: float = 900.0
+    # After a full-tier win replicates, price it once more with its kill
+    # switch set (`<candidate>/ablation.env`, `tools.ablate` at screen tier)
+    # so the win is *explained* and `results.publishable` can say yes. One
+    # screen of real money per replicated win; off, the agent must run
+    # `harness tool ablate` itself or the win stays `no-ablation`.
+    auto_ablate: bool = True
 
 
 @runtime_checkable
@@ -137,10 +146,18 @@ class AgentControl(Protocol):
 
     def stop_event(self, agent_id: str):
         """Optional. A `threading.Event` set when the agent should stop
-        (kill, scale-down, fleet stop). The loop hands it to the proposer as
-        `cancel`, so a two-hour model call ends within a poll interval of
-        the operator's keypress instead of at its own end. A paid
+        (kill, scale-down, fleet stop). Read between attempts; a paid
         evaluation is never cancelled by it."""
+        ...
+
+    def cancel_event(self, agent_id: str):
+        """Optional. A `threading.Event` the loop hands to the proposer as
+        `cancel`, so a model call ends within a poll interval of whoever set
+        it. Set by everything that sets `stop_event` (kill, scale-down,
+        fleet stop) *and* by the fleet's stall watch when a call has
+        produced nothing for its window -- in which case `should_stop` stays
+        false and the loop restarts the attempt. The loop clears it before
+        each call; a control without one falls back to `stop_event`."""
         ...
 
     def should_stop(self, agent_id: str) -> bool:

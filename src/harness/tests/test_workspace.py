@@ -268,6 +268,23 @@ def test_serving_and_env_layer_over_the_base(based):
     assert based.stack().serving["chunked_prefill_size"] == 16384
 
 
+def test_reset_returns_to_the_base_not_stock(based):
+    """The loop resets before every attempt, and after a stalled call; with
+    a base that must land on the base's files, or the next attempt would
+    silently be measured against stock."""
+    based.materialise(P)
+    based.replace(P, "4096", "16384")
+    (based.candidates / "serving.json").write_text('{"serving": {"max_running_requests": 8}}')
+    (based.candidates / "ablation.env").write_text("X=1\n")
+    assert based.touched() == (P,)
+    based.reset()
+    assert based.touched() == () and "CHUNK = 4096" in based.read(P)
+    assert based.read(BASE_ONLY) == "B = 1\n"
+    assert not (based.candidates / "serving.json").exists()
+    assert not (based.candidates / "ablation.env").exists()
+    assert based.base is not None and (based.root / "base.json").is_file()
+
+
 def test_the_base_is_found_from_base_json(based, stock_dir):
     """`harness tool` builds `Workspace(root)` from the agent's shell with no
     base argument; it must see the same base the daemon set."""

@@ -108,28 +108,55 @@ class IterativeAgent:
     priority: int = 0
 
     # ── the control seam ─────────────────────────────────────────────────
-    def _stop_event(self):
-        """The operator's stop flag for this agent, if the control offers one."""
-        get = getattr(self.control, "stop_event", None)
+    def _cancel_event(self):
+        """The event a model call watches: the control's `cancel_event`
+        (set by kill, stop *and* the fleet's stall watch), else its
+        `stop_event`, else nothing."""
+        for name in ("cancel_event", "stop_event"):
+            get = getattr(self.control, name, None)
+            if get is None:
+                continue
+            try:
+                ev = get(self.agent_id)
+            except Exception:
+                ev = None
+            if ev is not None:
+                return ev
+        return None
+
+    def _should_stop(self) -> bool:
+        if self.control is None:
+            return False
         try:
-            return get(self.agent_id) if get is not None else None
+            return bool(self.control.should_stop(self.agent_id))
         except Exception:
-            return None
+            return False
 
     def _call(self, fn, *args, **kw):
-        """Call a proposer method, passing the stop flag as `cancel` when
-        the method takes one, so an operator's stop ends the model call
-        now rather than at its own end."""
-        import inspect
+        """Call a proposer method, passing the cancel flag as `cancel` when
+        the method takes one, so an operator's stop -- or the fleet's stall
+        watch -- ends the model call now rather than at its own end.
 
-        ev = self._stop_event()
+        The flag is cleared first unless the agent should stop: a stall cut
+        the previous call by setting it, and left set it would cut this one
+        at once. A stop is never cleared -- that is the operator's."""
+        ev = self._cancel_event()
         if ev is not None:
+            if not self._should_stop():
+                ev.clear()
             try:
                 if "cancel" in inspect.signature(fn).parameters:
                     kw["cancel"] = ev
             except (TypeError, ValueError):
                 pass
         return fn(*args, **kw)
+
+    def _stalled(self) -> bool:
+        """Did the fleet cut the call that just returned without stopping
+        the agent? That is the stall watch's signature: `cancel` set,
+        `should_stop` false."""
+        ev = self._cancel_event()
+        return ev is not None and ev.is_set() and not self._should_stop()
 
     def _drain_ledger(self) -> float:
         """Spend the agent's own tools recorded since the last look
@@ -272,6 +299,29 @@ class IterativeAgent:
             # Kept whether or not the diff survives the check: an agent that
             # returns no diff twice in a row is either stuck or being refused,
             # and the trace is the only place that distinction can be made.
+            if self._stalled():
+                # The fleet cut the call for producing nothing (see
+                # `Fleet._watch_stalls`). Whatever half-diff it left is not
+                # priced: the workspace goes back to where this attempt
+                # started, and the same idea gets another attempt, counted
+                # against `max_attempts` and `patience` like any other.
+                waited = time.time() - t_phase
+                self._append(trace, Turn(
+                    kind="error", name="stalled",
+                    content=f"no output for {waited/60:.0f} min; the call was cut "
+                            f"and attempt {n} restarts from a clean workspace",
+                    data={"waited_s": round(waited, 1)}),
+                    since=t_phase, phase="propose", call=True)
+                spent += self._drain_ledger()
+                self.workspace.reset()
+                attempts.append(Attempt(idea_id=idea.id, agent_id=self.agent_id,
+                                        n=n, ok=False, failure="stalled"))
+                n += 1
+                since_progress += 1
+                if since_progress >= budget.patience:
+                    stop = "no_progress"
+                    break
+                continue
             self._append(trace, Turn(kind="thought", name="propose",
                                      content=str(rationale)[:4000]),
                          since=t_phase, phase="propose", call=True)
@@ -324,6 +374,12 @@ class IterativeAgent:
                 spent += again.cost_usd
                 attempts.append(att)
                 att = self._worse(att, again)
+                if (att.ok and budget.auto_ablate
+                        and att.delta.get("bill_per_1k_pct", 0.0) <= -self.NOISE_PCT):
+                    # A replicated win. Explain it now, while the diff that
+                    # won is still in the workspace.
+                    att, usd = self._auto_ablate(att, trace)
+                    spent += usd
 
             # Infrastructure failures are retried unchanged; a rejected
             # hypothesis is not -- it costs the same and says the same.
@@ -433,6 +489,76 @@ class IterativeAgent:
             metrics=rec.metrics, delta=self._delta(rec.metrics, tier),
             cost_usd=rec.cost_usd, queued_s=rec.queued_s)
         return att, idle
+
+    ABLATION_ENV = "ablation.env"
+
+    def _kill_switch(self) -> dict[str, str]:
+        """`<candidate>/ablation.env`: the variables that make the change
+        inert on the server, one `KEY=VAL` per line, written by the agent.
+        Empty when there is no file -- a change with no switch has nothing
+        to ablate, and the win stays `no-ablation`."""
+        p = self.workspace.candidates / self.ABLATION_ENV
+        if not p.is_file():
+            return {}
+        env = {}
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            k, sep, v = line.partition("=")
+            if sep and k.strip():
+                env[k.strip()] = v.strip().strip("'\"")
+        return env
+
+    def _auto_ablate(self, att: Attempt, trace: str) -> tuple[Attempt, float]:
+        """Price the replicated win once more with its kill switch set
+        (`tools.ablate`, screen tier: one screen of real money), so
+        `results.publishable` has the ablation it asks for. The verdict goes
+        in the trace and in the attempt's metrics; a failure is a trace
+        error and nothing else -- an unexplained win is still a win.
+        Returns the attempt (with `metrics["ablation"]`) and the spend."""
+        env = self._kill_switch()
+        since = time.time()
+        if not env:
+            self._append(trace, Turn(kind="thought", name="ablate",
+                                     content=f"no {self.ABLATION_ENV} in the candidate: "
+                                             "the win is not ablated and cannot be publishable"),
+                         since=since, phase="check")
+            return att, 0.0
+        self._report(activity=f"attempt {att.n}: replicated win; ablating with "
+                              + ", ".join(f"{k}={v}" for k, v in sorted(env.items())))
+        try:
+            from .. import tools
+
+            base = self.baseline.get("screen") if isinstance(self.baseline.get("screen"), dict) \
+                else self.baseline
+            bill = base.get("bill_per_1k") if isinstance(base, dict) else None
+            rec = tools.ablate(self.workspace.root, env, tier="screen",
+                               baseline=bill if isinstance(bill, (int, float)) else None,
+                               source=self.workspace.source)
+        except Exception as e:
+            self._append(trace, Turn(kind="error", name="ablate", content=str(e)),
+                         since=since, phase="check")
+            return att, 0.0
+        rec = dict(rec) if isinstance(rec, dict) else {"ok": False, "error": str(rec)}
+        # The tool wrote its receipt to the agent's ledger; draining it here
+        # reports the spend once. A stub that wrote no receipt is reported
+        # from its own record.
+        usd = self._drain_ledger()
+        if not usd and rec.get("cost_usd"):
+            usd = float(rec["cost_usd"])
+            self._report(cost_delta=usd)
+        self._append(trace, Turn(kind="tool_call" if rec.get("ok") else "error", name="ablate",
+                                 content=str(rec.get("verdict") or rec.get("error") or ""),
+                                 data={k: v for k, v in rec.items() if k != "verdict"}),
+                     since=since, phase="check")
+        keep = {k: rec.get(k) for k in ("ok", "tier", "env", "stack_digest", "explains",
+                                        "explained_pct", "delta_pct", "total_pct",
+                                        "disabled_vs_baseline_pct", "cost_usd", "path",
+                                        "error")}
+        keep["as_is"] = (rec.get("as_is") or {}).get("bill_per_1k")
+        keep["disabled"] = (rec.get("disabled") or {}).get("bill_per_1k")
+        return replace(att, metrics={**att.metrics, "ablation": keep}), usd
 
     # How long the wait loop blocks on the broker before looking at the study
     # again. It waits on the broker's own condition variable, so this is not a

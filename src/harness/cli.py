@@ -10,6 +10,8 @@ Running a fleet:
     harness stop                       # graceful: finish paid work, then wind up
     harness kill                       # flat: everything, now
     harness delete --session S --yes   # a finished fleet's directory and rows
+    harness campaign start --rounds 4 --target 2.0 ...   # fleets in sequence, each on the last win
+    harness campaign status | stop
 
 Reading one, during or after:
 
@@ -86,22 +88,24 @@ def running_daemon(root: pathlib.Path) -> int:
         return 0
 
 
-def cmd_start(a) -> int:
-    session_id = a.session or f"sess-{int(time.time())}"
-    root = pathlib.Path(a.root or (pathlib.Path.cwd() / "agents" / session_id))
-    root.mkdir(parents=True, exist_ok=True)
+def _refuse_second_daemon(root: pathlib.Path, session_id: str, force: bool) -> None:
     pid = running_daemon(root)
-    if pid and not a.force:
+    if pid and not force:
         # Two daemons on one root share the agent directories: each agent's
         # workspace is reset and re-seeded under the other's feet. The first
         # build run lost its kernel this way.
         raise SystemExit(f"a fleet is already running on {root} (pid {pid}); "
                          f"`harness --session {session_id} stop` first, or --force")
+
+
+def _config_from_args(a, session_id: str, root: str) -> FleetConfig:
+    """A `FleetConfig` from the `start` options (shared with `campaign start`)."""
     cfg = FleetConfig(
-        session_id=session_id, root=str(root), agents=a.agents,
+        session_id=session_id, root=root, agents=a.agents,
         eval_capacity=a.evals, budget_usd=a.budget, model=a.model,
         gpu=a.gpu, n_gpu=a.n_gpu,
         agent_max_attempts=a.max_attempts, agent_max_usd=a.agent_budget,
+        stall_minutes=a.stall_minutes, auto_ablate=a.auto_ablate,
         dry_run=a.dry_run, fake_agents=a.fake_agents, note=a.note,
         bank=_bank_path(a.bank) if a.bank else "", manager=a.manager,
         profile_level=a.profile_level,
@@ -109,9 +113,12 @@ def cmd_start(a) -> int:
         baseline=json.loads(a.baseline) if a.baseline else {})
     if a.base:
         cfg = cfg.with_base(a.base)          # refuses here, not in the daemon's log
-    cfg_path = root / "fleet.json"
-    cfg.save(cfg_path)
+    return cfg
 
+
+def _spawn_daemon(root: pathlib.Path, argv: list[str], session_id: str) -> int:
+    """Start a detached process under `caffeinate`, logging to
+    `<root>/daemon.log`, its pid in `<root>/daemon.pid`."""
     log = (root / "daemon.log").open("a")
     # The daemon lives on this laptop because the agents are this laptop's
     # Claude Code login. If the laptop sleeps, so does the fleet: on
@@ -119,16 +126,28 @@ def cmd_start(a) -> int:
     # GPUs they had rented kept running. `caffeinate -i -s` holds off idle
     # and AC sleep for as long as the daemon runs; it cannot override a
     # closed lid without an external display, so the TUI also reports gaps.
-    daemon = [sys.executable, "-m", "harness.daemon", "--config", str(cfg_path)]
     caff = shutil.which("caffeinate")
     proc = subprocess.Popen(
-        [caff, "-i", "-s", *daemon] if caff else daemon,
+        [caff, "-i", "-s", *argv] if caff else argv,
         stdout=log, stderr=subprocess.STDOUT,
         # Its own process group, so closing this terminal (or Ctrl-C here)
         # does not take down a fleet holding rented GPUs.
         start_new_session=True,
         env={**os.environ, "HARNESS_SESSION": session_id})
     (root / "daemon.pid").write_text(str(proc.pid))
+    return proc.pid
+
+
+def cmd_start(a) -> int:
+    session_id = a.session or f"sess-{int(time.time())}"
+    root = pathlib.Path(a.root or (pathlib.Path.cwd() / "agents" / session_id))
+    root.mkdir(parents=True, exist_ok=True)
+    _refuse_second_daemon(root, session_id, a.force)
+    cfg = _config_from_args(a, session_id, str(root))
+    cfg_path = root / "fleet.json"
+    cfg.save(cfg_path)
+    pid = _spawn_daemon(root, [sys.executable, "-m", "harness.daemon",
+                               "--config", str(cfg_path)], session_id)
     print(f"session   {session_id}")
     fakes = [n for n, on in (("no GPUs", a.dry_run), ("scripted agents", a.fake_agents)) if on]
     print(f"agents    {a.agents}   eval capacity {a.evals}"
@@ -136,10 +155,79 @@ def cmd_start(a) -> int:
     print(f"root      {root}")
     if cfg.base:
         print(f"base      {cfg.base_digest}  {cfg.base_label}  ({cfg.base})")
-    print(f"pid       {proc.pid}   log {root / 'daemon.log'}")
+    print(f"pid       {pid}   log {root / 'daemon.log'}")
     print(f"\nwatch:    uv run harness --session {session_id} tui")
     print(f"stop:     uv run harness --session {session_id} stop")
     return 0
+
+
+# ── campaign ─────────────────────────────────────────────────────────────
+
+def _campaign_root(a, name: str) -> pathlib.Path:
+    return pathlib.Path(a.root or (pathlib.Path.cwd() / "agents" / name))
+
+
+def cmd_campaign(a) -> int:
+    """Fleets in sequence, each starting from the last round's best
+    publishable result (`harness.campaign`)."""
+    from . import campaign as cp
+    from .daemon import check
+
+    if a.action == "start":
+        name = a.session or f"camp-{int(time.time())}"
+        root = _campaign_root(a, name)
+        root.mkdir(parents=True, exist_ok=True)
+        _refuse_second_daemon(root, name, a.force)
+        (root / cp.STOP_FILE).unlink(missing_ok=True)
+        template = _config_from_args(a, name, "")
+        # Refused here, in the terminal: the first round's config is what
+        # the daemon would check an hour from now.
+        from dataclasses import asdict, replace
+        check(replace(template, session_id=cp.round_session(name, 1),
+                      root=str(cp.round_root(root, 1))))
+        cfg = cp.CampaignConfig(name=name, root=str(root), rounds=a.rounds,
+                                target=a.target, fleet=asdict(template))
+        cfg_path = root / cp.CONFIG_FILE
+        cfg.save(cfg_path)
+        pid = _spawn_daemon(root, [sys.executable, "-m", "harness.campaign",
+                                   "--config", str(cfg_path)], name)
+        print(f"campaign  {name}   {a.rounds} rounds, target {a.target}x")
+        print(f"rounds    sessions {cp.round_session(name, 1)} .. "
+              f"{cp.round_session(name, a.rounds)} under {root}")
+        if template.base:
+            print(f"base      {template.base_digest}  {template.base_label}  ({template.base})")
+        print(f"pid       {pid}   log {root / 'daemon.log'}")
+        print(f"\nwatch:    uv run harness campaign status --root {root}   "
+              f"| uv run harness --session {cp.round_session(name, 1)} tui")
+        print(f"stop:     uv run harness campaign stop --root {root}   "
+              "(or `harness --session <round> stop` to end after that round)")
+        return 0
+
+    name = a.session
+    root = _campaign_root(a, name) if (name or a.root) else None
+    if root is None or not (root / cp.STATE_FILE).is_file():
+        print("no campaign found: pass --root, or --session <campaign name>", file=sys.stderr)
+        return 1
+    state = json.loads((root / cp.STATE_FILE).read_text())
+    if a.action == "status":
+        if a.json:
+            print(json.dumps(state, indent=1, default=str))
+        else:
+            print(cp.status_text(state))
+        return 0
+    if a.action == "stop":
+        # The marker ends the chain between rounds; the stop command ends
+        # the round that is running now.
+        (root / cp.STOP_FILE).write_text(str(time.time()))
+        cur = state.get("current_session") or ""
+        if not cur or state.get("status") != "running":
+            print(f"campaign {state.get('name')} is {state.get('status')}; marked stopped")
+            return 0
+        a.session = cur
+        print(f"stopping round session {cur}; no further rounds will start")
+        return _send(a, "stop")
+    print(f"unknown action {a.action}")
+    return 2
 
 
 # ── read ─────────────────────────────────────────────────────────────────
@@ -760,17 +848,8 @@ def cmd_tui(a) -> int:
 
 # ── wiring ───────────────────────────────────────────────────────────────
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="harness", description=__doc__.split("\n")[0])
-    ap.add_argument("--store", default="",
-                    help="session database (default ~/.auto-inference/sessions.db; "
-                         "HARNESS_HOME moves it)")
-    ap.add_argument("--session", default="", help="session id (default: most recent)")
-    ap.add_argument("--wait", type=float, default=5.0,
-                    help="seconds to wait for stop/scale/agent to be acknowledged")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-
-    s = sub.add_parser("start", help="launch a fleet, detached")
+def _add_start_options(s) -> None:
+    """The `start` options; `campaign start` takes every one of them."""
     s.add_argument("--agents", type=int, default=4, help="agents running at once (default 4)")
     s.add_argument("--evals", type=int, default=2, help="concurrent GPU evaluations (default 2)")
     s.add_argument("--budget", type=float, default=200.0, help="$ ceiling for the fleet (default 200)")
@@ -778,6 +857,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="$ ceiling for one agent on one idea (default 40)")
     s.add_argument("--max-attempts", dest="max_attempts", type=int, default=6,
                    help="diffs one agent may evaluate on one idea (default 6)")
+    s.add_argument("--stall-minutes", dest="stall_minutes", type=float, default=40.0,
+                   help="cut a model call that has produced nothing for this long and "
+                        "restart the attempt (default 20; 0 never)")
+    s.add_argument("--no-auto-ablate", dest="auto_ablate", action="store_false",
+                   help="do not price a replicated win with its ablation.env kill "
+                        "switch set (default: one screen per replicated win)")
     s.add_argument("--model", default="sonnet", help="claude model: sonnet | opus (default sonnet)")
     s.add_argument("--gpu", default="H100", help="GPU every evaluation rents (default H100)")
     s.add_argument("--n-gpu", dest="n_gpu", type=int, default=1,
@@ -809,7 +894,31 @@ def main(argv: list[str] | None = None) -> int:
                    help="fake the agents too (saves subscription usage); "
                         "with --dry-run this exercises the whole fleet for free")
     s.add_argument("--note", default="", help="free text, recorded with the session")
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="harness", description=__doc__.split("\n")[0])
+    ap.add_argument("--store", default="",
+                    help="session database (default ~/.auto-inference/sessions.db; "
+                         "HARNESS_HOME moves it)")
+    ap.add_argument("--session", default="", help="session id (default: most recent)")
+    ap.add_argument("--wait", type=float, default=5.0,
+                    help="seconds to wait for stop/scale/agent to be acknowledged")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("start", help="launch a fleet, detached")
+    _add_start_options(s)
     s.set_defaults(fn=cmd_start)
+
+    cp = sub.add_parser("campaign", help="fleets in sequence, each on the last round's win")
+    cp.add_argument("action", choices=["start", "status", "stop"])
+    cp.add_argument("--rounds", type=int, default=3, help="start: fleets to chain (default 3)")
+    cp.add_argument("--target", type=float, default=2.0,
+                    help="start: stop once bill_per_1k has improved this many times "
+                         "over round one's baseline (default 2.0 = halved)")
+    cp.add_argument("--json", action="store_true", help="status: machine-readable")
+    _add_start_options(cp)
+    cp.set_defaults(fn=cmd_campaign)
 
     st = sub.add_parser("status", help="one-shot snapshot")
     st.add_argument("--json", action="store_true")

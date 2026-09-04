@@ -63,9 +63,16 @@ class _Slot:
     def __init__(self, agent_id: str):
         self.agent_id = agent_id
         self.stop = threading.Event()
+        # The proposer's `cancel`. Set with `stop` by kill, scale-down and
+        # fleet stop, and *alone* by the stall watch: then the call ends but
+        # the agent does not, and the loop restarts the attempt.
+        self.cancel = threading.Event()
         self.resume = threading.Event()
         self.resume.set()                       # not paused
         self.view = AgentView(agent_id=agent_id)
+        # When the agent last showed a sign of life through `report` (a
+        # token, an activity, a status). What the stall watch reads.
+        self.last_activity = time.time()
         # Spend the agent has already reported for its current idea, so the
         # outcome's total is not counted twice when the idea ends.
         self.reported_usd = 0.0
@@ -84,7 +91,8 @@ class Fleet:
 
     def __init__(self, make_agent, evals, *, store=None, session_id: str = "",
                  root: str = "", similarity_threshold: float = 0.6,
-                 tick_s: float = 1.0, max_reseeds: int = 4):
+                 tick_s: float = 1.0, max_reseeds: int = 4,
+                 stall_s: float = 40 * 60):
         self.make_agent = make_agent
         self._evals = evals
         self.store = store
@@ -93,6 +101,10 @@ class Fleet:
         self.similarity_threshold = similarity_threshold
         self.tick_s = tick_s
         self.max_reseeds = max_reseeds
+        # A model call in `thinking` that has produced nothing for this long
+        # is cut and the attempt restarted (see `_watch_stalls`). 0 disables.
+        self.stall_s = stall_s
+        self._stalls = 0
 
         self._lock = threading.RLock()
         self._state = FleetState()
@@ -170,6 +182,7 @@ class Fleet:
         with self._lock:
             for s in self._slots.values():
                 s.stop.set()
+                s.cancel.set()
                 s.resume.set()                  # unblock anyone paused
         if self._pool is not None:
             self._pool.shutdown(wait=True)
@@ -229,6 +242,7 @@ class Fleet:
             if s is None or s.view.status in self.FINISHED:
                 return False
             s.stop.set()
+            s.cancel.set()
             s.resume.set()
             s.view = replace(s.view, status="stopping")
         if self.root:
@@ -259,6 +273,7 @@ class Fleet:
                 for s in sorted(live, key=lambda x: x.agent_id, reverse=True)[
                         :len(live) - target]:
                     s.stop.set()
+                    s.cancel.set()
                     s.resume.set()
                     s.view = replace(s.view, status="stopping")
             return target
@@ -275,6 +290,11 @@ class Fleet:
     def stop_event(self, agent_id: str) -> threading.Event:
         s = self._slots.get(agent_id)
         return s.stop if s is not None else self._stop
+
+    def cancel_event(self, agent_id: str) -> threading.Event:
+        """The slot's `cancel`: what the proposer's model call watches."""
+        s = self._slots.get(agent_id)
+        return s.cancel if s is not None else self._stop
 
     def should_stop(self, agent_id: str) -> bool:
         self._poll_commands()
@@ -300,6 +320,8 @@ class Fleet:
             if s is None:
                 return
             tok = fields.pop("tokens", None)
+            if tok is not None or "activity" in fields or "status" in fields:
+                s.last_activity = time.time()
             # `cost_delta` is spend that just happened. It lands in the fleet
             # total immediately; the alternative -- summing outcomes when an
             # idea ends -- left the dashboard at $0.00 and the budget blind
@@ -327,7 +349,7 @@ class Fleet:
             s.view = replace(s.view, updated_at=time.time(),
                              **{k: v for k, v in fields.items()
                                 if hasattr(s.view, k)})
-            if tok is not None:
+            if tok is not None and tok.total:
                 s.view = replace(s.view, tokens=s.view.tokens + tok)
                 if self.store is not None:
                     self.store.add_tokens(self.session_id, agent_id, tok)
@@ -360,13 +382,14 @@ class Fleet:
             live = tuple(i.hypothesis + " " + i.title for i in self._live_ideas)
             tried = tuple(o.idea.hypothesis for o in self._completed[-20:])
             seed = self._spec.base_seed if self._spec is not None else ""
+            given = tuple(self._spec.avoid) if self._spec is not None else ()
         # No `live_scales`: an `Idea` does not carry the record's `scale`, so
         # what used to be passed here was a tuple of empty strings and the
         # bank's scale tie-break never fired. Diversity is the text distance
         # above. Making the tie-break live means tracking claimed scales, which
         # changes which record an agent gets -- a decision, not a cleanup.
         kw = {"seed": seed} if seed else {}
-        rec = self.bank.claim(agent_id, avoid=live + tried, **kw)
+        rec = self.bank.claim(agent_id, avoid=live + tried + given, **kw)
         if rec is None:
             return None
         idea = replace(rec.as_idea(), design=_design_note(rec))
@@ -464,13 +487,50 @@ class Fleet:
             if self.root and now - self._summary_at > self.SUMMARY_EVERY_S:
                 self._summary_at = now
                 self.write_summary()
-            if not self._within_budget() and self._state.running:
-                # Out of budget: the agents' own loops end at their next
-                # checkpoint; flag the fleet as not running so the daemon
-                # calls `stop`, and keep publishing until it does.
+            self._watch_stalls(now)
+            if self._state.running and (not self._within_budget() or self._all_finished()):
+                # Out of budget, or every agent has finished (the bank ran
+                # dry, or each idea ended): the agents' own loops end at
+                # their next checkpoint; flag the fleet as not running so
+                # the daemon calls `stop`, and keep publishing until it does.
                 with self._lock:
                     self._state = replace(self._state, running=False)
             time.sleep(self.tick_s)
+
+    def _all_finished(self) -> bool:
+        with self._lock:
+            return bool(self._slots) and all(
+                s.view.status in self.FINISHED for s in self._slots.values())
+
+    def _watch_stalls(self, now: float) -> None:
+        """Cut a model call that has gone quiet, and let the loop retry.
+
+        A `claude -p` that hangs -- the API stops answering mid-stream, a
+        tool call never returns -- looks exactly like one thinking hard,
+        and on a two-hour edit timeout that is two hours of an agent slot
+        rented for nothing. The stream reports every message and every tool
+        result through `report`, so silence for `stall_s` while the row says
+        `thinking` is the tell. Only the call is cut: `cancel` is set without
+        `stop`, the loop sees a cancelled call it did not ask for, records
+        `stalled`, resets the workspace and starts the attempt again.
+
+        Not while `evaluating`: a study is meant to be quiet, and the sweep
+        it waits on is paid for. Not while paused or stopping either.
+        """
+        if not self.stall_s:
+            return
+        with self._lock:
+            for s in self._slots.values():
+                if (s.view.status != "thinking" or s.stop.is_set()
+                        or s.cancel.is_set() or now - s.last_activity < self.stall_s):
+                    continue
+                mins = (now - s.last_activity) / 60
+                s.cancel.set()
+                s.last_activity = now
+                self._stalls += 1
+                s.view = replace(
+                    s.view, stalls=s.view.stalls + 1, updated_at=now,
+                    activity=f"stalled: no output for {mins:.0f} min, restarting the attempt")
 
     # How often the on-disk summary is refreshed while running. It exists so
     # a daemon that dies leaves a near-current picture in the run directory.
@@ -544,6 +604,10 @@ class Fleet:
         with self._lock:
             self._slept_s += seconds
             self._sleep_note = msg
+            # A frozen host is not a stalled model: the call it froze
+            # resumes with it, and cutting it would lose the work.
+            for s in self._slots.values():
+                s.last_activity = time.time()
         print(f"WARNING: {msg}; agents were frozen, rented GPUs were not",
               flush=True)
 
@@ -577,6 +641,7 @@ class Fleet:
             with self._lock:
                 for s in self._slots.values():
                     s.stop.set()
+                    s.cancel.set()
                     s.resume.set()
             return "stopping fleet: model calls cancelled, paid sweeps finish"
         return "noted"

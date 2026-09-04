@@ -219,6 +219,10 @@ class ClaudeCodeProposer:
     use_api_key: bool = False
     # Set by the agent loop so token use lands on the right dashboard row.
     on_tokens: object | None = None
+    # Called, with nothing, on every tool result in the stream: a sign of
+    # life that carries no tokens, so the fleet's stall watch sees a call
+    # moving through a long gpu-run rather than cutting it as silent.
+    on_progress: object | None = None
     # The manager's shared tools for this run, as an index the agent reads
     # with the brief. A callable, because the index grows while the run is
     # on and the prompt must carry what exists *now*.
@@ -852,6 +856,9 @@ class _CallAccounting:
             row["tool_result_chars"] = sum(
                 len(str(b.get("content", ""))) for b in content
                 if isinstance(b, dict) and b.get("type") == "tool_result")
+            if self.p.on_progress is not None:
+                with contextlib.suppress(Exception):
+                    self.p.on_progress()
         elif kind == "result":
             row.update({"duration_ms": d.get("duration_ms"), "num_turns": d.get("num_turns"),
                         "is_error": d.get("is_error"), "total": _usage(d.get("usage")).__dict__})
@@ -958,6 +965,16 @@ numerics change scored top-1 agreement exactly 1.0000 with |dlogprob| exactly
 0.0000, which is the tell that the candidate ran stock, and cost a workbench
 run to learn. Export the variable inside your script, or make the change
 default-on with an env kill switch.
+
+**Declare the kill switch.** If your change can be switched off -- an env
+variable the server reads, which every kernel-scale change should have --
+write `ablation.env` in this directory, one `KEY=VAL` per line, with the
+setting that makes the new path inert (e.g. `SGLANG_DISABLE_MY_KERNEL=1`).
+When a full-tier win of yours replicates, the harness prices the stack once
+more with that env set and records whether the price returns to baseline:
+that ablation is what makes a win *publishable*. A win with no `ablation.env`
+is recorded but cannot be published, because nothing shows the mechanism is
+what moved the price.
 
 When done, reply with 4-8 sentences: the mechanism you implemented, and the
 numbers off your workbench -- micro-benchmark speedup, the correctness error

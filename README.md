@@ -90,7 +90,29 @@ uv run harness --session build-2 start --agents 3 --evals 2 --model opus \
 Step 5 is the loop that compounds: every agent's "stock" becomes the base
 (its edits, diff and no-change check are all relative to it), the stack it
 evaluates is base plus its own edits, and bank claims are steered toward the
-idea that produced the base. Repeat with the winner of each fleet.
+idea that produced the base. Repeat with the winner of each fleet -- or let
+the campaign do it:
+
+```bash
+# 4+5, unattended: fleets in sequence, each on the last round's best
+# publishable result, until the bill has halved or four rounds are spent
+uv run harness --session camp-1 campaign start --rounds 4 --target 2.0 \
+  --agents 3 --evals 2 --model opus --bank --manager --budget 200 \
+  --agent-budget 70 --max-attempts 4 --baseline '{...}'
+uv run harness campaign status --session camp-1     # rounds, bases, baselines, gain, the chain
+uv run harness --session camp-1-r1 tui              # each round is an ordinary session
+uv run harness campaign stop --session camp-1       # now; `harness --session camp-1-r2 stop` ends after that round
+```
+
+Round `n` runs as session `camp-1-r<n>` under `agents/camp-1/r<n>/`. When it
+ends, the driver picks the round's best publishable result (falling back to
+the best replicated win, and saying so), makes its run directory the next
+`--base`, and sets the next `--baseline` from that run's own report -- the
+full bill, the screen bill from the same stack's screen attempt (scaled by
+the fleet's screen/full ratio when there was none) and its accuracy per
+suite. Every idea earlier rounds tried is passed as `avoid`, and the base's
+own idea seeds the claims. `agents/camp-1/campaign.json` is rewritten after
+every round.
 
 The baseline numbers come from step 1's reports. `harness start` refuses a
 baseline it cannot score against, and refuses to start without a bank:
@@ -169,9 +191,24 @@ prices the stack twice, as is and with the mechanism's kill switch set on the
 server, and writes `ablations/<n>/ablation.json`: both prices, N\*, the share of
 the delta the mechanism accounts for, and whether the disabled stack returns
 to within 3% of baseline. Two sweeps of real money, run once on the diff that
-won. `harness results` and the TUI show a `pub` column -- `yes`, `no`,
+won -- and run automatically: the agent declares its kill switch in
+`ablation.env` beside its code (one `KEY=VAL` per line), and when a full-tier
+win replicates the loop ablates it at screen tier on the spot, records the
+verdict in the trace and the attempt, and never lets it fail the idea. A win
+with no `ablation.env` stays `no-ablation`; `--no-auto-ablate` turns the
+step off. `harness results` and the TUI show a `pub` column -- `yes`, `no`,
 `no-replicate`, `no-ablation` -- from `results.publishable`: verdict win,
 replicated, gates held, ablation explains it (`docs/methodology.md` §5f).
+
+**Stalled calls are restarted, not waited on.** A `claude -p` that hangs
+mid-stream looks exactly like one thinking hard. The stream reports every
+message and tool result to the fleet, so a call in `thinking` that has
+produced nothing for `--stall-minutes` (default 20) is cut: the slot's
+`cancel` is set without its `stop`, the row says `stalled`, the loop records
+a `stalled` turn, resets the workspace so the half-written diff is never
+priced, and starts the next attempt of the same idea, counted against
+`--max-attempts` and patience. A host sleep is not a stall; an operator's
+stop or kill still ends the agent.
 
 **What agents know.** Three skills are written into each agent's directory
 before every edit and again into the paper directory before the write-up:
