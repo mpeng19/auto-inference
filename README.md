@@ -104,24 +104,6 @@ uv run harness --session camp-1-r1 tui              # each round is an ordinary 
 uv run harness campaign stop --session camp-1       # now; `harness --session camp-1-r2 stop` ends after that round
 ```
 
-Round `n` runs as session `camp-1-r<n>` under `agents/camp-1/r<n>/`. When it
-ends, the driver picks the round's best publishable result (falling back to
-the best replicated win, and saying so), makes its run directory the next
-`--base`, and sets the next `--baseline` from that run's own report -- the
-full bill, the screen bill from the same stack's screen attempt (scaled by
-the fleet's screen/full ratio when there was none) and its accuracy per
-suite. Every idea earlier rounds tried is passed as `avoid`, and the base's
-own idea seeds the claims. `agents/camp-1/campaign.json` is rewritten after
-every round.
-
-The baseline numbers come from step 1's reports. `harness start` refuses a
-baseline it cannot score against, and refuses to start without a bank:
-either one missing is a way the fleet runs all night and learns nothing. Step
-2 is not checked, because the reference is built on first use -- running it
-once up front just means no agent pays the five minutes for it.
-`docs/methodology.md` has the findings that shaped these defaults and
-`docs/examples/README.md` what a run leaves behind.
-
 ## How a stack is priced
 
 1. **Sweep concurrency** with N closed-loop users replaying real coding-agent
